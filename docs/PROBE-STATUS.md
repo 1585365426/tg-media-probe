@@ -40,12 +40,11 @@
 
 | 项目 | 原因 |
 |---|---|
-| iOS 编译 / CocoaPods 装配 / 原生库链接 | 本机 Windows，无 Xcode / CocoaPods |
-| Podfile & podspec 的 Ruby 语法 | 本机无 ruby / pod |
-| GitHub Actions 实跑 | `.github/workflows/ios-probe.yml` 尚未推上去：令牌缺 `workflow` scope |
-| 生成的 `.app` / IPA / SHA256 | 依赖 CI |
-| TrollStore 安装、启动 | 依赖 IPA + 真机 |
-| 真实登录 / 频道 / 元数据 / 播放 / 下载 | 依赖可安装产物 + 真机 + 用户自己的 api_id/hash |
+| TrollStore 安装、启动 | 依赖真机，**未执行** |
+| 真实登录 / 频道 / 元数据 / 播放 / 下载 | 依赖可安装产物 + 真机 + 用户自己的 api_id/hash，**未验证** |
+| 缓存清理安全行为 | 第 3 步实现后才有对象 |
+
+> iOS 编译、CocoaPods 装配、TDLib 静态链接、IPA 打包已在 GitHub Actions 真实跑通，详见 `docs/CI-RUN-REPORT.md`：run [40198573231](https://github.com/1585365426/tg-media-probe/actions/runs/40198573231) success，IPA 19 MB，SHA256 `326d69f4…3ae42c`（本机重算一致），`minos 15.2` / `sdk 26.5` / arm64。
 
 ## 3. 关键实测结论
 
@@ -54,19 +53,11 @@
 3. **本机网络**：默认代理 `127.0.0.1:51544` 已死；`127.0.0.1:10808`（SOCKS5）可用，`api.telegram.org` 302、`core.telegram.org` 200。TDLib 若要在本机做协议级验证可走 `addProxy` socks5。
 4. **GitHub 令牌作用域**：`gist, read:org, repo`，缺 `workflow`，所以 workflow 文件被 API 拒收。
 
-## 4. 唯一待解阻塞：workflow scope
+## 4. 构建通道（已通）
 
-方式 A（推荐，一条命令）：本地执行
-
-```bash
-gh auth refresh -h github.com -s workflow
-```
-
-浏览器会给出一次性码，确认后作用域变为 `gist, read:org, repo, workflow`，随后 workflow 即可推送。
-
-方式 B：网页新建
-https://github.com/1585365426/tg-media-probe/new/main/.github/workflows/ios-probe.yml
-内容 = 工作副本 `.github/workflows/ios-probe.yml`（19 steps）。
+GitHub Actions `macos-26`（Xcode 26.6 / Swift 6.3.3 / iOS SDK 26.5 / CocoaPods 1.17.0）实际构建成功：
+run [40198573231](https://github.com/1585365426/tg-media-probe/actions/runs/40198573231)。
+前两次失败的根因（Xcode 16.4 缺 `isolation:` 重载、`td_send/receive/execute` 被 dead-strip）与修复记录在 `docs/CI-RUN-REPORT.md`。
 
 ## 5. 探针链路设计（代码就位，未跑通）
 
