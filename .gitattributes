@@ -1,0 +1,15 @@
+# Windows checkout must not corrupt the Linux/macOS build inputs.
+* text=auto eol=lf
+
+*.sh            text eol=lf
+*.yml           text eol=lf
+*.yaml          text eol=lf
+*.dart          text eol=lf
+*.podspec       text eol=lf
+*.rb            text eol=lf
+Podfile         text eol=lf
+*.plist         text eol=lf
+*.xcconfig      text eol=lf
+
+*.zip           binary
+*.xcframework   binary
