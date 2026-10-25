@@ -1,61 +1,142 @@
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:path/path.dart' as p;
+import 'package:tg_media_probe/security/td_readonly_guard.dart';
+import 'package:tg_media_probe/td/td_requests.dart';
 
-/// Static guard: the app must stay read-only towards Telegram cloud data.
-///
-/// A UI that merely hides a button is not a guarantee. This test fails the
-/// build if any source file under lib/ so much as names a cloud-mutating
-/// TDLib method, which makes "accidentally shipping a delete path" impossible
-/// without deliberately editing this test.
+List<File> _libSources() => Directory('lib')
+    .listSync(recursive: true)
+    .whereType<File>()
+    .where((f) => f.path.endsWith('.dart'))
+    .toList();
+
+const String _guardFile = 'lib/security/td_readonly_guard.dart';
+
 void main() {
-  const forbidden = <String>[
-    'deleteMessages',
-    'deleteChatHistory',
-    'deleteChat',
-    'deleteMessage',
-    'leaveChat',
-    'sendMessage',
-    'forwardMessages',
-    'sendVideo',
-    'sendPhoto',
-    'sendDocument',
-    'editMessageText',
-    'editMessageCaption',
-    'editMessageMedia',
-    'editMessageReplyMarkup',
-  ];
-
-  test('lib/ contains no cloud-mutating TDLib calls', () {
-    final libDir = Directory('lib');
-    expect(libDir.existsSync(), isTrue);
-
-    final offenders = <String>[];
-    for (final entity in libDir.listSync(recursive: true)) {
-      if (entity is! File || !entity.path.endsWith('.dart')) continue;
-      final source = entity.readAsStringSync();
-      for (final name in forbidden) {
-        if (source.contains(name)) {
-          offenders.add('${entity.path}: $name');
+  group('static guard', () {
+    test('no source file names a cloud-mutating TDLib method', () {
+      final offenders = <String>[];
+      for (final file in _libSources()) {
+        if (p.normalize(file.path) == p.normalize(_guardFile)) continue;
+        final source = file.readAsStringSync();
+        for (final name in TdReadOnlyGuard.scanPatterns) {
+          if (RegExp('\\b${RegExp.escape(name)}\\b').hasMatch(source)) {
+            offenders.add('${file.path}: $name');
+          }
         }
       }
-    }
-    expect(offenders, isEmpty,
-        reason: 'read-only violation:\n${offenders.join('\n')}');
+      expect(offenders, isEmpty,
+          reason: 'TG Media is read-only towards Telegram. Offending '
+              'references:\n${offenders.join('\n')}');
+    });
+
+    test('TdClient enforces the guard at its single request choke point', () {
+      final source = File('lib/td/td_client.dart').readAsStringSync();
+      expect(source, contains('TdReadOnlyGuard.assertAllowed'));
+      // The guard call has to happen before the payload is handed to tdjson.
+      final guardIndex = source.indexOf('TdReadOnlyGuard.assertAllowed');
+      final sendIndex = source.indexOf('_bindings.sendJson');
+      expect(guardIndex, greaterThan(0));
+      expect(sendIndex, greaterThan(guardIndex),
+          reason: 'guard must run before sendJson');
+    });
+
+    test('the storage layer cannot reach Telegram at all', () {
+      final offenders = <String>[];
+      for (final file in _libSources()) {
+        if (!p.normalize(file.path).contains(p.normalize('lib/storage'))) {
+          continue;
+        }
+        final source = file.readAsStringSync();
+        for (final needle in <String>[
+          'TdClient',
+          'TdReadOnlyGuard',
+          "'../td/",
+          "package:tg_media_probe/td/",
+        ]) {
+          if (source.contains(needle)) offenders.add('${file.path}: $needle');
+        }
+      }
+      expect(offenders, isEmpty,
+          reason: 'cache code must not be able to call TDLib:\n'
+              '${offenders.join('\n')}');
+    });
+
+    test('the cache manager has no network dependency', () {
+      final source = File('lib/storage/cache_manager.dart').readAsStringSync();
+      expect(source.contains('HttpClient'), isFalse);
+      expect(source.contains('Socket'), isFalse);
+    });
   });
 
-  test('cache or download code never references Telegram deletion APIs', () {
-    // The probe has no cache layer yet; this asserts the invariant holds for
-    // any file that mentions cache/temp handling so step 3 inherits it.
-    final hits = <String>[];
-    for (final entity in Directory('lib').listSync(recursive: true)) {
-      if (entity is! File || !entity.path.endsWith('.dart')) continue;
-      final source = entity.readAsStringSync().toLowerCase();
-      if (!source.contains('cache') && !source.contains('temp')) continue;
-      if (source.contains('delete')) {
-        hits.add(entity.path);
+  group('runtime guard', () {
+    test('rejects every cloud-mutating method', () {
+      expect(TdReadOnlyGuard.cloudMutatingMethods.length, greaterThan(40));
+      for (final method in TdReadOnlyGuard.cloudMutatingMethods) {
+        expect(
+          () => TdReadOnlyGuard.assertAllowed(method),
+          throwsA(isA<TdReadOnlyViolation>()),
+          reason: '$method must be rejected',
+        );
       }
-    }
-    expect(hits, isEmpty, reason: 'review deletion logic in: $hits');
+    });
+
+    test('the core deletions from the task book are covered', () {
+      for (final method in <String>[
+        'deleteMessages',
+        'deleteChatHistory',
+        'deleteChat',
+        'deleteSupergroup',
+        'forwardMessages',
+        'sendMessage',
+        'editMessageText',
+      ]) {
+        expect(TdReadOnlyGuard.isCloudMutating(method), isTrue,
+            reason: '$method must be classified as a cloud write');
+      }
+    });
+
+    test('allows every request the app actually builds', () {
+      final payloads = <Map<String, Object?>>[
+        setTdlibParameters(
+          apiId: 1,
+          apiHash: 'hash',
+          databaseDirectory: '/tmp/db',
+          filesDirectory: '/tmp/files',
+        ),
+        getAuthorizationState(),
+        setAuthenticationPhoneNumber('+10000000000'),
+        checkAuthenticationCode('12345'),
+        checkAuthenticationPassword('pw'),
+        getChats(),
+        getChat(1),
+        getChatHistory(chatId: 1),
+        getMessage(chatId: 1, messageId: 2),
+        getFile(3),
+        downloadFile(fileId: 4),
+        cancelDownloadFile(fileId: 4),
+        getMe(),
+      ];
+      for (final payload in payloads) {
+        expect(() => TdReadOnlyGuard.assertAllowed(payload['@type']),
+            returnsNormally,
+            reason: '${payload['@type']} must stay usable');
+      }
+    });
+
+    test('deleteFile is documented as local-only and allowed', () {
+      expect(TdReadOnlyGuard.isLocalOnly('deleteFile'), isTrue);
+      expect(() => TdReadOnlyGuard.assertAllowed('deleteFile'), returnsNormally);
+    });
+
+    test('rejects a missing or non-string @type', () {
+      expect(() => TdReadOnlyGuard.assertAllowed(null),
+          throwsA(isA<TdReadOnlyViolation>()));
+      expect(() => TdReadOnlyGuard.assertAllowed(42),
+          throwsA(isA<TdReadOnlyViolation>()));
+      expect(() => TdReadOnlyGuard.assertAllowed(''),
+          throwsA(isA<TdReadOnlyViolation>()));
+    });
   });
 }

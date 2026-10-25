@@ -3,6 +3,7 @@ import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 
+import '../security/td_readonly_guard.dart';
 import 'td_models.dart';
 import 'tdjson_ffi.dart';
 
@@ -101,6 +102,10 @@ class TdClient {
     if (_disposed) {
       throw StateError('TdClient already disposed');
     }
+    // Single choke point for the read-only contract: nothing reaches TDLib
+    // without passing this check, so a cloud write cannot be smuggled in by a
+    // new caller that forgets the rule.
+    TdReadOnlyGuard.assertAllowed(payload['@type'], source: 'TdClient.request');
     final extra = _nextExtra++;
     final request = <String, Object?>{...payload, '@extra': extra};
     final completer = Completer<Map<String, Object?>>();

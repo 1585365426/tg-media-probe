@@ -4,11 +4,11 @@
 
 ## 运行链接
 
-| # | Run | 结果 | 耗时 | 失败点 |
-|---|---|---|---|---|
-| 1 | https://github.com/1585365426/tg-media-probe/actions/runs/40197274279 | failure | 4m08s | `flutter build ios`：video_player_avfoundation 用了 Xcode 26 SDK 才有的 `isolation:` 参数 |
-| 2 | https://github.com/1585365426/tg-media-probe/actions/runs/40197805319 | failure | 5m49s | 构建已通过；符号校验发现 `td_send / td_receive / td_execute` 被 dead-strip |
-| 3 | https://github.com/1585365426/tg-media-probe/actions/runs/40198573231 | **success** | 6m19s | — |
+| # | Run                                                                     | 结果          | 耗时    | 失败点                                                                               |
+| - | ----------------------------------------------------------------------- | ----------- | ----- | --------------------------------------------------------------------------------- |
+| 1 | <https://github.com/1585365426/tg-media-probe/actions/runs/40197274279> | failure     | 4m08s | `flutter build ios`：video_player_avfoundation 用了 Xcode 26 SDK 才有的 `isolation:` 参数 |
+| 2 | <https://github.com/1585365426/tg-media-probe/actions/runs/40197805319> | failure     | 5m49s | 构建已通过；符号校验发现 `td_send / td_receive / td_execute` 被 dead-strip                     |
+| 3 | <https://github.com/1585365426/tg-media-probe/actions/runs/40198573231> | **success** | 6m19s | —                                                                                 |
 
 成功运行对应提交：`42b8a4f`（main）
 
@@ -48,25 +48,25 @@ nm -gU Runner        000000010152e91c T _td_create_client_id
 
 ## 产物
 
-| 项 | 值 |
-|---|---|
-| 文件 | `TGMediaProbe-unsigned.ipa` |
-| 大小 | 19,442,605 字节（19 MB） |
-| SHA256（CI 声明） | `326d69f48811a71f36d0ee07071e3d1260bf174a9ee79e498c9f4957733ae42c` |
-| SHA256（本机独立重算） | `326d69f48811a71f36d0ee07071e3d1260bf174a9ee79e498c9f4957733ae42c` ✅ 一致 |
-| 结构 | zip 78 项，单一 `Payload/Runner.app` |
-| Runner 可执行文件 | 41.9 MB，Mach-O 64-bit thin，cputype 16777228 = **arm64** |
-| `MinimumOSVersion` | **15.2** |
-| `LC_BUILD_VERSION` | platform 2 (iOS), **minos 15.2**, sdk 26.5 |
-| CFBundleIdentifier | `com.tgmedia.tgMediaProbe` |
-| CFBundleDisplayName | TG Media Probe |
-| UIDeviceFamily | `[1, 2]`（iPhone / iPad） |
-| UIRequiredDeviceCapabilities | `[arm64]` |
-| 内嵌 Frameworks | `App.framework` / `Flutter.framework` / `objective_c.framework` + 两个插件 bundle |
-| 是否内嵌 TDLib 动态库 | **无**（静态链接进 Runner，符合预期） |
-| 代码签名 | **无**（`--no-codesign`，由 TrollStore 安装时自行签名） |
-| 本机副本 | `artifacts/run-40198573231/build/ios/ipa/TGMediaProbe-unsigned.ipa` |
-| CI 侧完整日志 | 同一目录 `ci-report/*.txt`（24 个文件），另见 `ci-report` 分支 |
+| 项                            | 值                                                                             |
+| ---------------------------- | ----------------------------------------------------------------------------- |
+| 文件                           | `TGMediaProbe-unsigned.ipa`                                                   |
+| 大小                           | 19,442,605 字节（19 MB）                                                          |
+| SHA256（CI 声明）                | `326d69f48811a71f36d0ee07071e3d1260bf174a9ee79e498c9f4957733ae42c`            |
+| SHA256（本机独立重算）               | `326d69f48811a71f36d0ee07071e3d1260bf174a9ee79e498c9f4957733ae42c` ✅ 一致       |
+| 结构                           | zip 78 项，单一 `Payload/Runner.app`                                              |
+| Runner 可执行文件                 | 41.9 MB，Mach-O 64-bit thin，cputype 16777228 = **arm64**                       |
+| `MinimumOSVersion`           | **15.2**                                                                      |
+| `LC_BUILD_VERSION`           | platform 2 (iOS), **minos 15.2**, sdk 26.5                                    |
+| CFBundleIdentifier           | `com.tgmedia.tgMediaProbe`                                                    |
+| CFBundleDisplayName          | TG Media Probe                                                                |
+| UIDeviceFamily               | `[1, 2]`（iPhone / iPad）                                                       |
+| UIRequiredDeviceCapabilities | `[arm64]`                                                                     |
+| 内嵌 Frameworks                | `App.framework` / `Flutter.framework` / `objective_c.framework` + 两个插件 bundle |
+| 是否内嵌 TDLib 动态库               | **无**（静态链接进 Runner，符合预期）                                                      |
+| 代码签名                         | **无**（`--no-codesign`，由 TrollStore 安装时自行签名）                                   |
+| 本机副本                         | `artifacts/run-40198573231/build/ios/ipa/TGMediaProbe-unsigned.ipa`           |
+| CI 侧完整日志                     | 同一目录 `ci-report/*.txt`（24 个文件），另见 `ci-report` 分支                              |
 
 ## 第一次失败：Xcode 16.4 编不过插件
 
@@ -79,10 +79,10 @@ func load<T>(_ property: AVAsyncProperty<AVAsset, T>, isolation: isolated (any A
 let naturalSize = try await videoTrack.load(.naturalSize, isolation: #isolation)
 ```
 
-`isolation:` 这个重载只在 iOS 26 SDK 存在，Xcode 16.4 报
+`isolation:` 这个重载只在 iOS 26 SDK 存在，Xcode 16.4 报  
 `Extra argument 'isolation' in call` / `Extraneous argument label 'isolation:'`。
 
-修复：runner 改 `macos-26`（Xcode 26.6），并加断言步骤（Xcode < 26 时自动 `xcode-select` 到 `Xcode_26*.app`，没有就 fail）。
+修复：runner 改 `macos-26`（Xcode 26.6），并加断言步骤（Xcode < 26 时自动 `xcode-select` 到 `Xcode_26*.app`，没有就 fail）。  
 Apple 官方 SDK 支持表：Xcode 26 的部署目标范围是 **iOS 15–26**，所以 15.2 不受影响（构建产物 `minos 15.2` 已证）。
 
 ## 第二次失败：符号被 dead-strip
@@ -108,15 +108,15 @@ ERROR: _td_execute missing from binary
 
 ## 状态口径（不可互相替代）
 
-| 状态 | 结论 |
-|---|---|
-| 代码已编写 | ✅ |
-| 自动化测试已通过（37 passed / 1 skipped） | ✅ |
-| iOS 包已构建成功（Xcode 26.6，arm64，minos 15.2） | ✅ |
-| IPA 已生成并本地校验 SHA256 | ✅ |
-| IPA 已安装到 iPhone 11 Pro | ❌ **未执行** |
-| Telegram 真实登录 | ❌ **未验证** |
-| 真实频道列表 / 媒体元数据 | ❌ **未验证** |
-| 真实视频播放 | ❌ **未验证** |
-| 真实媒体下载 | ❌ **未验证** |
-| 缓存清理安全测试 | ❌ **未验证**（第 3 步实现后才有对象） |
+| 状态                                      | 结论                      |
+| --------------------------------------- | ----------------------- |
+| 代码已编写                                   | ✅                       |
+| 自动化测试已通过（37 passed / 1 skipped）         | ✅                       |
+| iOS 包已构建成功（Xcode 26.6，arm64，minos 15.2） | ✅                       |
+| IPA 已生成并本地校验 SHA256                     | ✅                       |
+| IPA 已安装到 iPhone 11 Pro                  | ❌ **未执行**               |
+| Telegram 真实登录                           | ❌ **未验证**               |
+| 真实频道列表 / 媒体元数据                          | ❌ **未验证**               |
+| 真实视频播放                                  | ❌ **未验证**               |
+| 真实媒体下载                                  | ❌ **未验证**               |
+| 缓存清理安全测试                                | ❌ **未验证**（第 3 步实现后才有对象） |
