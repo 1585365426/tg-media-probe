@@ -10,8 +10,15 @@ dependencies:
   flutter:
     sdk: flutter
   cupertino_icons: ^1.0.8
+  # PBKDF2-HMAC-SHA256 for the app passcode. SHA-256 and HMAC are the only
+  # primitives used; no bespoke crypto is written here.
+  crypto: ^3.0.6
   ffi: ^2.1.2
+  # Keychain-backed storage for the TDLib database key and the passcode hash.
   flutter_secure_storage: ^9.2.2
+  # Face ID / Touch ID, with a hard fallback to the passcode when the
+  # hardware is missing or the scan fails.
+  local_auth: ^2.3.0
   path: ^1.9.0
   path_provider: ^2.1.4
   video_player: ^2.9.2

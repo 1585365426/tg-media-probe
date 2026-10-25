@@ -13,6 +13,13 @@ abstract class PlayerHandle {
   Future<void> play();
   Future<void> pause();
 
+  /// 0.0 = muted, 1.0 = full volume.
+  ///
+  /// Part of the interface because the feed must apply the mute state to each
+  /// newly activated player: every cold start begins muted, and a swipe to the
+  /// next video has to inherit whatever the user last chose.
+  Future<void> setVolume(double volume);
+
   /// Stops playback, detaches listeners and releases the decoder.
   Future<void> disposePlayer();
 }

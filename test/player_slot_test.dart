@@ -69,6 +69,13 @@ class FakePlayer implements PlayerHandle {
     }
   }
 
+  double volume = 1;
+
+  @override
+  Future<void> setVolume(double value) async {
+    volume = value.clamp(0.0, 1.0);
+  }
+
   @override
   Future<void> disposePlayer() async {
     if (_disposed) return;

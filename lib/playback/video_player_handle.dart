@@ -74,6 +74,14 @@ class VideoPlayerHandle implements PlayerHandle {
   }
 
   @override
+  Future<void> setVolume(double volume) async {
+    final controller = _controller;
+    if (controller == null || _disposed) return;
+    if (!controller.value.isInitialized) return;
+    await controller.setVolume(volume.clamp(0.0, 1.0));
+  }
+
+  @override
   Future<void> disposePlayer() async {
     if (_disposed) return;
     _disposed = true;

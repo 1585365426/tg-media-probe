@@ -122,6 +122,14 @@ class StorageLayout {
   String get indexDir => indexRoot;
   String get authMetaDir => authRoot;
 
+  /// App preferences: theme mode, mute state, active filters.
+  ///
+  /// Lives under [StorageZone.authMeta] because it must survive a cache clear
+  /// just like the session does — a user who picked a duration filter and a
+  /// passcode does not expect either to vanish because they cleared thumbnails.
+  /// It is *not* the passcode itself: the hash lives in the Keychain.
+  String get settingsDir => p.join(authRoot, 'app');
+
   Map<StorageZone, String> get allRoots => <StorageZone, String>{
         StorageZone.tempCache: tempRoot,
         StorageZone.userDownloads: downloadsRoot,
@@ -155,6 +163,7 @@ class StorageLayout {
     await ops.createDirectory(partialDownloadDir);
     await ops.createDirectory(tdlibFilesDir);
     await ops.createDirectory(tdlibDatabaseDir);
+    await ops.createDirectory(settingsDir);
   }
 
   /// Canonical absolute form with symlinks resolved as far as the path exists.

@@ -49,6 +49,7 @@ class MediaRecord {
     this.sizeBytes = 0,
     this.fileName,
     this.mimeType,
+    this.caption,
     this.messageDateUnix = 0,
     this.favorite = false,
     this.hasProtectedContent = false,
@@ -64,6 +65,10 @@ class MediaRecord {
   final int sizeBytes;
   final String? fileName;
   final String? mimeType;
+
+  /// Message caption / text, lower-cased once at index time so search does not
+  /// re-fold the same string on every keystroke.
+  final String? caption;
 
   /// Seconds since epoch, as reported by TDLib `message.date`.
   final int messageDateUnix;
@@ -89,6 +94,7 @@ class MediaRecord {
         sizeBytes: sizeBytes,
         fileName: fileName,
         mimeType: mimeType,
+        caption: caption,
         messageDateUnix: messageDateUnix,
         favorite: favorite ?? this.favorite,
         hasProtectedContent: hasProtectedContent,
@@ -105,6 +111,7 @@ class MediaRecord {
         if (sizeBytes != 0) 's': sizeBytes,
         if (fileName != null) 'n': fileName,
         if (mimeType != null) 't': mimeType,
+        if (caption != null && caption!.isNotEmpty) 'cap': caption,
         if (messageDateUnix != 0) 'date': messageDateUnix,
         if (hasProtectedContent) 'p': true,
       };
@@ -125,6 +132,7 @@ class MediaRecord {
       sizeBytes: _asInt(json['s']) ?? 0,
       fileName: _asString(json['n']),
       mimeType: _asString(json['t']),
+      caption: _asString(json['cap']),
       messageDateUnix: _asInt(json['date']) ?? 0,
       hasProtectedContent: _asBool(json['p']),
     );
@@ -146,6 +154,7 @@ class MediaRecord {
       'messageId': messageId,
       'date': _asInt(message['date']) ?? 0,
       'protected': _asBool(message['has_protected_content']),
+      'caption': _captionOf(content),
     };
 
     switch (contentType) {
@@ -212,6 +221,7 @@ class MediaRecord {
       sizeBytes: _asInt(file['expected_size']) ?? 0,
       fileName: _asString(media['file_name']) ?? _asString(file['name']),
       mimeType: _asString(media['mime_type']),
+      caption: base['caption'] as String?,
       messageDateUnix: base['date']! as int,
       hasProtectedContent: base['protected']! as bool,
     );
@@ -244,9 +254,24 @@ class MediaRecord {
       width: _asInt(best['width']),
       height: _asInt(best['height']),
       sizeBytes: _asInt(file['expected_size']) ?? 0,
+      caption: base['caption'] as String?,
       messageDateUnix: base['date']! as int,
       hasProtectedContent: base['protected']! as bool,
     );
+  }
+
+  /// Telegram caption, folded to lower case once at index time.
+  ///
+  /// TDLib hands captions over as `formattedText`; only `text` matters here —
+  /// formatting entities are irrelevant to a keyword filter. The 512-char cap
+  /// keeps the append-only journal from being inflated by a wall of text that
+  /// no one will ever read in a one-line overlay.
+  static String? _captionOf(Map<String, Object?> content) {
+    final caption = _asMap(content['caption']);
+    final text = _asString(caption['text'])?.trim();
+    if (text == null || text.isEmpty) return null;
+    final capped = text.length > 512 ? text.substring(0, 512) : text;
+    return capped.toLowerCase();
   }
 
   @override
