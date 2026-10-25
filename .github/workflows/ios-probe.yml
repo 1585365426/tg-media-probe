@@ -10,7 +10,10 @@ permissions:
 
 jobs:
   build-ipa:
-    runs-on: macos-15
+    # video_player_avfoundation 2.12.3 uses Swift 6.2 concurrency APIs
+    # (`isolation:` argument), which Xcode 16.4's Swift 6.0/6.1 rejects.
+    # Xcode 26 still supports iOS 15.0+ deployment targets, so 15.2 is safe.
+    runs-on: macos-26
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
@@ -20,9 +23,29 @@ jobs:
           set -o pipefail
           mkdir -p ci-report
           sw_vers | tee ci-report/macos.txt
+          ls -d /Applications/Xcode*.app 2>/dev/null | tee ci-report/xcode-apps.txt || true
           xcodebuild -version | tee ci-report/xcode.txt
+          xcode-select -p | tee -a ci-report/xcode.txt
+          swift --version | tee ci-report/swift.txt
           xcrun --sdk iphoneos --show-sdk-version | tee ci-report/iphoneos-sdk.txt
           (pod --version 2>&1 || echo "cocoapods-missing") | tee ci-report/cocoapods.txt
+
+      - name: Assert toolchain is Xcode 26 or newer
+        run: |
+          set -o pipefail
+          major="$(xcodebuild -version | head -1 | awk '{print $2}' | cut -d. -f1)"
+          echo "detected Xcode major: ${major}"
+          if [[ "${major}" -lt 26 ]]; then
+            newest="$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1 || true)"
+            if [[ -n "${newest}" ]]; then
+              echo "switching to ${newest}"
+              sudo xcode-select -s "${newest}"
+              xcodebuild -version
+            else
+              echo "ERROR: Xcode >= 26 not available; video_player_avfoundation cannot compile" >&2
+              exit 1
+            fi
+          fi
 
       - name: Install CocoaPods if the image lacks it
         run: |
@@ -108,6 +131,14 @@ jobs:
           grep -n "IPHONEOS_DEPLOYMENT_TARGET" Runner.xcodeproj/project.pbxproj | tee ../ci-report/deployment-targets.txt
           echo "--- tdlib in Podfile.lock"
           grep -n -A6 "tdlib" Podfile.lock | tee ../ci-report/podfile-lock-tdlib.txt
+          echo "--- Pods xcconfig is actually included by Runner"
+          grep -n "Pods-Runner" Flutter/Debug.xcconfig Flutter/Release.xcconfig | tee ../ci-report/xcconfig-include.txt
+          echo "--- linker flag that keeps tdjson.o alive"
+          grep -rn "td_create_client_id" "Pods/Target Support Files/Pods-Runner/" | tee ../ci-report/linker-flags.txt
+          if ! grep -rq "td_create_client_id" "Pods/Target Support Files/Pods-Runner/"; then
+            echo "ERROR: pod user_target_xcconfig never reached the Runner xcconfig" >&2
+            exit 1
+          fi
 
       - name: Build unsigned iOS app
         run: |
