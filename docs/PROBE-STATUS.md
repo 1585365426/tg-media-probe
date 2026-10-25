@@ -65,16 +65,29 @@
 | 缓存清理安全行为 | 四区隔离尚未接进探针，无可清理对象 |
 | 多频道 / 大文件 / 长视频 | 样本仅 1 频道 1 条 28 秒视频 |
 
-### 真机证据暴露的待修项（第 4 步之前处理）
+### 真机证据暴露的待修项（已修，live 验证待真机）
 
-| # | 问题 | 位置 |
-|---|---|---|
-| A | 下载落进 TDLib file store（`Documents/tdlib/files`），第 3 步四区隔离未生效；整目录清理会连带删掉 `db/` 授权 | `lib/td/media_probe.dart:104-113` |
-| B | `database_encryption_key` 为空串，TDLib 本地库明文 | `lib/td/td_requests.dart:26` |
-| C | 登录成功、下载完成两处步骤状态未置 success | `lib/td/media_probe.dart` |
-| D | 「动态库符号解析」措辞不准，实为静态链接 + 主镜像符号 | UI 文案 |
+| # | 问题 | 状态 | 位置（修复后） |
+|---|---|---|---|
+| A | 下载落进 TDLib file store，四区隔离未生效；整目录清理会连带删授权 | **已修** `3480894` | `lib/storage/download_mover.dart`、`lib/storage/download_paths.dart`、`lib/storage/storage_layout.dart` |
+| B | `database_encryption_key` 为空串，TDLib 本地库明文 | **已修** `3480894` | `lib/security/tdlib_key.dart`、`lib/td/td_requests.dart` |
+| C | 登录成功状态未置 success（`markAuthorized` 从未被调用） | **已修** `3480894` | `lib/ui/probe_page.dart` |
+| D | 「动态库符号解析」措辞不准 | **已修** `3480894` | `lib/ui/probe_page.dart` |
 
-> iOS 编译、CocoaPods 装配、TDLib 静态链接、IPA 打包已在 GitHub Actions 真实跑通，详见 `docs/CI-RUN-REPORT.md`：run [40198573231](https://github.com/1585365426/tg-media-probe/actions/runs/40198573231) success，IPA 19 MB，SHA256 `326d69f4…3ae42c`（本机重算一致），`minos 15.2` / `sdk 26.5` / arm64。
+修复细节、测试与真机复测清单见 `docs/FIX-A1B-REPORT.md`。
+
+| 当前构建 | 值 |
+|---|---|
+| CI run | [40217760668](https://github.com/1585365426/tg-media-probe/actions/runs/40217760668) success，3m53s |
+| IPA | `TGMediaProbe-unsigned.ipa` 19,507,078 B |
+| SHA256 | `b227d4c891c2a5650b674e871f971dac04aa9e550c7a2d9d76dabc6c1b6402d0` |
+| 测试 | 164 passed / 1 skipped |
+| analyze | No issues found! |
+| 二进制核对 | `tg_tdlib_db_key_v1` / `tdlib_files` / `TGMediaDownloads` 在新包 `App.framework/App` 内命中，旧包 0 命中 |
+
+**升级副作用**：加密库换了路径与 key，TDLib 不支持给已有库改 key，因此本次装入后**需要重新收一次验证码**。旧明文库 `Documents/tdlib/db` 保留未删，界面会提示。
+
+> iOS 编译、CocoaPods 装配、TDLib 静态链接、IPA 打包已在 GitHub Actions 真实跑通，历史见 `docs/CI-RUN-REPORT.md`：run [40198573231](https://github.com/1585365426/tg-media-probe/actions/runs/40198573231) success。
 
 ## 4. 关键实测结论
 
