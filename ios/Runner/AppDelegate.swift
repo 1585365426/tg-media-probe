@@ -23,10 +23,10 @@ import UIKit
   }
 
   /// UIKit consults the app delegate before any view controller. Flutter's
-  /// `FlutterAppDelegate` does not declare this optional `UIApplicationDelegate`
-  /// method, so this implementation owns the decision outright — which is what
-  /// makes "force landscape" work on a phone that is physically upright.
-  func application(
+  /// `FlutterAppDelegate` already declares this optional `UIApplicationDelegate`
+  /// method (hence `override`), and returning our own mask here is what makes
+  /// "force landscape" work on a phone that is physically upright.
+  override func application(
     _ application: UIApplication,
     supportedInterfaceOrientationsFor window: UIWindow?
   ) -> UIInterfaceOrientationMask {
