@@ -46,3 +46,11 @@ app.*.map.json
 
 # Widget Preview related
 .widget_preview/
+
+# Vendored TDLib binary (350 MB) is fetched by scripts/fetch_tdlib.sh
+ios/tdlib/TDLibFramework.xcframework/
+ios/Pods/
+ci-report/
+
+# TDLib schema fixture is fetched at build time (1.2 MB, upstream source)
+test/fixtures/td_api.tl
