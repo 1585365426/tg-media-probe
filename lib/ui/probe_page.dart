@@ -1,6 +1,7 @@
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:video_player/video_player.dart';
 
@@ -10,6 +11,7 @@ import '../storage/storage_layout.dart';
 import '../td/media_probe.dart';
 import '../td/td_client.dart';
 import '../td/td_models.dart';
+import '../util/path_text.dart';
 import '../util/redact.dart';
 
 /// Minimal verification UI. It is deliberately not the product UI: the only
@@ -343,15 +345,7 @@ class _ProbePageState extends State<ProbePage> {
             ),
           const SizedBox(height: 12),
           if (runner != null)
-            ...runner.steps.map(
-              (step) => ListTile(
-                dense: true,
-                leading: Text(step.symbol,
-                    style: const TextStyle(fontSize: 18, fontFamily: 'monospace')),
-                title: Text(step.title),
-                subtitle: step.detail.isEmpty ? null : Text(step.detail),
-              ),
-            ),
+            for (final step in runner.steps) _stepRow(step),
           const SizedBox(height: 12),
           if (_video != null && _video!.value.isInitialized)
             AspectRatio(
@@ -380,19 +374,108 @@ class _ProbePageState extends State<ProbePage> {
     );
   }
 
-  Widget _pathLine(String label, String path) => Padding(
-        padding: const EdgeInsets.only(bottom: 6),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: <Widget>[
-            Text(label, style: Theme.of(context).textTheme.bodySmall),
-            SelectableText(
-              path,
-              style: const TextStyle(fontSize: 11, fontFamily: 'monospace'),
+  /// Renders one probe step.
+  ///
+  /// A `ListTile` centres `leading` against the full height of title + subtitle,
+  /// so a `✓` on a step whose detail is a six-line path ends up level with the
+  /// middle of that path. On the device that reads as "not ticked" and corrupts
+  /// the line-by-line verification pass, so the row is hand-built with the
+  /// symbol pinned to the first line instead.
+  Widget _stepRow(ProbeStep step) {
+    final theme = Theme.of(context);
+    final failed = step.state == ProbeStepState.failed;
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 5),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          SizedBox(
+            width: 18,
+            child: Text(
+              step.symbol,
+              style: const TextStyle(
+                fontSize: 17,
+                // Matches bodyMedium's line height so the glyph's first line
+                // sits on the title's first line, not above or below it.
+                height: 1.35,
+                fontFamily: 'monospace',
+              ),
             ),
-          ],
-        ),
-      );
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                Text(step.title, style: theme.textTheme.bodyMedium),
+                if (step.detail.isNotEmpty) ...<Widget>[
+                  const SizedBox(height: 2),
+                  SelectableText(
+                    withPathBreaks(step.detail),
+                    style: TextStyle(
+                      fontSize: 11,
+                      height: 1.45,
+                      fontFamily: 'monospace',
+                      color: failed ? const Color(0xFFB3261E) : null,
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _pathLine(String label, String path) {
+    final theme = Theme.of(context);
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Row(
+            children: <Widget>[
+              Expanded(child: Text(label, style: theme.textTheme.bodySmall)),
+              // The rendered string carries zero-width breaks, so copy has to go
+              // through the original `path`. Pasting a decorated value into
+              // Filza looks identical but fails the lookup.
+              InkWell(
+                onTap: () => _copyPath(label, path),
+                borderRadius: BorderRadius.circular(12),
+                child: const Padding(
+                  padding: EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                  child: Icon(Icons.copy_rounded, size: 14),
+                ),
+              ),
+            ],
+          ),
+          SelectableText(
+            withPathBreaks(path),
+            style: const TextStyle(
+              fontSize: 11,
+              height: 1.45,
+              fontFamily: 'monospace',
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _copyPath(String label, String path) {
+    // stripSoftBreaks is a no-op here because `path` is the raw value, but
+    // calling it keeps the invariant explicit for any future caller that hands
+    // over a decorated string.
+    Clipboard.setData(ClipboardData(text: stripSoftBreaks(path)));
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('已复制「$label」'),
+        duration: const Duration(seconds: 2),
+      ),
+    );
+  }
 
   Widget _section(String title) => Padding(
         padding: const EdgeInsets.only(bottom: 8),
