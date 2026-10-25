@@ -4,6 +4,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:video_player/video_player.dart';
 
+import '../security/tdlib_key.dart';
+import '../storage/app_paths.dart';
+import '../storage/storage_layout.dart';
 import '../td/media_probe.dart';
 import '../td/td_client.dart';
 import '../td/td_models.dart';
@@ -39,6 +42,8 @@ class _ProbePageState extends State<ProbePage> {
   String _status = '未初始化 TDLib';
   bool _busy = false;
   bool _credentialsSaved = false;
+  StorageLayout? _layout;
+  ProbeInitInfo? _initInfo;
 
   @override
   void initState() {
@@ -103,12 +108,21 @@ class _ProbePageState extends State<ProbePage> {
         throw StateError('缺少 api_id 或 api_hash');
       }
 
+      final layout = await AppPaths.resolveLayout();
+      await layout.ensureCreated();
+
+      // The database key never leaves the Keychain; only its masked form is
+      // ever rendered.
+      final dbKey = await TdlibDatabaseKey(store: const KeychainSecretStore())
+          .obtain();
+
       final client = TdClient.open();
-      final runner = ProbeRunner(client: client)
+      final runner = ProbeRunner(client: client, layout: layout)
         ..onChanged = () {
           if (mounted) setState(() {});
         };
-      runner.markLibraryLoaded('tdjson 已加载（动态库符号解析成功）');
+      runner.markLibraryLoaded(
+          'tdjson 已加载（静态链接，符号从主二进制解析）');
 
       _client = client;
       _runner = runner;
@@ -119,11 +133,25 @@ class _ProbePageState extends State<ProbePage> {
         final state = AuthState.fromJson(raw.cast<String, Object?>());
         if (!mounted) return;
         setState(() => _stage = state.stage);
+        // TDLib reaching authorizationStateReady is the only proof of a
+        // completed login. Without this the login step stays "running"
+        // forever even though the chain below already works.
+        if (state.stage == AuthStage.ready) {
+          runner.markAuthorized();
+        }
       });
 
-      await runner.initialize(apiId: apiId, apiHash: apiHash);
+      final info = await runner.initialize(
+        apiId: apiId,
+        apiHash: apiHash,
+        databaseEncryptionKey: dbKey,
+      );
       if (!mounted) return;
-      setState(() => _status = 'TDLib 已配置，等待手机号');
+      setState(() {
+        _layout = layout;
+        _initInfo = info;
+        _status = 'TDLib 已配置（数据库已加密），等待手机号';
+      });
     } catch (e) {
       if (!mounted) return;
       setState(() => _status = '初始化失败: ${redactText(e.toString())}');
@@ -330,10 +358,41 @@ class _ProbePageState extends State<ProbePage> {
               aspectRatio: _video!.value.aspectRatio,
               child: VideoPlayer(_video!),
             ),
+          if (_initInfo != null) ...<Widget>[
+            const Divider(height: 32),
+            _section('4. 存储落点（四区隔离）'),
+            _pathLine('TDLib 数据库（加密 / 受保护）', _initInfo!.databaseDir),
+            _pathLine('TDLib 文件池（可重建）', _initInfo!.filesDir),
+            if (_layout != null)
+              _pathLine('用户下载区（受保护）', _layout!.downloadsDir),
+            if (_initInfo!.legacyPlaintextDb)
+              const Padding(
+                padding: EdgeInsets.only(top: 8),
+                child: Text(
+                  '检测到旧版明文库 Documents/tdlib/db，已保留未删除。'
+                  '新版本改用加密库，需重新登录一次。',
+                  style: TextStyle(fontSize: 12, color: Color(0xFFB3261E)),
+                ),
+              ),
+          ],
         ],
       ),
     );
   }
+
+  Widget _pathLine(String label, String path) => Padding(
+        padding: const EdgeInsets.only(bottom: 6),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            Text(label, style: Theme.of(context).textTheme.bodySmall),
+            SelectableText(
+              path,
+              style: const TextStyle(fontSize: 11, fontFamily: 'monospace'),
+            ),
+          ],
+        ),
+      );
 
   Widget _section(String title) => Padding(
         padding: const EdgeInsets.only(bottom: 8),

@@ -98,6 +98,24 @@ class StorageLayout {
   String get playbackTempDir => p.join(tempRoot, 'player');
   String get partialDownloadDir => p.join(tempRoot, 'partial');
 
+  /// TDLib's own database (session, message store, file references).
+  ///
+  /// Placed inside [StorageZone.authMeta] on purpose: losing this directory
+  /// means the user has to type a Telegram login code again, which makes it
+  /// exactly as protected as the session itself. `zoneOf()` reports authMeta
+  /// for any path under here, so [assertDeletableByCacheClear] refuses it.
+  String get tdlibDatabaseDir => p.join(authRoot, 'tdlib', 'db');
+
+  /// TDLib's blob pool: bytes it downloaded before we copy them into the
+  /// user's download folder.
+  ///
+  /// Inside [StorageZone.tempCache] because every byte here can be re-fetched
+  /// from Telegram. It is a sub-directory of the temp root but *not* one of
+  /// the three kinds [CacheManager] walks, so "clear cache" does not touch it
+  /// yet — the pool is sized and reclaimed by its own cleaner in the settings
+  /// screen, never by a blanket delete of the temp root.
+  String get tdlibFilesDir => p.join(tempRoot, 'tdlib_files');
+
   /// Roots of the protected zones, exposed with explicit names so call sites
   /// read as "user downloads" rather than "zone 2".
   String get downloadsDir => downloadsRoot;
@@ -135,6 +153,8 @@ class StorageLayout {
     await ops.createDirectory(thumbnailDir);
     await ops.createDirectory(playbackTempDir);
     await ops.createDirectory(partialDownloadDir);
+    await ops.createDirectory(tdlibFilesDir);
+    await ops.createDirectory(tdlibDatabaseDir);
   }
 
   /// Canonical absolute form with symlinks resolved as far as the path exists.

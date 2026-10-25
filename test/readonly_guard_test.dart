@@ -13,6 +13,11 @@ List<File> _libSources() => Directory('lib')
 
 const String _guardFile = 'lib/security/td_readonly_guard.dart';
 
+/// Fixed 64-hex database key for tests. The device generates its own and
+/// keeps it in the Keychain; nothing here is ever used on a real run.
+const String testDbKey =
+    'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+
 void main() {
   group('static guard', () {
     test('no source file names a cloud-mutating TDLib method', () {
@@ -104,6 +109,7 @@ void main() {
           apiHash: 'hash',
           databaseDirectory: '/tmp/db',
           filesDirectory: '/tmp/files',
+          databaseEncryptionKey: testDbKey,
         ),
         getAuthorizationState(),
         setAuthenticationPhoneNumber('+10000000000'),

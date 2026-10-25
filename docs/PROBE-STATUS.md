@@ -36,30 +36,60 @@
 
 结论：**源码层面 15.2 满足全部依赖下限，仅剩 0.2 个次版本余量，Flutter 必须锁 3.47.8。**
 
-## 2. 未验证（缺环境或未跑，不计入通过）
+## 2. 真机已验证（2026-10-26，iPhone 11 Pro / iOS 15.x / TrollStore）
+
+证据与逐项判定见 `docs/DEVICE-EVIDENCE-20261026.md`。构建产物 SHA256 `1a83e39b…d404ba`。
+
+| 项目 | 真机回显 |
+|---|---|
+| TrollStore 安装 + 启动 | UI 完整渲染 |
+| TDLib 符号解析 | `tdjson 已加载` |
+| `setTdlibParameters` | `database=.../26962250-0153-416D-9964-C1AB62709E43/Documents/tdlib/db` |
+| 验证码登录 → ready | 后续读取成功（UI 状态文案未刷新，见证据文档 §4-C） |
+| `getChats` + 频道过滤 | `会话 3 个，其中频道 1 个` |
+| `getChatHistory` | `18号仓储: 50 条消息` |
+| 视频元数据 | `464x848 28s 5809108B fileId=4357` |
+| `downloadFile` | `5809108/5809108 B` → `Documents/tdlib/files/videos/bb4a413292c6.MP4` |
+| 本地文件校验 | `5809108 B 与 TDLib 报告一致` |
+| AVPlayer 初始化 | `AVPlayer 已初始化，时长=27s` |
+
+## 3. 未验证（不计入通过）
 
 | 项目 | 原因 |
 |---|---|
-| TrollStore 安装、启动 | 依赖真机，**未执行** |
-| 真实登录 / 频道 / 元数据 / 播放 / 下载 | 依赖可安装产物 + 真机 + 用户自己的 api_id/hash，**未验证** |
-| 缓存清理安全行为 | 第 3 步实现后才有对象 |
+| 实际画面渲染 / 音轨 / seek | 只证明 AVPlayer 构造成功并读到时长 |
+| 横竖屏切换 | 现有截图均为竖屏，无旋转证据 |
+| 分页翻页（offset / keyset） | 单次 50 条取完，未触发 |
+| 下载中断续传 | 5.5 MB 一次下完，未制造断网 |
+| 冷启后登录态保持 | 未做退出重进 |
+| 缓存清理安全行为 | 四区隔离尚未接进探针，无可清理对象 |
+| 多频道 / 大文件 / 长视频 | 样本仅 1 频道 1 条 28 秒视频 |
+
+### 真机证据暴露的待修项（第 4 步之前处理）
+
+| # | 问题 | 位置 |
+|---|---|---|
+| A | 下载落进 TDLib file store（`Documents/tdlib/files`），第 3 步四区隔离未生效；整目录清理会连带删掉 `db/` 授权 | `lib/td/media_probe.dart:104-113` |
+| B | `database_encryption_key` 为空串，TDLib 本地库明文 | `lib/td/td_requests.dart:26` |
+| C | 登录成功、下载完成两处步骤状态未置 success | `lib/td/media_probe.dart` |
+| D | 「动态库符号解析」措辞不准，实为静态链接 + 主镜像符号 | UI 文案 |
 
 > iOS 编译、CocoaPods 装配、TDLib 静态链接、IPA 打包已在 GitHub Actions 真实跑通，详见 `docs/CI-RUN-REPORT.md`：run [40198573231](https://github.com/1585365426/tg-media-probe/actions/runs/40198573231) success，IPA 19 MB，SHA256 `326d69f4…3ae42c`（本机重算一致），`minos 15.2` / `sdk 26.5` / arm64。
 
-## 3. 关键实测结论
+## 4. 关键实测结论
 
 1. **TDLib 的 `video` 对象没有旋转字段**：只有 `duration / width / height / file_name / mime_type / supports_streaming / minithumbnail / thumbnail / video:file`。方向分类只能「宽高取 TDLib + 旋转取本地文件 AVFoundation track transform」，读不到就归「未知/待识别」，不能猜。
 2. **TDLib 是静态框架**：`vendored_frameworks` + CocoaPods 默认静态集成，不需要 `use_frameworks!`，也不需要往 `Runner.app/Frameworks` 里塞东西；`-Wl,-u,_td_create_client_id` 防止 `tdjson.o` 被 dead-strip。
 3. **本机网络**：默认代理 `127.0.0.1:51544` 已死；`127.0.0.1:10808`（SOCKS5）可用，`api.telegram.org` 302、`core.telegram.org` 200。TDLib 若要在本机做协议级验证可走 `addProxy` socks5。
 4. **GitHub 令牌作用域**：`gist, read:org, repo`，缺 `workflow`，所以 workflow 文件被 API 拒收。
 
-## 4. 构建通道（已通）
+## 5. 构建通道（已通）
 
 GitHub Actions `macos-26`（Xcode 26.6 / Swift 6.3.3 / iOS SDK 26.5 / CocoaPods 1.17.0）实际构建成功：
 run [40198573231](https://github.com/1585365426/tg-media-probe/actions/runs/40198573231)。
 前两次失败的根因（Xcode 16.4 缺 `isolation:` 重载、`td_send/receive/execute` 被 dead-strip）与修复记录在 `docs/CI-RUN-REPORT.md`。
 
-## 5. 探针链路设计（代码就位，未跑通）
+## 6. 探针链路设计（真机已跑通）
 
 `setTdlibParameters → 登录态 → getChats → getChat(过滤 is_channel) → getChatHistory(50) → messageVideo 元数据 → downloadFile → 本地文件 exists/length 校验 → AVPlayer initialize`
 
@@ -67,7 +97,7 @@ run [40198573231](https://github.com/1585365426/tg-media-probe/actions/runs/4019
 
 只读约束：`lib/` 内不含 `deleteMessages / deleteChatHistory / deleteChat / leaveChat / sendMessage / forwardMessages / editMessageText`，CI 中 `test/readonly_guard_test.dart` 会对整棵源码树再扫一遍。
 
-## 6. CI 产出位置（跑完后读取，不需要 Actions 界面）
+## 7. CI 产出位置（跑完后读取，不需要 Actions 界面）
 
 - `ci-report` 分支：`summary.txt / macos.txt / xcode.txt / iphoneos-sdk.txt / cocoapods.txt / flutter.txt / fetch-tdlib.txt / tdlib-layout.txt / pod-install.txt / deployment-targets.txt / analyze.txt / test.txt / build-ios.txt / inspect.txt / package.txt`
 - Actions artifact：`tg-media-probe-ipa`（IPA + sha256 + 全部日志，14 天保留）

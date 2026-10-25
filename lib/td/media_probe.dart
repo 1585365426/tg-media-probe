@@ -3,6 +3,9 @@ import 'dart:io';
 
 import 'package:path_provider/path_provider.dart';
 
+import '../security/tdlib_key.dart';
+import '../storage/download_mover.dart';
+import '../storage/storage_layout.dart';
 import '../util/redact.dart';
 import 'td_client.dart';
 import 'td_models.dart';
@@ -41,6 +44,7 @@ class ProbeResult {
     this.messageId,
     this.video,
     this.localPath,
+    this.poolPath,
   });
 
   final bool ok;
@@ -48,7 +52,32 @@ class ProbeResult {
   final int? chatId;
   final int? messageId;
   final VideoMeta? video;
+
+  /// File the player should open: the copy inside the user download zone.
   final String? localPath;
+
+  /// TDLib's own copy inside the rebuildable pool, kept for diagnostics.
+  final String? poolPath;
+}
+
+/// What [ProbeRunner.initialize] actually configured, so the UI can show the
+/// real paths instead of assuming them.
+class ProbeInitInfo {
+  const ProbeInitInfo({
+    required this.databaseDir,
+    required this.filesDir,
+    required this.keyMask,
+    required this.legacyPlaintextDb,
+  });
+
+  final String databaseDir;
+  final String filesDir;
+  final String keyMask;
+
+  /// True when a pre-encryption database from an earlier build is still on
+  /// disk. It is left untouched, but the user has to log in again because the
+  /// new database lives elsewhere and uses a different key.
+  final bool legacyPlaintextDb;
 }
 
 /// Runs the minimal real-data chain:
@@ -56,9 +85,15 @@ class ProbeResult {
 /// download -> local file verification. Playback is verified by the UI layer
 /// because it needs AVPlayer; the UI reports back via [reportPlayback].
 class ProbeRunner {
-  ProbeRunner({required this.client});
+  ProbeRunner({
+    required this.client,
+    required this.layout,
+    DownloadMover? mover,
+  }) : mover = mover ?? DownloadMover(layout: layout);
 
   final TdClient client;
+  final StorageLayout layout;
+  final DownloadMover mover;
 
   final List<ProbeStep> steps = <ProbeStep>[
     ProbeStep('加载 TDLib 原生库'),
@@ -68,7 +103,7 @@ class ProbeRunner {
     ProbeStep('读取频道消息'),
     ProbeStep('读取视频元数据'),
     ProbeStep('下载真实媒体文件'),
-    ProbeStep('校验本地文件（存在性 / 大小）'),
+    ProbeStep('复制到用户下载区（校验大小）'),
     ProbeStep('播放校验（AVPlayer 初始化）'),
   ];
 
@@ -90,19 +125,34 @@ class ProbeRunner {
 
   void markLibraryLoaded(String path) => _set(1, ProbeStepState.success, path);
 
-  /// Creates directories inside the app sandbox and configures TDLib.
-  Future<Directory> initialize({
+  /// Configures TDLib against the four storage zones.
+  ///
+  /// The database goes into the protected auth zone (it *is* the session) and
+  /// the blob pool goes into the purgeable temp zone. Neither is under
+  /// `Documents`, which is what the previous build did and what made a
+  /// whole-directory cleanup able to wipe the login.
+  Future<ProbeInitInfo> initialize({
     required int apiId,
     required String apiHash,
+    required String databaseEncryptionKey,
   }) async {
     _set(2, ProbeStepState.running);
     try {
-      final docs = await getApplicationDocumentsDirectory();
-      final root = Directory('${docs.path}/tdlib');
-      final dbDir = Directory('${root.path}/db');
-      final filesDir = Directory('${root.path}/files');
+      await layout.ensureCreated();
+      final dbDir = Directory(layout.tdlibDatabaseDir);
+      final filesDir = Directory(layout.tdlibFilesDir);
       await dbDir.create(recursive: true);
       await filesDir.create(recursive: true);
+
+      // Detect the plaintext database written by the previous build. It is not
+      // deleted here — that would be destroying user data to fix a bug.
+      bool legacy = false;
+      try {
+        final docs = await getApplicationDocumentsDirectory();
+        legacy = await Directory('${docs.path}/tdlib/db').exists();
+      } catch (_) {
+        legacy = false;
+      }
 
       final response = await client.request(
         setTdlibParameters(
@@ -110,6 +160,7 @@ class ProbeRunner {
           apiHash: apiHash,
           databaseDirectory: dbDir.path,
           filesDirectory: filesDir.path,
+          databaseEncryptionKey: databaseEncryptionKey,
           systemVersion: Platform.operatingSystemVersion,
         ),
         timeout: const Duration(seconds: 60),
@@ -119,8 +170,14 @@ class ProbeRunner {
         _set(2, ProbeStepState.failed, err);
         throw StateError(err);
       }
-      _set(2, ProbeStepState.success, 'database=${dbDir.path}');
-      return root;
+      _set(2, ProbeStepState.success,
+          'db=${dbDir.path}（加密 key ${TdlibDatabaseKey.mask(databaseEncryptionKey)}）');
+      return ProbeInitInfo(
+        databaseDir: dbDir.path,
+        filesDir: filesDir.path,
+        keyMask: TdlibDatabaseKey.mask(databaseEncryptionKey),
+        legacyPlaintextDb: legacy,
+      );
     } catch (e) {
       _set(2, ProbeStepState.failed, e.toString());
       rethrow;
@@ -271,24 +328,38 @@ class ProbeRunner {
         return ProbeResult(ok: false, message: '下载超时');
       }
       await sub.cancel();
-      lastLocalPath = finalState.path;
-      _set(7, ProbeStepState.success,
-          '${finalState.downloadedSize}/${finalState.expectedSize} B → ${finalState.path}');
+      final expected =
+          finalState.size > 0 ? finalState.size : finalState.expectedSize;
+      _set(
+        7,
+        ProbeStepState.success,
+        '${finalState.downloadedSize}/${finalState.expectedSize} B '
+        '→ TDLib 池 ${finalState.path}',
+      );
 
-      // ---- 8. local file ------------------------------------------------
+      // ---- 8. promote into the user download zone -----------------------
       _set(8, ProbeStepState.running);
-      final file = File(finalState.path);
-      if (!await file.exists()) {
-        _set(8, ProbeStepState.failed, '文件不存在: ${finalState.path}');
-        return ProbeResult(ok: false, message: '下载完成后本地文件不存在');
+      final DownloadMoveResult promoted;
+      try {
+        promoted = await mover.promote(
+          sourcePath: finalState.path,
+          chatId: chat.id,
+          fileId: video.fileId,
+          expectedBytes: expected,
+          fileName: video.fileName,
+          mimeType: video.mimeType,
+        );
+      } on DownloadPromoteException catch (e) {
+        _set(8, ProbeStepState.failed, e.toString());
+        return ProbeResult(ok: false, message: e.message);
       }
-      final length = await file.length();
-      final expected = finalState.size > 0 ? finalState.size : finalState.expectedSize;
-      if (expected > 0 && length != expected) {
-        _set(8, ProbeStepState.failed, '大小不一致: local=$length TDLib=$expected');
-        return ProbeResult(ok: false, message: '本地文件大小与 TDLib 报告不一致');
-      }
-      _set(8, ProbeStepState.success, '$length B 与 TDLib 报告一致');
+      lastLocalPath = promoted.path;
+      _set(
+        8,
+        ProbeStepState.success,
+        '${promoted.bytes} B → ${promoted.path}'
+        '${promoted.reused ? '（复用已有文件）' : ''}',
+      );
 
       return ProbeResult(
         ok: true,
@@ -296,7 +367,8 @@ class ProbeRunner {
         chatId: chat.id,
         messageId: lastMessageId,
         video: video,
-        localPath: finalState.path,
+        localPath: promoted.path,
+        poolPath: finalState.path,
       );
     } catch (e) {
       final text = redactText(e.toString());

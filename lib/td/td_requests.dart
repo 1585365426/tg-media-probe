@@ -10,30 +10,39 @@ Map<String, Object?> setTdlibParameters({
   required String apiHash,
   required String databaseDirectory,
   required String filesDirectory,
+  required String databaseEncryptionKey,
   String systemLanguageCode = 'zh-hans',
   String deviceModel = 'iPhone',
   String systemVersion = 'iOS',
   String applicationVersion = '0.1.0',
-}) =>
-    <String, Object?>{
-      '@type': 'setTdlibParameters',
-      // Field order and names follow td_api.tl exactly; TDLib rejects unknown
-      // or missing parameters, so this map is schema-checked by tests.
-      'use_test_dc': false,
-      'database_directory': databaseDirectory,
-      'files_directory': filesDirectory,
-      'database_encryption_key': '',
-      'use_file_database': true,
-      'use_chat_info_database': true,
-      'use_message_database': true,
-      'use_secret_chats': false,
-      'api_id': apiId,
-      'api_hash': apiHash,
-      'system_language_code': systemLanguageCode,
-      'device_model': deviceModel,
-      'system_version': systemVersion,
-      'application_version': applicationVersion,
-    };
+}) {
+  // An empty key means TDLib writes the whole local database in plaintext.
+  // Refusing here is the single choke point that keeps that from happening by
+  // accident when a caller forgets the argument's value.
+  if (databaseEncryptionKey.isEmpty) {
+    throw ArgumentError.value(databaseEncryptionKey, 'databaseEncryptionKey',
+        'TDLib database key must not be empty');
+  }
+  return <String, Object?>{
+    '@type': 'setTdlibParameters',
+    // Field order and names follow td_api.tl exactly; TDLib rejects unknown
+    // or missing parameters, so this map is schema-checked by tests.
+    'use_test_dc': false,
+    'database_directory': databaseDirectory,
+    'files_directory': filesDirectory,
+    'database_encryption_key': databaseEncryptionKey,
+    'use_file_database': true,
+    'use_chat_info_database': true,
+    'use_message_database': true,
+    'use_secret_chats': false,
+    'api_id': apiId,
+    'api_hash': apiHash,
+    'system_language_code': systemLanguageCode,
+    'device_model': deviceModel,
+    'system_version': systemVersion,
+    'application_version': applicationVersion,
+  };
+}
 
 Map<String, Object?> getAuthorizationState() => <String, Object?>{
       '@type': 'getAuthorizationState',

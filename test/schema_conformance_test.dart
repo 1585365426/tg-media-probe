@@ -29,6 +29,11 @@ Map<String, Set<String>> parseSchema(String source) {
   return entries;
 }
 
+/// Fixed 64-hex database key for tests. The device generates its own and
+/// keeps it in the Keychain; nothing here is ever used on a real run.
+const String testDbKey =
+    'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+
 void main() {
   final fixture = File('test/fixtures/td_api.tl');
   final schema =
@@ -49,7 +54,11 @@ void main() {
     final requests = <Map<String, Object?>>[
       getAuthorizationState(),
       setTdlibParameters(
-          apiId: 1, apiHash: 'h', databaseDirectory: '/d', filesDirectory: '/f'),
+          apiId: 1,
+          apiHash: 'h',
+          databaseDirectory: '/d',
+          filesDirectory: '/f',
+          databaseEncryptionKey: testDbKey),
       setAuthenticationPhoneNumber('+1'),
       checkAuthenticationCode('1'),
       checkAuthenticationPassword('x'),

@@ -25,6 +25,11 @@ abstract class FileOps {
   Future<String> readAsString(String path);
   Future<void> writeAsString(String path, String data);
 
+  /// Byte-for-byte copy. Creates the parent directory of [to] when missing and
+  /// leaves [from] in place — the TDLib pool keeps its own copy so TDLib's
+  /// bookkeeping stays consistent.
+  Future<void> copyFile(String from, String to);
+
   /// Appends without truncating; used by the append-only index journal.
   Future<void> appendAsString(String path, String data);
   Future<void> createDirectory(String path);
@@ -123,6 +128,14 @@ class IoFileOps implements FileOps {
     final file = File(path);
     await file.parent.create(recursive: true);
     await file.writeAsString(data, mode: FileMode.append, flush: true);
+  }
+
+  @override
+  Future<void> copyFile(String from, String to) async {
+    final source = File(from);
+    final target = File(to);
+    await target.parent.create(recursive: true);
+    await source.copy(target.path);
   }
 
   @override

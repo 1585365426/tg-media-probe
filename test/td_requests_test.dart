@@ -1,6 +1,11 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:tg_media_probe/td/td_requests.dart';
 
+/// Fixed 64-hex database key for tests. The device generates its own and
+/// keeps it in the Keychain; nothing here is ever used on a real run.
+const String testDbKey =
+    'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+
 void main() {
   group('TDLib request builders', () {
     test('setTdlibParameters carries every required field', () {
@@ -9,6 +14,7 @@ void main() {
         apiHash: 'hash',
         databaseDirectory: '/db',
         filesDirectory: '/files',
+        databaseEncryptionKey: testDbKey,
       );
       expect(request['@type'], 'setTdlibParameters');
       expect(request['api_id'], 12345);
@@ -18,10 +24,25 @@ void main() {
       expect(request['use_message_database'], isTrue);
       expect(request['database_directory'], '/db');
       expect(request['files_directory'], '/files');
+      expect(request['database_encryption_key'], testDbKey);
     });
 
-    test('getChats uses chatListMain and an explicit limit', () {
-      final request = getChats(limit: 200);
+    test('setTdlibParameters refuses an empty encryption key', () {
+      // An empty key is exactly the plaintext-on-disk bug; the builder is the
+      // last place that can still catch a caller forgetting to pass one.
+      expect(
+        () => setTdlibParameters(
+          apiId: 1,
+          apiHash: 'h',
+          databaseDirectory: '/db',
+          filesDirectory: '/files',
+          databaseEncryptionKey: '',
+        ),
+        throwsA(isA<ArgumentError>()),
+      );
+    });
+
+    test('getChats uses chatListMain and an explicit limit', () {      final request = getChats(limit: 200);
       expect(request['@type'], 'getChats');
       expect(request['limit'], 200);
       expect((request['chat_list'] as Map)['@type'], 'chatListMain');
@@ -61,7 +82,8 @@ void main() {
             apiId: 1,
             apiHash: 'h',
             databaseDirectory: '/d',
-            filesDirectory: '/f'),
+            filesDirectory: '/f',
+            databaseEncryptionKey: testDbKey),
         getAuthorizationState(),
         setAuthenticationPhoneNumber('+1'),
         checkAuthenticationCode('1'),
