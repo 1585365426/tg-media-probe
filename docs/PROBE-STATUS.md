@@ -1,6 +1,6 @@
 # TG Media 第 2 步：技术可行性验证状态
 
-最后更新：2026-10-25 21:20（Windows 开发机）
+最后更新：2026-10-26 02:00（Windows 开发机）
 仓库：https://github.com/1585365426/tg-media-probe （public，`main`，源码与脚本已推送）
 
 ## 1. 已验证（真实执行过，可复现）
@@ -38,7 +38,7 @@
 
 ## 2. 真机已验证（2026-10-26，iPhone 11 Pro / iOS 15.x / TrollStore）
 
-证据与逐项判定见 `docs/DEVICE-EVIDENCE-20261026.md`。构建产物 SHA256 `1a83e39b…d404ba`。
+两轮：第一轮 `1a83e39b…d404ba`（证据 `docs/DEVICE-EVIDENCE-20261026.md`），第二轮 `b227d4c8…6402d0`（证据 `docs/DEVICE-EVIDENCE-20261026-B.md`）。下表为第一轮基线。
 
 | 项目 | 真机回显 |
 |---|---|
@@ -53,6 +53,35 @@
 | 本地文件校验 | `5809108 B 与 TDLib 报告一致` |
 | AVPlayer 初始化 | `AVPlayer 已初始化，时长=27s` |
 
+### 2.1 第二轮真机（2026-10-26 01:55，修复包 `b227d4c8…6402d0`）
+
+证据 `docs/DEVICE-EVIDENCE-20261026-B.md`（含原始 jpg 与 SHA256）。9 步链路回显：
+
+| # | 步骤 | 真机回显 | 判定 |
+|---|---|---|---|
+| 1 | 加载 TDLib 原生库 | 滚出视口，无回显 | 无证据 |
+| 2 | 配置 TDLib 参数 | `db=.../Library/Application Support/tgmedia/secure/tdlib/db（加密 key 16ae84...b46e）` | 通过（B） |
+| 3 | 账号登录 | `authorizationStateReady` | 通过（C） |
+| 4 | 读取频道 | `会话 3 个，其中频道 1 个` | 通过 |
+| 5 | 读取消息 | `18号仓储: 50 条消息` | 通过 |
+| 6 | 视频元数据 | `464x848 28s 5809108B fileId=4039` | 通过 |
+| 7 | 下载 | `...→ Library/Caches/tgmedia/tdlib_files/videos/bb4a413292c6.MP4` | 通过（A 前半） |
+| 8 | 复制到用户区 | `...→ Documents/TGMediaDownloads/c1002273572608/bb4a413292c6_4039.mp4` | 通过（A 后半） |
+| 9 | 播放校验 | `AVPlayer 已初始化，时长=27s` | 通过 |
+
+`fileId` 由 `4357` 变为 `4039`，容器 UUID 变为 `25212DE5-…`，印证"换路径换 key ⇒ 新建库 ⇒ 重收一次验证码"，与升级副作用预判一致。**四区隔离首次在真机成立。**
+
+未取得证据的复测项：第 1 项文案（D）、旧库红字提示条、冷启 key 复用、Filza 目录核对、画面/音轨/seek、断网残留、重复点击复用。
+
+### 2.2 本轮新发现
+
+| # | 问题 | 位置 |
+|---|---|---|
+| E | 步骤状态图标在多行 detail 里垂直居中，脱离标题行；第 8 步 6 行路径时 ✓ 落到中间，肉眼读成"未打勾" | `lib/ui/probe_page.dart:347` `ListTile` 缺 `titleAlignment` |
+| F | detail 显示容器绝对路径，375pt 宽下折 4–5 行，UUID 被硬断成 `25212DE5-` / `C911-…` | 同上，`step.detail` 构造处 |
+
+E、F 均为观感与可读性问题，归入第 4 步 UI 一并处理。
+
 ## 3. 未验证（不计入通过）
 
 | 项目 | 原因 |
@@ -62,17 +91,17 @@
 | 分页翻页（offset / keyset） | 单次 50 条取完，未触发 |
 | 下载中断续传 | 5.5 MB 一次下完，未制造断网 |
 | 冷启后登录态保持 | 未做退出重进 |
-| 缓存清理安全行为 | 四区隔离尚未接进探针，无可清理对象 |
+| 缓存清理安全行为 | 四区隔离已于第二轮真机生效，但清理动作本身尚未在真机执行 |
 | 多频道 / 大文件 / 长视频 | 样本仅 1 频道 1 条 28 秒视频 |
 
-### 真机证据暴露的待修项（已修，live 验证待真机）
+### 真机证据暴露的待修项（第二轮真机已确认 A/B/C 生效）
 
 | # | 问题 | 状态 | 位置（修复后） |
 |---|---|---|---|
-| A | 下载落进 TDLib file store，四区隔离未生效；整目录清理会连带删授权 | **已修** `3480894` | `lib/storage/download_mover.dart`、`lib/storage/download_paths.dart`、`lib/storage/storage_layout.dart` |
-| B | `database_encryption_key` 为空串，TDLib 本地库明文 | **已修** `3480894` | `lib/security/tdlib_key.dart`、`lib/td/td_requests.dart` |
-| C | 登录成功状态未置 success（`markAuthorized` 从未被调用） | **已修** `3480894` | `lib/ui/probe_page.dart` |
-| D | 「动态库符号解析」措辞不准 | **已修** `3480894` | `lib/ui/probe_page.dart` |
+| A | 下载落进 TDLib file store，四区隔离未生效；整目录清理会连带删授权 | **已修 + 真机确认** | `lib/storage/download_mover.dart`、`lib/storage/download_paths.dart`、`lib/storage/storage_layout.dart` |
+| B | `database_encryption_key` 为空串，TDLib 本地库明文 | **已修 + 真机确认** | `lib/security/tdlib_key.dart`、`lib/td/td_requests.dart` |
+| C | 登录成功状态未置 success（`markAuthorized` 从未被调用） | **已修 + 真机确认** | `lib/ui/probe_page.dart` |
+| D | 「动态库符号解析」措辞不准 | 已修，**截图未覆盖该项** | `lib/ui/probe_page.dart` |
 
 修复细节、测试与真机复测清单见 `docs/FIX-A1B-REPORT.md`。
 
