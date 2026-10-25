@@ -1,6 +1,6 @@
 # TG Media 第 2 步：技术可行性验证状态
 
-最后更新：2026-10-26 02:45（Windows 开发机）
+最后更新：2026-10-26 02:59（Windows 开发机）
 仓库：https://github.com/1585365426/tg-media-probe （public，`main`，源码与脚本已推送）
 
 ## 1. 已验证（真实执行过，可复现）
@@ -141,9 +141,13 @@ run [40198573231](https://github.com/1585365426/tg-media-probe/actions/runs/4019
 
 ## 6.1 第 4 步（界面与功能）
 
-代码已提交 `c5a3372`，本机 `flutter analyze` 无问题、`flutter test` **243 passed / 1 skipped**。
-详细实现、安全校验与自测对照见 `docs/STEP4-REPORT.md`。该提交**尚未推送**，CI 未构建新 IPA，
-真机交互全部未验证。
+代码已提交 `c5a3372`（界面与功能）+ `7fbee2f`（E/F 探针页修复），本机 `flutter analyze` 无问题、
+`flutter test` **255 passed / 1 skipped**。详细实现、安全校验与自测对照见 `docs/STEP4-REPORT.md`。
+
+已推送并构建：CI run [40223283270](https://github.com/1585365426/tg-media-probe/actions/runs/40223283270)
+`success`，5m22s，产物 IPA 19,955,311 B，SHA256 `08842ca7…401fd7`，见 `docs/BUILD-40223283270.md`。
+
+**真机交互全部未验证**——装包、启动、登录、频道、播放、下载、横竖屏、Face ID、收藏、缓存清理都还没跑过。
 
 ## 7. CI 产出位置（跑完后读取，不需要 Actions 界面）
 
