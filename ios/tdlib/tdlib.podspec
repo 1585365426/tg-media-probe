@@ -31,9 +31,11 @@ app bundle and no dynamic library has to be signed on device.
     'CLANG_CXX_LANGUAGE_STANDARD' => 'c++17',
   }
   s.user_target_xcconfig = {
-    # The app never calls td_* from Objective-C, so without this the linker is
+    # The app never calls td_* from Objective-C, so without these the linker is
     # free to drop tdjson.o and dart:ffi would fail to resolve the symbols from
-    # DynamicLibrary.process() at runtime.
-    'OTHER_LDFLAGS' => '-Wl,-u,_td_create_client_id',
+    # DynamicLibrary.process() at runtime. Proven by CI run 40197805319: with a
+    # single -u flag only _td_create_client_id survived and the other three
+    # entry points were stripped.
+    'OTHER_LDFLAGS' => '-Wl,-u,_td_create_client_id -Wl,-u,_td_send -Wl,-u,_td_receive -Wl,-u,_td_execute',
   }
 end

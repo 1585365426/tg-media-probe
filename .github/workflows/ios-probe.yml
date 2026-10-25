@@ -133,12 +133,14 @@ jobs:
           grep -n -A6 "tdlib" Podfile.lock | tee ../ci-report/podfile-lock-tdlib.txt
           echo "--- Pods xcconfig is actually included by Runner"
           grep -n "Pods-Runner" Flutter/Debug.xcconfig Flutter/Release.xcconfig | tee ../ci-report/xcconfig-include.txt
-          echo "--- linker flag that keeps tdjson.o alive"
-          grep -rn "td_create_client_id" "Pods/Target Support Files/Pods-Runner/" | tee ../ci-report/linker-flags.txt
-          if ! grep -rq "td_create_client_id" "Pods/Target Support Files/Pods-Runner/"; then
-            echo "ERROR: pod user_target_xcconfig never reached the Runner xcconfig" >&2
-            exit 1
-          fi
+          echo "--- linker flags that keep tdjson.o alive"
+          grep -rn "td_create_client_id\|td_send\|td_receive\|td_execute" "Pods/Target Support Files/Pods-Runner/" | tee ../ci-report/linker-flags.txt
+          for sym in td_create_client_id td_send td_receive td_execute; do
+            if ! grep -rq "\-u,_${sym}" "Pods/Target Support Files/Pods-Runner/"; then
+              echo "ERROR: -u,_${sym} never reached the Runner xcconfig" >&2
+              exit 1
+            fi
+          done
 
       - name: Build unsigned iOS app
         run: |
