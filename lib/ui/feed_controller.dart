@@ -21,7 +21,9 @@ import 'package:flutter/widgets.dart' show AppLifecycleState, Orientation;
 
 import '../data/channel_sync.dart' show MediaPager;
 import '../data/index_store.dart';
+import '../app/app_preferences.dart';
 import '../data/media_record.dart';
+import '../data/video_number_lookup.dart';
 import '../playback/player_slot.dart';
 import '../playback/video_source.dart';
 import '../playback/watch_store.dart';
@@ -101,20 +103,27 @@ class FeedController extends ChangeNotifier {
     required this.sources,
     this.chatTitles = const <int, String>{},
     bool defaultMuted = false,
-    this.preloadAdjacent = true,
+    bool preloadAdjacent = true,
+    int? preloadCount,
     this.pollInterval = const Duration(milliseconds: 250),
     this.watch,
-  })  : _muted = defaultMuted;
+  })  : _muted = defaultMuted,
+        preloadCount = preloadCount ??
+            (preloadAdjacent ? AppPreferences.defaultPreloadCount : 0);
 
   final FeedPageSource source;
   final SinglePlayerController player;
   final VideoSourceResolver sources;
 
+  /// Prefetch window: how many items after the current one may be prepared.
+  /// 0 disables it. Read from the saved preference.
+  final int preloadCount;
+
   /// `chatId -> channel title`, filled from the channel directory. Used for the
   /// bottom info line; a missing entry renders as "未知频道" rather than a blank.
   final Map<int, String> chatTitles;
 
-  final bool preloadAdjacent;
+  bool get preloadAdjacent => preloadCount > 0;
 
   /// Playhead polling. Null in tests, where time does not pass.
   final Duration? pollInterval;
@@ -361,7 +370,9 @@ class FeedController extends ChangeNotifier {
   /// between the two moments the call reports [NumberJumpResult.notFound]
   /// instead of silently playing a neighbour.
   Future<NumberJumpResult> openNumber(int number) async {
-    if (number < 1 || number > maxNumber) return NumberJumpResult.invalid;
+    if (number < 1 || number > VideoNumberLookup.maxNumber) {
+      return NumberJumpResult.invalid;
+    }
     final target = number - 1;
 
     var guard = 0;
@@ -383,9 +394,13 @@ class FeedController extends ChangeNotifier {
     return NumberJumpResult.opened;
   }
 
+  /// The visible position of the current item, 1-based, or null when nothing is
+  /// playing. Same numbering as [openNumber].
+  int? get currentNumber => _index < 0 ? null : _index + 1;
+
   /// Upper bound for the number box. Not a list limit — it only keeps a typo
   /// like 999999999 from becoming a million page requests.
-  static const int maxNumber = 100000;
+  static const int maxNumber = VideoNumberLookup.maxNumber;
 
   Future<void> _moveTo(int target) async {
     if (target < 0 || target >= _items.length) return;
@@ -463,24 +478,45 @@ class FeedController extends ChangeNotifier {
     await _prefetchNext();
   }
 
+  /// Prepares up to [preloadCount] videos **after** the current one.
+  ///
+  /// Sequential on purpose: the current item already owns one transfer, and
+  /// firing three at once would push the one being watched behind them. The
+  /// window is capped by [AppPreferences.maxPreloadCount] and by the path cache
+  /// size, so this can never turn into "download the channel".
   Future<void> _prefetchNext() async {
-    if (!preloadAdjacent) return;
-    final next = _index + 1;
-    if (next >= _items.length) return;
-    final record = _items[next];
-    if (record.fileId == 0 || _pathCache.containsKey(record.fileId)) return;
-    try {
-      final path = await sources.resolve(record.fileId);
-      if (_disposed) return;
-      _pathCache[record.fileId] = path;
-      while (_pathCache.length > _pathCacheLimit) {
-        _pathCache.remove(_pathCache.keys.first);
+    final count = preloadCount.clamp(0, AppPreferences.maxPreloadCount);
+    if (count <= 0) return;
+    final generation = ++_prefetchGeneration;
+    for (var offset = 1; offset <= count; offset++) {
+      final next = _index + offset;
+      if (next >= _items.length) return;
+      if (generation != _prefetchGeneration) return; // superseded
+      final record = _items[next];
+      if (record.fileId == 0 || _pathCache.containsKey(record.fileId)) continue;
+      try {
+        final path = await sources.resolve(record.fileId);
+        if (_disposed || generation != _prefetchGeneration) return;
+        _pathCache[record.fileId] = path;
+        while (_pathCache.length > _pathCacheLimit) {
+          _pathCache.remove(_pathCache.keys.first);
+        }
+        _prefetchCompleted++;
+      } on Object {
+        // A failed prefetch is invisible by design: the item will be resolved
+        // again (with a visible error) when the user actually reaches it.
+        _prefetchFailed++;
       }
-    } on Object {
-      // A failed prefetch is invisible by design: the item will be resolved
-      // again (with a visible error) when the user actually reaches it.
     }
   }
+
+  /// Counters for the report: how many prefetches finished, failed, or were
+  /// dropped because the user moved on. No gameplay depends on them.
+  int _prefetchCompleted = 0;
+  int _prefetchFailed = 0;
+  int _prefetchGeneration = 0;
+  int get prefetchCompleted => _prefetchCompleted;
+  int get prefetchFailed => _prefetchFailed;
 
   Future<void> togglePlayPause() async {
     final active = player.active;

@@ -217,31 +217,38 @@ void main() {
     test('the app root holds portrait around every route', () {
       final root = source('lib/app/app_root.dart');
       expect(root, contains('_PortraitHost'));
-      expect(root, contains('ScreenOrientationMode.lockedPortrait'));
       // The host must wrap the router, not one branch of it.
       expect(root, contains('_PortraitHost(child: _buildRoot())'));
+      // And it must register the non-playback intent on the shared stack.
+      expect(root, contains('OrientationIntent.nonPlaybackPortrait'));
+      expect(root, contains('OrientationCoordinator.appOwner'));
     });
 
     test('the feed enters portrait and only user action asks for landscape',
         () {
       final feed = source('lib/ui/feed_page.dart');
-      // Scope default stays portrait; landscape appears only inside the toggle.
-      expect(feed, contains('mode: ScreenOrientationMode.lockedPortrait'));
-      final toggle = feed.indexOf('_toggleLandscape');
-      final forced = feed.indexOf('ScreenOrientationMode.forcedLandscape');
-      expect(forced, greaterThan(toggle),
-          reason: 'landscape must live inside the explicit toggle');
-      // Landscape appears only as the toggle's target, never as a page default.
-      final requests = 'ScreenOrientationMode.forcedLandscape'
-          .allMatches(feed)
-          .length;
-      final toggleRegion = feed.substring(toggle);
-      expect(requests, greaterThan(0));
-      expect(toggleRegion.contains('ScreenOrientationMode.forcedLandscape'),
-          isTrue);
-      // Everything before the toggle is the scope/initial state: no landscape.
-      expect(feed.substring(0, toggle).contains('forcedLandscape'), isFalse,
+      final init = feed.indexOf('void initState()');
+      final toggle = feed.indexOf('Future<void> _toggleLandscape()');
+      expect(init, greaterThan(0));
+      expect(toggle, greaterThan(init));
+
+      // initState registers playbackPortrait and never landscape.
+      final initBody = feed.substring(init, toggle);
+      expect(initBody.contains('OrientationIntent.playbackPortrait'), isTrue);
+      expect(initBody.contains('playbackLandscape'), isFalse,
           reason: 'entering the player must stay portrait');
+
+      // The toggle is the only place that may ask for landscape.
+      final toggleBody = feed.substring(
+        toggle,
+        feed.indexOf('Future<void> _openNumberBox()', toggle),
+      );
+      expect(toggleBody.contains('OrientationIntent.playbackLandscape'), isTrue);
+      expect(
+        'OrientationIntent.playbackLandscape'.allMatches(feed).length,
+        1,
+        reason: 'exactly one landscape request in the whole page',
+      );
     });
 
     test('switching videos never requests a rotation', () {
@@ -251,13 +258,15 @@ void main() {
       expect(controller.contains('SystemChrome'), isFalse);
     });
 
-    test('the shell keeps portrait for the three tabs', () {
+    test('the shell does not own a second orientation holder', () {
       final root = source('lib/app/app_root.dart');
-      expect(root, contains('class _AppShellState'));
-      final portraitScopes =
-          RegExp('mode: ScreenOrientationMode.lockedPortrait').allMatches(root);
-      expect(portraitScopes.length, greaterThanOrEqualTo(2),
-          reason: 'host + shell both hold portrait');
+      final shell = root.indexOf('class _AppShellState');
+      expect(shell, greaterThan(0));
+      final shellBody = root.substring(shell);
+      // One holder for the process: the host. A second one was the bug.
+      expect(shellBody.contains('OrientationBridge'), isFalse,
+          reason: 'the shell must not set the orientation itself');
+      expect(shellBody.contains('PageOrientationScope'), isFalse);
     });
   });
 }

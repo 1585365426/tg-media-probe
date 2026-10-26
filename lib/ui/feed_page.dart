@@ -17,6 +17,7 @@ import 'package:video_player/video_player.dart';
 import '../app/app_preferences.dart';
 import '../app/app_session.dart';
 import '../platform/orientation_controller.dart';
+import '../platform/orientation_coordinator.dart';
 import '../playback/player_slot.dart';
 import '../playback/video_player_handle.dart';
 import '../playback/video_source.dart';
@@ -38,6 +39,7 @@ class FeedPage extends StatefulWidget {
     this.showBackButton = false,
     this.activeFiles,
     this.orientation,
+    this.coordinator,
     this.isActive = true,
   });
 
@@ -58,6 +60,9 @@ class FeedPage extends StatefulWidget {
 
   final OrientationBridge? orientation;
 
+  /// Injectable for tests; the app uses [OrientationCoordinator.instance].
+  final OrientationCoordinator? coordinator;
+
   /// False while the shell shows another tab. The feed releases its decoder
   /// instead of playing audio behind the settings page.
   final bool isActive;
@@ -67,8 +72,7 @@ class FeedPage extends StatefulWidget {
 }
 
 class _FeedPageState extends State<FeedPage> with WidgetsBindingObserver {
-  late final OrientationBridge _orientation;
-  late final PageOrientationScope _orientationScope;
+  late final OrientationCoordinator _orientation;
 
   final PageController _pager = PageController();
   late final ActiveFileRegistry _activeFiles;
@@ -84,14 +88,18 @@ class _FeedPageState extends State<FeedPage> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    _orientation = widget.orientation ?? OrientationBridge();
-    _orientationScope = PageOrientationScope(
-      _orientation,
-      mode: ScreenOrientationMode.lockedPortrait,
-    );
+    _orientation = widget.coordinator ??
+        (widget.orientation == null
+            ? OrientationCoordinator.instance
+            : OrientationCoordinator(bridge: widget.orientation));
     _activeFiles = widget.activeFiles ?? ActiveFileRegistry();
     _chatFilter = widget.initialChatId;
-    _orientationScope.enter();
+    // Opening the player is portrait. Only the full-screen button may ask for
+    // landscape, and removing this owner restores portrait by construction.
+    _orientation.set(
+      OrientationCoordinator.feedOwner,
+      OrientationIntent.playbackPortrait,
+    );
     _rebuildController();
   }
 
@@ -125,7 +133,7 @@ class _FeedPageState extends State<FeedPage> with WidgetsBindingObserver {
       watch: WatchStore(directory: store.directory, ops: const IoFileOps()),
       chatTitles: titles,
       defaultMuted: widget.preferences.defaultMuted,
-      preloadAdjacent: widget.preferences.preloadAdjacent,
+      preloadCount: widget.preferences.preloadCount,
     );
     controller.addListener(_onControllerChanged);
     _controller = controller;
@@ -197,7 +205,7 @@ class _FeedPageState extends State<FeedPage> with WidgetsBindingObserver {
       controller.shutdown();
       controller.dispose();
     }
-    _orientationScope.dispose();
+    _orientation.clear(OrientationCoordinator.feedOwner);
     _pager.dispose();
     super.dispose();
   }
@@ -544,23 +552,38 @@ class _FeedPageState extends State<FeedPage> with WidgetsBindingObserver {
   Future<void> _toggleLandscape() async {
     if (_rotationHintBusy) return;
     _rotationHintBusy = true;
-    final target = _isLandscape
-        ? ScreenOrientationMode.lockedPortrait
-        : ScreenOrientationMode.forcedLandscape;
+    final wantLandscape = !_isLandscape;
+    final intent = wantLandscape
+        ? OrientationIntent.playbackLandscape
+        : OrientationIntent.playbackPortrait;
     try {
-      await _orientation.setMode(target);
+      await _orientation.set(OrientationCoordinator.feedOwner, intent);
       await Future<void>.delayed(const Duration(milliseconds: 400));
       if (!mounted || _disposed) return;
 
-      final wanted = target == ScreenOrientationMode.forcedLandscape
-          ? Orientation.landscape
-          : Orientation.portrait;
+      final wanted =
+          wantLandscape ? Orientation.landscape : Orientation.portrait;
       if (MediaQuery.of(context).orientation == wanted) return;
 
-      setState(() => _rotationHint = '系统方向锁已开启，无法自动旋转');
+      // Two different failures look the same to the user: the system lock, and
+      // a bridge that answered nothing. Say which one, don't just retry.
+      final status = _orientation.status;
+      final message = status.outcome == OrientationOutcome.failed ||
+              status.outcome == OrientationOutcome.unsupported
+          ? '方向切换失败：${status.message ?? '系统拒绝'}'
+          : '系统方向锁已开启，无法自动旋转';
+      setState(() => _rotationHint = message);
       await Future<void>.delayed(const Duration(seconds: 3));
       if (!mounted || _disposed) return;
       setState(() => _rotationHint = null);
+      // The state machine must not keep claiming landscape if the screen is
+      // still portrait.
+      if (wantLandscape) {
+        await _orientation.set(
+          OrientationCoordinator.feedOwner,
+          OrientationIntent.playbackPortrait,
+        );
+      }
     } finally {
       _rotationHintBusy = false;
     }

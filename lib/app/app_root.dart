@@ -17,7 +17,7 @@ import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 
 import '../lock/lock_screens.dart';
-import '../platform/orientation_controller.dart';
+import '../platform/orientation_coordinator.dart';
 import '../lock/unlock_controller.dart';
 import '../security/biometric.dart';
 import '../security/lock_policy.dart';
@@ -52,21 +52,21 @@ class _PortraitHost extends StatefulWidget {
 }
 
 class _PortraitHostState extends State<_PortraitHost> {
-  late final OrientationBridge _bridge = OrientationBridge();
-  late final PageOrientationScope _scope = PageOrientationScope(
-    _bridge,
-    mode: ScreenOrientationMode.lockedPortrait,
-  );
+  final OrientationCoordinator _coordinator = OrientationCoordinator.instance;
 
   @override
   void initState() {
     super.initState();
-    _scope.enter();
+    // Bottom of the stack: portrait for everything that is not the player.
+    _coordinator.set(
+      OrientationCoordinator.appOwner,
+      OrientationIntent.nonPlaybackPortrait,
+    );
   }
 
   @override
   void dispose() {
-    _scope.dispose();
+    _coordinator.clear(OrientationCoordinator.appOwner);
     super.dispose();
   }
 
@@ -307,34 +307,18 @@ class AppShell extends StatefulWidget {
 class _AppShellState extends State<AppShell> {
   int _index = 0;
 
-  /// The shell holds portrait for every tab that is not the feed.
+  /// The shell does not own orientation any more.
   ///
-  /// The feed pushes its own scope on top and restores portrait when it leaves.
-  /// Without a holder here, the app had no page asserting portrait at all, so a
-  /// phone held sideways rotated the list and settings — the reported
-  /// "自动横屏、切不回竖屏".
-  late final OrientationBridge _orientation = OrientationBridge();
-  late final PageOrientationScope _orientationScope = PageOrientationScope(
-    _orientation,
-    mode: ScreenOrientationMode.lockedPortrait,
-  );
+  /// `_PortraitHost` holds portrait for every non-player route, and the feed
+  /// raises its own intent on the shared [OrientationCoordinator] while it is
+  /// open. Two independent holders were exactly how the app ended up sideways
+  /// after leaving the player: the shell had set portrait once, in initState,
+  /// and nothing re-applied it after the feed's own reset.
 
   /// The feed is built on first visit only: constructing it opens a player and
   /// starts a transfer, which must not happen while the user is reading the
   /// channel list.
   bool _feedBuilt = false;
-
-  @override
-  void initState() {
-    super.initState();
-    _orientationScope.enter();
-  }
-
-  @override
-  void dispose() {
-    _orientationScope.dispose();
-    super.dispose();
-  }
 
   void _select(int index) {
     if (index == _index) return;

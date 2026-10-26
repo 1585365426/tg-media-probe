@@ -75,7 +75,17 @@ class AppPreferences {
     this.feedDirection = FeedDirection.portraitPreferred,
     this.defaultMuted = false,
     this.preloadAdjacent = true,
+    this.preloadCount = defaultPreloadCount,
   });
+
+  /// How many videos **after** the current one may be prepared in advance.
+  ///
+  /// The old switch only had on/off and always meant "the next one", so 1 is
+  /// the compatible default. The ceiling is small on purpose: every extra item
+  /// is a TDLib transfer competing with the one being watched, and a player
+  /// slot that has to be thrown away when the user swipes past it.
+  static const int defaultPreloadCount = 1;
+  static const int maxPreloadCount = 3;
 
   /// First launch. Nothing here turns anything on that the spec wants off:
   /// muting is off, theme follows the system, rotation is portrait-first.
@@ -87,21 +97,27 @@ class AppPreferences {
   /// Sound is on by default; a muted-by-default feed is a support ticket.
   final bool defaultMuted;
 
-  /// Preloads at most the next item's player. Turned off automatically when the
-  /// system reports memory pressure, without writing that back here.
+  /// Legacy on/off view of [preloadCount]. Kept so an older store still loads;
+  /// `preloadCount` is the value the player uses.
   final bool preloadAdjacent;
+
+  /// Videos after the current one that may be prepared ahead. 0 disables it.
+  final int preloadCount;
 
   AppPreferences copyWith({
     ThemePreference? theme,
     FeedDirection? feedDirection,
     bool? defaultMuted,
     bool? preloadAdjacent,
+    int? preloadCount,
   }) {
+    final count = preloadCount ?? this.preloadCount;
     return AppPreferences(
       theme: theme ?? this.theme,
       feedDirection: feedDirection ?? this.feedDirection,
       defaultMuted: defaultMuted ?? this.defaultMuted,
-      preloadAdjacent: preloadAdjacent ?? this.preloadAdjacent,
+      preloadAdjacent: preloadAdjacent ?? (count > 0),
+      preloadCount: count,
     );
   }
 
@@ -110,6 +126,7 @@ class AppPreferences {
         'feedDirection': feedDirection.name,
         'defaultMuted': defaultMuted,
         'preloadAdjacent': preloadAdjacent,
+        'preloadCount': preloadCount,
       };
 
   /// Tolerant decode: an unknown enum name falls back to the default for that
@@ -121,7 +138,19 @@ class AppPreferences {
       feedDirection: FeedDirectionLabel.fromName(json['feedDirection']),
       defaultMuted: json['defaultMuted'] == true,
       preloadAdjacent: json['preloadAdjacent'] != false,
+      preloadCount: _countFromJson(json),
     );
+  }
+
+  /// Reads `preloadCount`, falling back to the old boolean, then to the default.
+  /// Out-of-range values are clamped instead of rejecting the whole record: a
+  /// hand-edited file must not brick the settings page.
+  static int _countFromJson(Map<String, Object?> json) {
+    final raw = json['preloadCount'];
+    if (raw is int) return raw.clamp(0, maxPreloadCount);
+    if (raw is num) return raw.toInt().clamp(0, maxPreloadCount);
+    if (json['preloadAdjacent'] == false) return 0;
+    return defaultPreloadCount;
   }
 
   @override
@@ -130,16 +159,18 @@ class AppPreferences {
       other.theme == theme &&
       other.feedDirection == feedDirection &&
       other.defaultMuted == defaultMuted &&
-      other.preloadAdjacent == preloadAdjacent;
+      other.preloadAdjacent == preloadAdjacent &&
+      other.preloadCount == preloadCount;
 
   @override
   int get hashCode =>
-      Object.hash(theme, feedDirection, defaultMuted, preloadAdjacent);
+      Object.hash(theme, feedDirection, defaultMuted, preloadAdjacent,
+          preloadCount);
 
   @override
   String toString() =>
       'AppPreferences(theme=${theme.name}, dir=${feedDirection.name}, '
-      'muted=$defaultMuted, preload=$preloadAdjacent)';
+      'muted=$defaultMuted, preload=$preloadCount)';
 }
 
 /// Persistence for [AppPreferences].
@@ -226,5 +257,13 @@ class PreferencesController extends ChangeNotifier {
       update(_value.copyWith(defaultMuted: muted));
 
   Future<void> setPreloadAdjacent(bool enabled) =>
-      update(_value.copyWith(preloadAdjacent: enabled));
+      update(_value.copyWith(preloadCount: enabled ? 1 : 0));
+
+  /// Sets the preload window. Returns false when [count] is out of range, so
+  /// the settings row can show an error instead of silently writing a clamp.
+  Future<bool> setPreloadCount(int count) async {
+    if (count < 0 || count > AppPreferences.maxPreloadCount) return false;
+    await update(_value.copyWith(preloadCount: count));
+    return true;
+  }
 }

@@ -18,6 +18,7 @@ import '../storage/active_files.dart';
 import '../util/byte_format.dart';
 import 'app_theme.dart';
 import 'feed_page.dart';
+import '../data/video_number_lookup.dart';
 import '../td/td_error_kind.dart';
 import 'status_view.dart';
 
@@ -256,6 +257,9 @@ class _ChannelDetailPageState extends State<ChannelDetailPage> {
 
   /// Guards the scroll-triggered auto load so one flick cannot start two walks.
   bool _autoLoading = false;
+
+  /// Guards the number lookup: a slow lookup must not be started twice.
+  bool _jumpBusy = false;
   final ScrollController _scroll = ScrollController();
 
   @override
@@ -373,6 +377,11 @@ class _ChannelDetailPageState extends State<ChannelDetailPage> {
         title: Text(widget.title, maxLines: 1, overflow: TextOverflow.ellipsis),
         actions: <Widget>[
           IconButton(
+            tooltip: '输入视频编号',
+            icon: const Icon(Icons.tag),
+            onPressed: _openNumberJump,
+          ),
+          IconButton(
             tooltip: '播放该频道视频',
             icon: const Icon(Icons.play_circle_outline),
             onPressed: _items.isEmpty ? null : _playChannel,
@@ -456,6 +465,96 @@ class _ChannelDetailPageState extends State<ChannelDetailPage> {
             ],
           ),
         ],
+      ),
+    );
+  }
+
+  /// "Video number" for this channel only.
+  ///
+  /// The number is resolved through [VideoNumberLookup] — the same code the
+  /// player uses — so "38" means the same video on both screens. The lookup is
+  /// scoped to [widget.chatId]; a number that does not exist here reports the
+  /// real count instead of landing on another channel's 38th video.
+  Future<void> _openNumberJump() async {
+    if (_jumpBusy) return;
+    final store = widget.session.index;
+    if (store == null) return;
+    final input = await showDialog<String>(
+      context: context,
+      builder: (context) {
+        final field = TextEditingController();
+        return AlertDialog(
+          title: const Text('输入视频编号'),
+          content: TextField(
+            controller: field,
+            autofocus: true,
+            keyboardType: TextInputType.number,
+            decoration: const InputDecoration(
+              hintText: '例如 38',
+              helperText: '按本频道视频顺序，从 1 开始',
+            ),
+            onSubmitted: (value) => Navigator.of(context).pop(value),
+          ),
+          actions: <Widget>[
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('取消'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(context).pop(field.text),
+              child: const Text('打开'),
+            ),
+          ],
+        );
+      },
+    );
+    if (!mounted || input == null) return;
+    final trimmed = input.trim();
+    final number = int.tryParse(trimmed);
+    if (number == null || trimmed.isEmpty) {
+      _toast('请输入 1 以上的数字编号');
+      return;
+    }
+
+    _jumpBusy = true;
+    try {
+      final result = await VideoNumberLookup.find(
+        store: store,
+        chatId: widget.chatId,
+        number: number,
+      );
+      if (!mounted) return;
+      switch (result.status) {
+        case NumberLookupStatus.found:
+          await _openMessageAt(result.messageId!);
+        case NumberLookupStatus.notFound:
+          _toast('未找到编号 $number（本频道共 ${result.videoCount} 条视频）');
+        case NumberLookupStatus.invalid:
+          _toast('请输入 1 以上的数字编号');
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _jumpBusy = false);
+      }
+    }
+  }
+
+  void _toast(String message) {
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  Future<void> _openMessageAt(int messageId) async {
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => FeedPage(
+          session: widget.session,
+          preferences: widget.preferences,
+          activeFiles: widget.activeFiles,
+          initialChatId: widget.chatId,
+          initialMessageId: messageId,
+          showBackButton: true,
+        ),
       ),
     );
   }

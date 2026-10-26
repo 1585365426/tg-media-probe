@@ -331,18 +331,87 @@ class _SettingsPageState extends State<SettingsPage> {
             ),
             const SettingsDivider(),
             SettingsRow(
-              title: '预加载相邻视频',
-              subtitle: '只预取相邻一条的字节，仍然只有一个播放器',
+              title: '相邻视频预加载数量',
+              // The wording has to match the implementation: forward only, and
+              // one transfer at a time so the current video keeps priority.
+              subtitle: '向后预加载 ${prefs.preloadCount} 条（0–'
+                  '${AppPreferences.maxPreloadCount}，逐个预取，不并发）',
               leading: const Icon(Icons.downloading_outlined),
-              trailing: Switch(
-                value: prefs.preloadAdjacent,
-                onChanged: widget.preferences.setPreloadAdjacent,
+              trailing: TextButton(
+                onPressed: () => _editPreloadCount(prefs.preloadCount),
+                child: Text('${prefs.preloadCount} 条'),
               ),
             ),
           ],
         );
       },
     );
+  }
+
+  /// Number editor for the preload window.
+  ///
+  /// Rejects anything outside 0–[AppPreferences.maxPreloadCount] with a visible
+  /// message; it never silently clamps, because a silent clamp looks like the
+  /// setting "saved" while the player behaves differently.
+  Future<void> _editPreloadCount(int current) async {
+    final field = TextEditingController(text: '$current');
+    final input = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('相邻视频预加载数量'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            TextField(
+              controller: field,
+              autofocus: true,
+              keyboardType: TextInputType.number,
+              decoration: InputDecoration(
+                helperText: '0 = 关闭；最多 ${AppPreferences.maxPreloadCount} 条',
+              ),
+              onSubmitted: (value) => Navigator.of(context).pop(value),
+            ),
+            const SizedBox(height: 8),
+            const Text(
+              '只向后预加载，逐条进行；当前视频始终优先。',
+              style: TextStyle(fontSize: 12),
+            ),
+          ],
+        ),
+        actions: <Widget>[
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(field.text),
+            child: const Text('保存'),
+          ),
+        ],
+      ),
+    );
+    field.dispose();
+    if (!mounted || input == null) return;
+    final trimmed = input.trim();
+    final value = int.tryParse(trimmed);
+    if (value == null || trimmed.isEmpty) {
+      _showMessage('请输入 0 – ${AppPreferences.maxPreloadCount} 之间的数字');
+      return;
+    }
+    final ok = await widget.preferences.setPreloadCount(value);
+    if (!mounted) return;
+    if (!ok) {
+      _showMessage('数量需在 0 – ${AppPreferences.maxPreloadCount} 之间，未保存');
+      return;
+    }
+    _showMessage('预加载数量已设为 $value 条');
+  }
+
+  void _showMessage(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text(message)));
   }
 
   // ---- 5.5 关于 -------------------------------------------------------
