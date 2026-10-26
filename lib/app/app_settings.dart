@@ -122,6 +122,7 @@ class AppSettings {
     this.muted = true,
     this.categoryChatId,
     this.durationFilter = DurationFilter.all,
+    this.streamingEnabled = true,
   });
 
   final AppThemeMode themeMode;
@@ -135,6 +136,15 @@ class AppSettings {
 
   final DurationFilter durationFilter;
 
+  /// Whether video playback may go through the loopback range server.
+  ///
+  /// On by default (it is the only thing that makes the first frame fast), but
+  /// exposed in settings because it is the one component that depends on
+  /// AVPlayer accepting `http://127.0.0.1`. If a device or iOS build refuses,
+  /// the feed already falls back on its own after two failed items; this switch
+  /// lets the user stop paying for the attempt instead of waiting it out.
+  final bool streamingEnabled;
+
   /// Value a fresh process starts with.
   ///
   /// The task book requires every cold start to begin muted so a video can
@@ -147,6 +157,7 @@ class AppSettings {
     bool? muted,
     Object? categoryChatId = _unset,
     DurationFilter? durationFilter,
+    bool? streamingEnabled,
   }) =>
       AppSettings(
         themeMode: themeMode ?? this.themeMode,
@@ -155,6 +166,7 @@ class AppSettings {
             ? this.categoryChatId
             : categoryChatId as int?,
         durationFilter: durationFilter ?? this.durationFilter,
+        streamingEnabled: streamingEnabled ?? this.streamingEnabled,
       );
 
   static const Object _unset = Object();
@@ -165,6 +177,7 @@ class AppSettings {
         'muted': muted,
         if (categoryChatId != null) 'category': categoryChatId,
         'duration': durationFilter.wire,
+        'streaming': streamingEnabled,
       };
 
   static AppSettings fromJson(Map<String, Object?> json) => AppSettings(
@@ -173,12 +186,18 @@ class AppSettings {
         categoryChatId: json['category'] is int ? json['category']! as int : null,
         durationFilter:
             DurationFilterRule.fromWire(json['duration'] as String?),
+        // Missing key means a settings file written before the switch existed.
+        // Streaming was the default then and is the default now, so an absent
+        // value must not silently disable it.
+        streamingEnabled:
+            json['streaming'] is bool ? json['streaming']! as bool : true,
       );
 
   @override
   String toString() =>
       'AppSettings(theme=${themeMode.wire}, muted=$muted, '
-      'category=$categoryChatId, duration=${durationFilter.wire})';
+      'category=$categoryChatId, duration=${durationFilter.wire}, '
+      'streaming=$streamingEnabled)';
 }
 
 /// Persists [AppSettings] as a single JSON file written through `.tmp` + rename.
@@ -259,6 +278,11 @@ class AppSettingsStore {
 
   Future<AppSettings> setDurationFilter(DurationFilter filter) {
     final next = _cached.copyWith(durationFilter: filter);
+    return save(next).then((_) => next);
+  }
+
+  Future<AppSettings> setStreamingEnabled(bool enabled) {
+    final next = _cached.copyWith(streamingEnabled: enabled);
     return save(next).then((_) => next);
   }
 }

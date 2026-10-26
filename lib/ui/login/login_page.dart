@@ -16,6 +16,13 @@ import '../../util/redact.dart';
 /// `setTdlibParameters` / phone / code / password sequence a second time: that
 /// path is the one already proven on device in step 3.
 ///
+/// Launch-time restore ([SessionRestore]) may hand this screen a client that is
+/// **already configured against the on-disk database**. In that case the only
+/// thing left is the step TDLib asked for — a code, the 2FA password, or the
+/// phone number when the session expired. Opening a second client here instead
+/// would hit TDLib's exclusive lock on `td.binlog` and fail with
+/// `error 400: Can't lock file ... already in use`.
+///
 /// Credentials: `api_id` / `api_hash` are typed by the user (they are not
 /// shipped in the binary), written to the Keychain, and never logged. The phone
 /// number and the login code are only held in controllers for the duration of
@@ -49,15 +56,68 @@ class _LoginPageState extends State<LoginPage> {
   bool _busy = false;
   String _status = '请填写 api_id / api_hash 后点击连接';
 
+  /// True once `setTdlibParameters` succeeded for [_client] — either here or in
+  /// the launch-time restore that handed the client over. Calling it twice
+  /// against the same directory is not harmless: TDLib refuses to reconfigure a
+  /// live database, and the attempt can leave the session unusable.
+  bool _parametersConfigured = false;
+
+  /// Set when [_client] was given to [AppServices]; from then on the services
+  /// container owns its lifetime.
+  bool _handedOff = false;
+
   @override
   void initState() {
     super.initState();
     _prefill();
+    final adopted = widget.services.takeAdoptedSession();
+    if (adopted != null) _attachAdopted(adopted);
+  }
+
+  /// Continues an existing session instead of starting a new one.
+  void _attachAdopted(AdoptedSession adopted) {
+    _client = adopted.client;
+    _parametersConfigured = true;
+    _runner = ProbeRunner(client: adopted.client, layout: widget.services.layout);
+    _stage = adopted.stage;
+    _status = switch (adopted.stage) {
+      AuthStage.ready => '会话已恢复',
+      AuthStage.waitPhoneNumber => '会话已失效，请重新填写手机号',
+      AuthStage.waitCode => '需要登录验证码',
+      AuthStage.waitPassword => '需要两步验证密码',
+      AuthStage.waitOtherDeviceConfirmation => '请在另一台设备上确认登录',
+      _ => '会话状态：${adopted.stage.name}',
+    };
+    _listen(adopted.client);
+  }
+
+  void _listen(TdClient client) {
+    _updates = client.updates.listen((event) {
+      if (event['@type'] != 'updateAuthorizationState') return;
+      final raw = event['authorization_state'];
+      if (raw is! Map) return;
+      final state = AuthState.fromJson(raw.cast<String, Object?>());
+      if (!mounted) return;
+      setState(() => _stage = state.stage);
+      if (state.stage == AuthStage.ready) {
+        _runner?.markAuthorized();
+        _onAuthorized();
+      }
+    });
   }
 
   @override
   void dispose() {
     _updates?.cancel();
+    // A client that never made it into [AppServices] keeps TDLib's file lock on
+    // td.binlog for the rest of the process, which would make the next sign-in
+    // attempt fail. Release it unless ownership was transferred.
+    if (!_handedOff) {
+      final client = _client;
+      if (client != null) {
+        client.dispose();
+      }
+    }
     _apiId.dispose();
     _apiHash.dispose();
     _phone.dispose();
@@ -91,6 +151,19 @@ class _LoginPageState extends State<LoginPage> {
 
   Future<void> _connect() async {
     if (_busy) return;
+
+    // The launch gate already configured this client against the on-disk
+    // database. Re-sending setTdlibParameters would be a no-op at best and a
+    // lock conflict at worst, so jump straight to whichever step TDLib named.
+    if (_client != null && _parametersConfigured) {
+      setState(() {
+        _status = _stage == AuthStage.waitPhoneNumber
+            ? '会话已失效，请填写手机号后发送'
+            : '已连接到本机会话，当前阶段：${_stage.name}';
+      });
+      return;
+    }
+
     final apiId = int.tryParse(_apiId.text.trim());
     final apiHash = _apiHash.text.trim();
     if (apiId == null || apiHash.isEmpty) {
@@ -106,28 +179,20 @@ class _LoginPageState extends State<LoginPage> {
     try {
       final dbKey = await TdlibDatabaseKey(store: const KeychainSecretStore())
           .obtain();
-      final client = TdClient.open();
+      // Reuse a client that failed to configure last time rather than opening a
+      // second one: one client per database directory, always.
+      final client = _client ?? TdClient.open();
       final runner = ProbeRunner(client: client, layout: widget.services.layout);
       _client = client;
       _runner = runner;
+      if (_updates == null) _listen(client);
 
-      _updates = client.updates.listen((event) {
-        if (event['@type'] != 'updateAuthorizationState') return;
-        final raw = event['authorization_state'];
-        if (raw is! Map) return;
-        final state = AuthState.fromJson(raw.cast<String, Object?>());
-        if (!mounted) return;
-        setState(() => _stage = state.stage);
-        if (state.stage == AuthStage.ready) {
-          runner.markAuthorized();
-          _onAuthorized();
-        }
-      });
       await runner.initialize(
         apiId: apiId,
         apiHash: apiHash,
         databaseEncryptionKey: dbKey,
       );
+      _parametersConfigured = true;
       await _persistCredentials(apiId, apiHash);
       if (!mounted) return;
       setState(() => _status = 'TDLib 已配置（数据库加密），请发送手机号');
@@ -147,6 +212,9 @@ class _LoginPageState extends State<LoginPage> {
     final client = _client;
     if (client == null) return;
     widget.services.attachClient(client);
+    // Ownership just moved: dispose() must not close a client the rest of the
+    // app is now using.
+    _handedOff = true;
     setState(() => _status = '登录成功');
     widget.onReady?.call(client);
     if (mounted) Navigator.of(context).pop(true);
@@ -256,7 +324,11 @@ class _LoginPageState extends State<LoginPage> {
                   const SizedBox(height: 12),
                   FilledButton(
                     onPressed: _busy ? null : _connect,
-                    child: Text(connected ? '重新连接' : '连接并初始化 TDLib'),
+                    child: Text(
+                      _parametersConfigured
+                          ? '会话已就绪（跳过初始化）'
+                          : (connected ? '重新连接' : '连接并初始化 TDLib'),
+                    ),
                   ),
                 ],
               ),

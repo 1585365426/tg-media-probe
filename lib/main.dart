@@ -2,8 +2,7 @@ import 'package:flutter/material.dart';
 
 import 'app/app_model.dart';
 import 'app/app_services.dart';
-import 'ui/app_shell.dart';
-import 'ui/lock/lock_screen.dart';
+import 'ui/boot/session_gate.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -39,7 +38,10 @@ class TgMediaApp extends StatelessWidget {
           themeMode: model.themeMode,
           theme: _theme(Brightness.light),
           darkTheme: _theme(Brightness.dark),
-          home: LockGate(services: services),
+          // Launch goes through the session gate: it restores the saved TDLib
+          // session before the shell decides it is "logged out" and asks for a
+          // login code that Telegram never actually wanted.
+          home: SessionGate(services: services, model: model),
         ),
       ),
     );
@@ -56,60 +58,6 @@ class TgMediaApp extends StatelessWidget {
           behavior: SnackBarBehavior.floating,
         ),
       );
-}
-
-/// Shows [LockScreen] when a passcode is configured, the shell otherwise.
-///
-/// Verification runs on cold start only. It is deliberately not re-run when the
-/// app comes back from background: the task book asks for verification "打开App时",
-/// and re-locking on every glance at a notification would make the feed
-/// unusable. Recorded as a known trade-off in the step 4 report.
-class LockGate extends StatefulWidget {
-  const LockGate({super.key, required this.services});
-
-  final AppServices services;
-
-  @override
-  State<LockGate> createState() => _LockGateState();
-}
-
-class _LockGateState extends State<LockGate> {
-  bool? _lockEnabled;
-
-  @override
-  void initState() {
-    super.initState();
-    _check();
-  }
-
-  Future<void> _check() async {
-    var enabled = false;
-    try {
-      enabled = await widget.services.appLock.isEnabled();
-    } catch (_) {
-      // Keychain unreadable: fail closed is wrong here — the user would be
-      // locked out of their own app with no way in. The settings screen still
-      // shows the state it can read.
-      enabled = false;
-    }
-    if (!mounted) return;
-    setState(() => _lockEnabled = enabled);
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final enabled = _lockEnabled;
-    if (enabled == null) {
-      return const Scaffold(
-        body: Center(child: CircularProgressIndicator()),
-      );
-    }
-    if (!enabled) return const AppShell();
-    return LockScreen(
-      services: widget.services,
-      onUnlocked: () => setState(() => _lockEnabled = false),
-    );
-  }
 }
 
 class _BootstrapFailureApp extends StatelessWidget {

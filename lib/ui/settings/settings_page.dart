@@ -70,11 +70,22 @@ class _SettingsPageState extends State<SettingsPage> {
   /// storage section look dead.
   Future<void> _refreshScan() async {
     try {
-      final scan = await widget.services.cache.scan();
+      // Bounded: a real TDLib pool can hold tens of thousands of blobs, and a
+      // scan that never returns leaves the tile on "正在统计…" forever — which
+      // looks exactly like "the button does nothing" when the user taps it.
+      final scan = await widget.services.cache
+          .scan()
+          .timeout(const Duration(seconds: 45));
       if (!mounted) return;
       setState(() {
         _scan = scan;
         _scanError = null;
+      });
+    } on TimeoutException {
+      if (!mounted) return;
+      setState(() {
+        _scan = null;
+        _scanError = '统计超时（45s）：TDLib 文件池文件过多，稍后重试';
       });
     } catch (e) {
       if (!mounted) return;
@@ -83,6 +94,48 @@ class _SettingsPageState extends State<SettingsPage> {
         _scanError = '统计失败：$e';
       });
     }
+  }
+
+  /// Per-directory breakdown of the last scan.
+  ///
+  /// The path matters as much as the number: "0 B" alone cannot tell "the pool
+  /// is genuinely empty because nothing ever downloaded" apart from "the scan
+  /// walked a directory TDLib never writes to". Printing both makes the next
+  /// bug report answerable from a screenshot.
+  Widget _cacheBreakdown(ThemeData theme) {
+    final scan = _scan;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 10, 16, 14),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Text('扫描明细', style: theme.textTheme.labelMedium),
+          const SizedBox(height: 8),
+          for (final kind in CacheManager.scannedKinds)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: <Widget>[
+                  Text(
+                    '${kind.label}：'
+                    '${scan == null ? '—' : '${scan.countOf(kind)} 个 · ${_formatBytes(scan.bytesOf(kind))}'}',
+                    style: theme.textTheme.bodySmall,
+                  ),
+                  SelectableText(
+                    widget.services.cache.dirFor(kind),
+                    style: TextStyle(fontSize: 10, color: theme.hintColor),
+                  ),
+                ],
+              ),
+            ),
+          Text(
+            '临时缓存根目录：${widget.services.layout.tempRoot}',
+            style: TextStyle(fontSize: 10, color: theme.hintColor),
+          ),
+        ],
+      ),
+    );
   }
 
   Future<void> _clearCache() async {
@@ -227,7 +280,7 @@ class _SettingsPageState extends State<SettingsPage> {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: <Widget>[
-            Text(report.summary),
+            Text(describeCacheReport(report)),
             const SizedBox(height: 8),
             Text(
               '清理前 ${before.fileCount} 个文件 / ${_formatBytes(before.totalBytes)}'
@@ -354,6 +407,25 @@ class _SettingsPageState extends State<SettingsPage> {
             ),
           ),
           const SizedBox(height: 16),
+          _section('播放', theme),
+          Card(
+            child: Column(
+              children: <Widget>[
+                SwitchListTile(
+                  secondary: const Icon(Icons.wifi_tethering),
+                  title: const Text('边下边播（本地流）'),
+                  subtitle: const Text(
+                    '开启后，视频在下完第一个分块时就开始播放，首帧更快。'
+                    '如果某些视频一直黑屏或加载不出来，关掉本项改为整段下载播放：'
+                    '更慢，但不依赖本地流通道。',
+                  ),
+                  value: model.settings.streamingEnabled,
+                  onChanged: (value) => model.setStreamingEnabled(value),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 16),
           _section('存储', theme),
           Card(
             child: Column(
@@ -400,6 +472,12 @@ class _SettingsPageState extends State<SettingsPage> {
                     style: theme.textTheme.bodySmall,
                   ),
                 ),
+                const Divider(height: 1),
+                // Per-directory breakdown. Two rounds of "清理了但缓存没变化"
+                // were spent guessing whether the scan saw the right place; the
+                // path next to the number makes that answerable from a
+                // screenshot instead of from another build.
+                _cacheBreakdown(theme),
               ],
             ),
           ),

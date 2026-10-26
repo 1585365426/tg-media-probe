@@ -111,6 +111,26 @@ class _VideoFeedPageState extends State<VideoFeedPage> {
   /// already swiped away cannot install itself over the current video.
   int _activationToken = 0;
 
+  /// Consecutive stream activations that never produced a moving picture.
+  ///
+  /// A range server cannot be trusted blindly: if the loopback URL is blocked,
+  /// or the item reaches `readyToPlay` and then starves, AVPlayer sits on a
+  /// black frame forever and the `activate` timeout never fires because nothing
+  /// threw. Two such items in a row mean this process stops trying, so the rest
+  /// of the session pays the download cost instead of a 10 s wait plus the
+  /// download cost.
+  int _streamFailures = 0;
+  static const int _streamGiveUpAfter = 2;
+
+  /// How long a streamed item may take to actually advance. Longer than a
+  /// normal first-frame on 4G, short enough that a broken path is obvious.
+  static const Duration _firstFrameBudget = Duration(seconds: 10);
+
+  /// One-line description of what the current item is doing. A black rectangle
+  /// with a spinner is indistinguishable from a hang, which is exactly how
+  /// "加载不出来" gets reported.
+  String? _stage;
+
   bool _muted = true;
   int? _rotation;
   bool _landscape = false;
@@ -295,6 +315,7 @@ class _VideoFeedPageState extends State<VideoFeedPage> {
     final token = ++_activationToken;
     final timeline = PlaybackTimeline.start(key);
     timeline.mark('activate');
+    if (_stage != null && mounted) setState(() => _stage = null);
 
     if (_errors.containsKey(key)) {
       if (mounted) setState(() => _visible = null);
@@ -334,7 +355,14 @@ class _VideoFeedPageState extends State<VideoFeedPage> {
     var path = existingPath;
     if (path == null) {
       _prefetchAhead();
-      if (mounted) setState(() => _progress[key] = 0);
+      if (mounted) {
+        setState(() {
+          _progress[key] = 0;
+          // The fallback is slower by definition. Saying so is the difference
+          // between "it is working" and "it is stuck".
+          _stage = '正在下载视频（整段下载后才能播放）';
+        });
+      }
       try {
         final result = await _services.resolver.ensureLocal(
           record,
@@ -392,6 +420,10 @@ class _VideoFeedPageState extends State<VideoFeedPage> {
   ) async {
     final streamer = _services.streamer;
     if (streamer == null) return false;
+    // User switch, checked before the per-session breaker: someone who turned
+    // streaming off should not pay for a single attempt.
+    if (!_model.settings.streamingEnabled) return false;
+    if (_streamFailures >= _streamGiveUpAfter) return false;
 
     Uri? url;
     try {
@@ -403,7 +435,12 @@ class _VideoFeedPageState extends State<VideoFeedPage> {
     if (url == null) return false;
     if (!mounted || token != _activationToken) return false;
 
-    if (mounted) setState(() => _progress[key] = 0);
+    if (mounted) {
+      setState(() {
+        _progress[key] = 0;
+        _stage = '正在建立本地流…';
+      });
+    }
     try {
       await _services.player
           .activate(url.toString(), autoplay: true, network: true)
@@ -413,10 +450,18 @@ class _VideoFeedPageState extends State<VideoFeedPage> {
       // Player is wedged on a range TDLib cannot serve yet. Release it (the
       // generation counter makes the late completion dispose itself) and use
       // the download path instead.
-      if (token == _activationToken) await _services.player.release();
+      _streamFailures++;
+      if (token == _activationToken) {
+        if (mounted) setState(() => _visible = null);
+        await _services.player.release();
+      }
       return false;
     } catch (_) {
-      if (token == _activationToken) await _services.player.release();
+      _streamFailures++;
+      if (token == _activationToken) {
+        if (mounted) setState(() => _visible = null);
+        await _services.player.release();
+      }
       return false;
     }
     if (!mounted || token != _activationToken) {
@@ -426,11 +471,64 @@ class _VideoFeedPageState extends State<VideoFeedPage> {
       return false;
     }
 
+    // Mute before the first frame: AVPlayer resets volume per item, and a
+    // streamed item that turns out muted-for-a-second is better than one that
+    // blasts audio while the user is still expecting silence.
+    final handle = _services.player.active;
+    if (handle is VideoPlayerHandle) await handle.setVolume(_muted ? 0 : 1);
+
+    if (mounted) setState(() => _stage = '正在缓冲第一帧…');
+    final framed = await _confirmFirstFrame(token);
+    if (!framed) {
+      _streamFailures++;
+      if (token == _activationToken) {
+        if (mounted) setState(() => _visible = null);
+        await _services.player.release();
+        if (mounted) {
+          setState(() => _stage = _streamFailures >= _streamGiveUpAfter
+              ? '本地流不可用，本次会话改为下载播放'
+              : '本地流没有出画面，改为下载播放');
+        }
+      }
+      timeline.mark('stream-no-frame');
+      return false;
+    }
+    _streamFailures = 0;
+    if (mounted) setState(() => _stage = null);
+
     await _afterActivated(key, null, token, timeline, 'stream');
     // Durability: keep promoting a copy into the user zone while it plays, so
     // clearing the cache later cannot remove a video the user watched.
     unawaited(_promoteAfterStream(record, key, token));
     return true;
+  }
+
+  /// Waits until the streamed item actually advances, then reports success.
+  ///
+  /// This is the watchdog the previous build was missing. The range server can
+  /// hand AVPlayer a perfectly valid `206` header and then have TDLib deliver
+  /// nothing; the item goes `readyToPlay`, `initialize()` returns normally, and
+  /// no exception is ever thrown, so `activate().timeout()` never fires and the
+  /// screen stays black with a spinner for as long as the user is willing to
+  /// look at it. Progress is measured on `position`, not on `isPlaying` or
+  /// `isBuffering`: AVPlayer reports both of those optimistically while it is
+  /// starved.
+  Future<bool> _confirmFirstFrame(int token) async {
+    final deadline = DateTime.now().add(_firstFrameBudget);
+    while (DateTime.now().isBefore(deadline)) {
+      if (!mounted || _disposed || token != _activationToken) return false;
+      final handle = _services.player.active;
+      if (handle is! VideoPlayerHandle) return false;
+      final controller = handle.controller;
+      if (controller == null) return false;
+      final value = controller.value;
+      if (value.hasError) return false;
+      // 250 ms is past any "the first frame is up" threshold and still far
+      // inside a 1 s clip, so a very short video is not mistaken for a stall.
+      if (value.position > const Duration(milliseconds: 250)) return true;
+      await Future<void>.delayed(const Duration(milliseconds: 120));
+    }
+    return false;
   }
 
   /// Shared tail of both activation paths: volume, loop guard, first frame.
@@ -453,6 +551,7 @@ class _VideoFeedPageState extends State<VideoFeedPage> {
         _visible = handle.controller;
         _rotation = rotation;
         _progress.remove(key);
+        _stage = null;
       });
     }
     timeline.finish(outcome);
@@ -555,7 +654,14 @@ class _VideoFeedPageState extends State<VideoFeedPage> {
     _activationToken++;
     _attachLoopGuard(null);
     _services.player.release();
-    if (!_disposed && mounted) setState(() => _visible = null);
+    if (!_disposed && mounted) {
+      setState(() {
+        _visible = null;
+        // The stage line belongs to the item that was just released. Leaving
+        // it up would describe the previous video while the next one loads.
+        _stage = null;
+      });
+    }
   }
 
   void _onPageChanged(int index) {
@@ -563,6 +669,7 @@ class _VideoFeedPageState extends State<VideoFeedPage> {
       _current = index;
       _visible = null;
       _rotation = null;
+      _stage = null;
     });
     // Old player goes first: pause + dispose before the next path resolves.
     _releasePlayer();
@@ -725,6 +832,7 @@ class _VideoFeedPageState extends State<VideoFeedPage> {
           favorite: _model.isFavorite(record),
           progress: _progress[record.key],
           error: _errors[record.key],
+          status: isCurrent ? _stage : null,
           rotationDegrees: isCurrent ? _rotation : null,
           landscape: _landscape,
           isCurrent: isCurrent,

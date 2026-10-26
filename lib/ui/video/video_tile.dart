@@ -19,6 +19,7 @@ class VideoTile extends StatelessWidget {
     required this.favorite,
     required this.progress,
     required this.error,
+    this.status,
     required this.rotationDegrees,
     required this.landscape,
     required this.isCurrent,
@@ -39,6 +40,16 @@ class VideoTile extends StatelessWidget {
 
   /// 0–1 while the file is being fetched, null when not applicable.
   final double? progress;
+
+  /// What the pipeline is doing right now — "正在建立本地流…", "正在缓冲第一帧…",
+  /// "正在下载视频（整段下载后才能播放）".
+  ///
+  /// Rendered as an overlay even after the controller reports `isInitialized`.
+  /// That case is the whole reason this field exists: a streamed item reaches
+  /// `readyToPlay` on the strength of its header alone, so a starved stream
+  /// shows a black rectangle with no spinner, no percentage and no error —
+  /// indistinguishable from a frozen app.
+  final String? status;
 
   final String? error;
 
@@ -96,7 +107,56 @@ class VideoTile extends StatelessWidget {
               top: 0,
               child: LinearProgressIndicator(value: progress == 0 ? null : progress),
             ),
+          if (isCurrent && error == null)
+            Positioned(
+              left: 16,
+              right: 16,
+              bottom: 96,
+              child: IgnorePointer(
+                child: Center(
+                  child: _statusChip(),
+                ),
+              ),
+            ),
         ],
+      ),
+    );
+  }
+
+  /// Overlay line describing the current stage, shown only while there is
+  /// something to say. Stays on screen after `isInitialized` — that is exactly
+  /// the starved-stream case.
+  Widget _statusChip() {
+    final text = status;
+    if (text == null) return const SizedBox.shrink();
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: Colors.black.withValues(alpha: 0.55),
+        borderRadius: BorderRadius.circular(14),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: <Widget>[
+            const SizedBox(
+              width: 12,
+              height: 12,
+              child: CircularProgressIndicator(
+                strokeWidth: 1.6,
+                color: Colors.white70,
+              ),
+            ),
+            const SizedBox(width: 8),
+            Flexible(
+              child: Text(
+                text,
+                textAlign: TextAlign.center,
+                style: const TextStyle(color: Colors.white70, fontSize: 12),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -129,9 +189,11 @@ class VideoTile extends StatelessWidget {
             const CircularProgressIndicator(color: Colors.white70),
             const SizedBox(height: 12),
             Text(
-              progress == null
-                  ? '准备中…'
-                  : '加载中 ${(progress! * 100).toStringAsFixed(0)}%',
+              status ??
+                  (progress == null
+                      ? '准备中…'
+                      : '加载中 ${(progress! * 100).toStringAsFixed(0)}%'),
+              textAlign: TextAlign.center,
               style: const TextStyle(color: Colors.white70, fontSize: 13),
             ),
           ],

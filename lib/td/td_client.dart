@@ -16,12 +16,30 @@ class TdLibUnavailable implements Exception {
   String toString() => 'TdLibUnavailable: $message';
 }
 
+/// The three things session restore needs from a TDLib client.
+///
+/// Exists so the restore state machine can be exercised in tests without the
+/// native library. [TdClient] is the only production implementation, and its
+/// members already match this contract exactly — no adapter, no wrapper, and
+/// therefore no second place where a request could bypass
+/// [TdReadOnlyGuard].
+abstract class TdSession {
+  Stream<Map<String, Object?>> get updates;
+
+  Future<Map<String, Object?>> request(
+    Map<String, Object?> payload, {
+    Duration timeout = const Duration(seconds: 30),
+  });
+
+  Future<void> dispose();
+}
+
 /// Async wrapper around tdjson.
 ///
 /// TDLib's JSON interface is single threaded: [receive] may only be called
 /// from one thread, and responses are matched to requests by the echoed
 /// `@extra` field. Every request therefore gets a unique `@extra` integer.
-class TdClient {
+class TdClient implements TdSession {
   TdClient._(this._bindings, this._clientId);
 
   final TdJsonBindings _bindings;
@@ -38,6 +56,7 @@ class TdClient {
 
   AuthState? get authState => _authState;
 
+  @override
   Stream<Map<String, Object?>> get updates => _updates.stream;
 
   Stream<Map<String, Object?>> get fileUpdates => _updates.stream
@@ -95,6 +114,7 @@ class TdClient {
     if (!_updates.isClosed) _updates.add(event);
   }
 
+  @override
   Future<Map<String, Object?>> request(
     Map<String, Object?> payload, {
     Duration timeout = const Duration(seconds: 30),
@@ -119,6 +139,7 @@ class TdClient {
     });
   }
 
+  @override
   Future<void> dispose() async {
     if (_disposed) return;
     _disposed = true;

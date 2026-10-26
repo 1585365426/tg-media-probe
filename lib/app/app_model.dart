@@ -84,6 +84,13 @@ class AppModel extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Toggles loopback streaming. The feed reads it on every activation, so a
+  /// change takes effect on the next video without a restart.
+  Future<void> setStreamingEnabled(bool enabled) async {
+    _settings = await services.settingsStore.setStreamingEnabled(enabled);
+    notifyListeners();
+  }
+
   void markSignedIn(bool value) {
     _signedIn = value;
     notifyListeners();

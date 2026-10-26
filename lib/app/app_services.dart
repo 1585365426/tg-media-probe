@@ -18,6 +18,19 @@ import '../storage/cache_manager.dart';
 import '../storage/file_ops.dart';
 import '../storage/storage_layout.dart';
 import '../td/td_client.dart';
+import '../td/td_models.dart';
+
+/// A TDLib client that launch-time restore already pointed at the on-disk
+/// database, plus the authorization stage it reached.
+///
+/// Lives here rather than in a widget so the gate can record it and the
+/// sign-in screen can pick it up from anywhere in the tree.
+class AdoptedSession {
+  const AdoptedSession({required this.client, required this.stage});
+
+  final TdClient client;
+  final AuthStage stage;
+}
 
 /// Composition root: every long-lived object the UI needs, wired once.
 ///
@@ -59,9 +72,30 @@ class AppServices {
   ChannelSyncEngine? _sync;
   HistorySource? _history;
   MediaStreamer? _streamer;
+  AdoptedSession? _adopted;
 
   TdClient? get client => _client;
   bool get hasClient => _client != null;
+
+  /// Client that the launch-time restore already configured against the
+  /// on-disk database, waiting for the sign-in screen to finish the handshake.
+  ///
+  /// Handing it over instead of letting the screen open its own client is not
+  /// an optimisation: TDLib allows exactly one client per `database_directory`,
+  /// and a second `setTdlibParameters` against the same files fails with
+  /// `error 400: Can't lock file .../td.binlog already in use`.
+  AdoptedSession? get adopted => _adopted;
+
+  /// Called by the launch gate once restore reports a live-but-unfinished
+  /// session.
+  void adoptSession(AdoptedSession session) => _adopted = session;
+
+  /// Called by the sign-in screen when it takes the adopted client over.
+  AdoptedSession? takeAdoptedSession() {
+    final value = _adopted;
+    _adopted = null;
+    return value;
+  }
 
   MediaResolver get resolver {
     final value = _resolver;
@@ -94,6 +128,7 @@ class AppServices {
     binder.handlePageDispose();
     await player.releaseAll();
     await _streamer?.dispose();
+    await _adopted?.client.dispose();
     await _client?.dispose();
     // Closing the store flushes nothing (journal appends are already on disk)
     // but stops late writes from a screen that is being torn down.

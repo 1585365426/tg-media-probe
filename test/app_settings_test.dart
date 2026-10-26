@@ -139,4 +139,37 @@ void main() {
       expect(AppThemeModeWire.fromWire(null), AppThemeMode.system);
     });
   });
+
+  group('streaming toggle', () {
+    test('defaults to on', () {
+      expect(const AppSettings().streamingEnabled, isTrue);
+    });
+
+    test('off survives a restart', () async {
+      await store.setStreamingEnabled(false);
+      final reloaded = await AppSettingsStore(
+        directory: box.layout.settingsDir,
+        ops: box.ops,
+      ).load();
+      expect(reloaded.streamingEnabled, isFalse);
+    });
+
+    test('a settings file written before the switch existed keeps it on',
+        () async {
+      // An older build wrote this exact JSON. Treating the missing key as
+      // "false" would silently move every upgrading user onto the slow path.
+      await box.ops.writeAsString(
+        store.filePath,
+        '{"v":1,"theme":"system","muted":true,"duration":"all"}',
+      );
+      final settings = await store.load();
+      expect(settings.streamingEnabled, isTrue);
+    });
+
+    test('copyWith leaves it alone unless asked', () {
+      const on = AppSettings(streamingEnabled: true);
+      expect(on.copyWith(muted: false).streamingEnabled, isTrue);
+      expect(on.copyWith(streamingEnabled: false).streamingEnabled, isFalse);
+    });
+  });
 }

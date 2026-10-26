@@ -74,6 +74,10 @@ class CacheScan {
   int bytesOf(CacheKind kind) =>
       entries.where((e) => e.kind == kind).fold(0, (sum, e) => sum + e.bytes);
 
+  /// How many files the scan found for one kind. Zero is a real answer:
+  /// together with the directory path it tells "empty" apart from "not walked".
+  int countOf(CacheKind kind) => entries.where((e) => e.kind == kind).length;
+
   Map<CacheKind, int> get bytesByKind => <CacheKind, int>{
         for (final kind in CacheKind.values)
           if (bytesOf(kind) > 0) kind: bytesOf(kind),
@@ -230,14 +234,24 @@ class CacheManager {
     final unsafe = <String>[];
 
     for (final kind in scannedKinds) {
-      final dir = _dirFor(kind);
+      final dir = dirFor(kind);
       final files = await ops.listFilesRecursive(dir);
       for (final path in files) {
-        // Cheap string containment: both sides come from this same layout, so
-        // they share one prefix form. The symlink-aware check runs once per
-        // file at delete time, inside assertDeletableByCacheClear — doing it
-        // here as well would double the realpath traffic for no extra safety.
-        if (!p.isWithin(layout.tempRoot, path)) {
+        // Containment against the directory this file was *listed from*, not
+        // against the zone root.
+        //
+        // The previous version compared every path against
+        // `layout.tempRoot` as plain strings. On iOS the app container is a
+        // symlink (`/var` → `/private/var`), so the two sides can disagree
+        // about the prefix even though they point at the same file; every
+        // candidate then failed `isWithin`, was filed as "unsafe", and the
+        // scan reported 0 files / 0 B while the pool held hundreds of
+        // megabytes. Comparing against the listing root removes the whole
+        // class of false negatives, and the real containment guard still runs
+        // once per file at delete time through
+        // [StorageLayout.assertDeletableByCacheClear], which canonicalises
+        // both sides.
+        if (!p.equals(dir, path) && !p.isWithin(dir, path)) {
           unsafe.add(path);
           continue;
         }
@@ -343,7 +357,7 @@ class CacheManager {
     for (final kind in CacheKind.values) {
       if (kind == CacheKind.unknownFromDirectory) continue;
       try {
-        await ops.deleteEmptyDirectory(_dirFor(kind));
+        await ops.deleteEmptyDirectory(dirFor(kind));
       } catch (_) {
         // A non-empty or busy directory is simply left in place.
       }
@@ -429,7 +443,11 @@ class CacheManager {
     return sizes;
   }
 
-  String _dirFor(CacheKind kind) => switch (kind) {
+  /// Directory a [CacheKind] lives in. Public so the settings screen can show
+  /// the user which paths were actually walked — "0 B" with no path next to it
+  /// is indistinguishable from "the scan looked in the wrong place", and that
+  /// ambiguity is why this took two rounds to pin down.
+  String dirFor(CacheKind kind) => switch (kind) {
         CacheKind.thumbnail => layout.thumbnailDir,
         CacheKind.playbackTemp => layout.playbackTempDir,
         CacheKind.partialDownload => layout.partialDownloadDir,
