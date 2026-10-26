@@ -13,7 +13,7 @@ head：`cc4a1d79a5b6ef1b228d6af28731e5cef6df563a`
 |---|---|
 | 代码已编写 | ✅ 15 个新模块 + 7 个测试文件；lib 新增 5,899 行、删除 394 行（含删除 4 个下载文件），测试新增 2,746 行 |
 | 静态检查通过 | ✅ 本机 `flutter analyze` → No issues found；CI step 13 Analyze success |
-| 自动化测试通过 | ✅ 539 passed / 1 skipped（共 540 项），本机 `00:39` 与 CI `00:57` 数字一致 |
+| 自动化测试通过 | ✅ 581 passed / 1 skipped（共 582 项；补强前为 539），本机 `00:41` 与 CI `01:05` 数字一致 |
 | iOS 包构建成功 | ✅ Xcode 26.6 / Swift 6.3.3 / iOS SDK 26.5 / CocoaPods 1.17.0 |
 | IPA 生成 + 哈希 | ✅ 19,780,011 B，sha256 `8604b99d…18ef2`（`wc -c` 精确值，非 `ls -lh` 的四舍五入） |
 | 只读守卫缺陷修复 | ✅ 已修并推入 `3cb262e`，含 3 条新增回归用例 |
@@ -180,8 +180,8 @@ flutter test                                                       → 539 passe
 本机（Windows 11 / Flutter 3.47.8 / Dart 3.13.7）与 CI runner：
 
 ```
-本机  00:39 +539 ~1: All tests passed!
-CI    00:57 +539 ~1: All tests passed!
+本机  00:41 +581 ~1: All tests passed!
+CI    01:05 +581 ~1: All tests passed!
 ```
 
 | 测试文件 | 通过 | 覆盖点 |
@@ -194,9 +194,13 @@ CI    00:57 +539 ~1: All tests passed!
 | `td_error_kind_test.dart` | 22 | 401/403/420/429/400 分类、session 优先于 permission、Timeout/Socket→offline、可实现重试矩阵、文案非空 |
 | `security_negative_test.dart` | 32 | §6 十项 |
 | `readonly_guard_test.dart` | 9 | 源码零命中、单一出口、64 个写方法逐个被拒、13 个真实请求放行、坏 `@type` |
+| `readonly_boundary_test.dart` | 12 | 补强新增：守卫唯一出口、假 bindings 零发送、7 个会话方法放行、近似名字被拒 |
+| `failure_view_test.dart` | 9 | 补强新增：五态文案、权限/登录失效无重试按钮、可重试无回调不渲染按钮 |
+| `tdlib_storage_test.dart` | 9 | 补强新增：数据库在受保护区、清理不动库、字节只计真删 |
+| `no_user_download_test.dart` | 4 | 补强新增：下载回潮防护 + 播放入口仍在 |
 | 其余既有测试 | 355 | 与第 3 步基线同源，无一删除、无一放宽 |
 
-合计 539 passed / 1 skipped（1 skip = 本机无 TDLib 二进制）。上一轮是 548 通过；删掉 35 项下载测试、新增 26 项，净减 9。
+合计 581 passed / 1 skipped（1 skip = 本机无 TDLib 二进制）。数字脉络：548（第 4 步主体）→ 删 35 项下载测试、加 26 项后 539 → 验收补强新增 42 项（12+9+9+4+3+5）→ 581。
 
 ---
 
@@ -238,15 +242,21 @@ CI    00:57 +539 ~1: All tests passed!
 ## 附：CI 与产物
 
 ```
+run 40338279166  success  7m50s  (14:17:32Z → 14:25:22Z)   ← 验收补强提交
+head 2d918ab5d511056fd44f2f1d48dff6e1d36504c3
+IPA:    TGMediaProbe-unsigned.ipa  19,780,496 B  (ipa_bytes)
+sha256: cd7f90a74080c8dc580852e002ee9574dc3b8def1c04a48f68a6f1207b7cf6bf
+test:   01:05 +581 ~1: All tests passed!
+
 run 40330720156  success  7m51s  (13:27:25Z → 13:35:16Z)
 head cc4a1d79a5b6ef1b228d6af28731e5cef6df563a
 runner: macOS 26.6.2 arm64 · Xcode 26.6 (17F113) · Swift 6.3.3 · iOS SDK 26.5 · CocoaPods 1.17.0
-steps:  TDLib 校验 → analyze(No issues) → test(539+1skip) → pod install → xcodebuild
+steps:  TDLib 校验 → analyze(No issues) → test(581+1skip) → pod install → xcodebuild
         → 符号校验(TDLib 静态链接，四个 tdjson 符号导出) → IPA 打包 → 上传产物 → 发布 ci-report
 IPA:    TGMediaProbe-unsigned.ipa  19,780,011 B  (ci-report/package.txt: ipa_bytes: 19780011)
 sha256: 8604b99dfc4824a608922adcf80e09c1a0aabf6e1465374bf1d8f7c414c18ef2
 minos 15.2 · bundle com.tgmedia.tgMediaProbe · arm64
-本地:   flutter analyze → No issues found；flutter test → 539 passed / 1 skipped
+本地:   flutter analyze → No issues found；flutter test → 581 passed / 1 skipped
 
 前序 run（同一代码树的文档提交，只证明文档不破坏构建）：
   40311608168  success  6m35s  efe48f4  IPA 19,760,196 B  sha256 61c415cd…

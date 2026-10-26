@@ -569,9 +569,9 @@ App 强制退出后重开、设备重启后打开、断网后打开、飞行模�
 |---|---|---|---|
 | A 壳与导航 | 已实现 | ✅ `app_preferences_test` 15 项 | ❌ 未执行 |
 | B 频道页 | 已实现 | ✅ `channel_directory_test` 27 项（含失败分类 4 项） | ❌ 未执行 |
-| C 抖音页 | 已实现 | ✅ `feed_controller_test` 31 项（含 100 次切换）+ `video_source_test` 9 项 | ❌ 未执行 |
+| C 抖音页 | 已实现 | ✅ `feed_controller_test` 34 项（含 100 次切换）+ `video_source_test` 14 项 | ❌ 未执行 |
 | D 设置页 | 已实现 | ✅ `unlock_controller_test` 39 项 + `security_negative_test` 32 项 | ❌ 未执行 |
-| E 收尾 | 已实现（真机除外） | ✅ `td_error_kind_test` 22 项；下载专属代码已删除 | ❌ 状态矩阵真机走查与 §4.6/§7.6/§8.8 真机记录未做 |
+| E 收尾 | 已实现（真机除外） | ✅ `td_error_kind_test` 22 + `readonly_boundary_test` 12 + `failure_view_test` 9 + `tdlib_storage_test` 9 + `no_user_download_test` 4；下载专属代码已删除 | ❌ 状态矩阵真机走查与 §4.6/§7.6/§8.8 真机记录未做 |
 
 阶段 E 剩余项只有真机部分：六种状态 × 每页的**真机**走查、§4.6/§7.6/§8.8 真机记录。代码层的六态走查已完成（见 `docs/STEP4-REPORT.md` §6），下载相关代码已按 `docs/DOWNLOAD-DEPENDENCY-MAP.md` 的顺序在步骤 2 停止（步骤 3「移除 `userDownloads` zone」仍不做）。
 
