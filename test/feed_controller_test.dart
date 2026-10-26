@@ -756,4 +756,58 @@ void main() {
       await rig.api.dispose();
     });
   });
+
+  group('tapping a row opens that exact video', () {
+    test('a message on the first page is selected without paging', () async {
+      final rig = Rig(pages: <List<MediaRecord>>[
+        <MediaRecord>[video(1), video(2), video(3)],
+      ]);
+      await rig.controller.load();
+      await Future<void>.delayed(Duration.zero);
+      final requestsBefore = rig.source.pageRequests;
+
+      final found = await rig.controller.goToMessage(1, 2);
+
+      expect(found, isTrue);
+      expect(rig.controller.current?.messageId, 2);
+      expect(rig.source.pageRequests, requestsBefore,
+          reason: 'nothing to fetch: the item was already loaded');
+      rig.controller.shutdown();
+      await rig.api.dispose();
+    });
+
+    test('a message on a later page is reached by paging', () async {
+      final rig = Rig(pages: <List<MediaRecord>>[
+        <MediaRecord>[video(1)],
+        <MediaRecord>[video(2), video(3)],
+      ]);
+      await rig.controller.load();
+      await Future<void>.delayed(Duration.zero);
+      expect(rig.source.pageRequests, 1);
+
+      final found = await rig.controller.goToMessage(1, 3);
+
+      expect(found, isTrue);
+      expect(rig.source.pageRequests, 2);
+      expect(rig.controller.current?.messageId, 3);
+      rig.controller.shutdown();
+      await rig.api.dispose();
+    });
+
+    test('a message that is not in the mirror returns false', () async {
+      final rig = Rig(pages: <List<MediaRecord>>[
+        <MediaRecord>[video(1)],
+      ]);
+      await rig.controller.load();
+      await Future<void>.delayed(Duration.zero);
+
+      final found = await rig.controller.goToMessage(1, 999);
+
+      expect(found, isFalse);
+      // The screen stays on a playable item rather than on a spinner.
+      expect(rig.controller.current, isNotNull);
+      rig.controller.shutdown();
+      await rig.api.dispose();
+    });
+  });
 }

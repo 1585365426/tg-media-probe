@@ -235,6 +235,37 @@ class FeedController extends ChangeNotifier {
     }
   }
 
+  /// Jumps to one specific message, paging forward until it appears.
+  ///
+  /// Returns false when the message is not in the mirror and cannot be reached
+  /// within [maxPages] — the caller then stays on the current item instead of
+  /// showing a spinner over an item that will never arrive.
+  Future<bool> goToMessage(
+    int chatId,
+    int messageId, {
+    int maxPages = 5,
+  }) async {
+    for (var attempt = 0; attempt <= maxPages; attempt++) {
+      final target = _items.indexWhere(
+        (r) => r.chatId == chatId && r.messageId == messageId,
+      );
+      if (target >= 0) {
+        await _moveTo(target);
+        return true;
+      }
+      if (!source.hasMore || _loadingMore) break;
+      _loadingMore = true;
+      _notify();
+      try {
+        await _appendUntilNonEmpty();
+      } finally {
+        _loadingMore = false;
+        _notify();
+      }
+    }
+    return false;
+  }
+
   Future<void> goNext() async {
     if (_phase == FeedPhase.loading) return;
     if (_index + 1 >= _items.length) {

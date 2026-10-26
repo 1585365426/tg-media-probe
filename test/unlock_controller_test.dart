@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:tg_media_probe/lock/unlock_controller.dart';
 import 'package:tg_media_probe/security/biometric.dart';
@@ -93,6 +94,57 @@ AppLockSettings locked({
     lockOnColdStart: coldStart,
     hint: '我的常用短语',
   );
+}
+
+/// A gate whose sheet stays up until the test answers it.
+///
+/// The real system sheet is exactly this: `authenticate()` does not return until
+/// the user scans, cancels, or walks away. The old tests used a gate that
+/// answered instantly, which is why nobody noticed the resume-in-the-middle
+/// path.
+class DeferredBiometricGate implements BiometricGate {
+  DeferredBiometricGate()
+      : capability = const BiometricCapability(
+          kind: BiometricKind.face,
+          available: true,
+          enrolled: true,
+          lockedOut: false,
+        );
+
+  final Completer<BiometricOutcome> _answer = Completer<BiometricOutcome>();
+  final List<Completer<BiometricOutcome>> _pending =
+      <Completer<BiometricOutcome>>[];
+  BiometricCapability capability;
+  int authenticateCount = 0;
+
+  @override
+  Future<BiometricCapability> probe() async => capability;
+
+  @override
+  Future<BiometricOutcome> authenticate({required String reason}) {
+    authenticateCount++;
+    if (_pending.isNotEmpty) {
+      // A second sheet would be a bug; hand back a fresh completer so the test
+      // fails on the count rather than hanging.
+      final extra = Completer<BiometricOutcome>();
+      _pending.add(extra);
+      return extra.future;
+    }
+    _pending.add(_answer);
+    return _answer.future;
+  }
+
+  /// Answers the **newest** sheet, which is the one a live UI would be showing.
+  void answer(BiometricOutcome outcome) {
+    for (final completer in _pending.reversed) {
+      if (!completer.isCompleted) {
+        completer.complete(outcome);
+        return;
+      }
+    }
+  }
+
+  bool get hasPendingSheet => _pending.any((c) => !c.isCompleted);
 }
 
 void main() {
@@ -205,13 +257,17 @@ void main() {
       expect(h.controller.phase, UnlockPhase.needsPasscode);
     });
 
-    test('a cancelled scan keeps the sensor tappable', () async {
+    test('a cancelled scan hands over to the passcode and keeps the sensor '
+        'tappable', () async {
       final h = await rigFor(
         initial: locked(biometric: true),
         outcomes: const <BiometricOutcome>[BiometricOutcome.userCancel],
       );
       await h.controller.promptBiometric();
-      expect(h.controller.phase, UnlockPhase.requestingBiometric);
+      // Not `requestingBiometric`: that phase re-arms the sheet, so a cancel
+      // used to reopen it instantly. The button stays because the capability
+      // is untouched, so retrying is one deliberate tap.
+      expect(h.controller.phase, UnlockPhase.needsPasscode);
       expect(h.controller.canOfferBiometric, isTrue);
       expect(h.controller.message, BiometricOutcome.userCancel.message);
     });
@@ -497,6 +553,115 @@ void main() {
       h.controller.cancelRecovery();
       expect(h.controller.phase, UnlockPhase.needsPasscode);
       expect(h.controller.settings.passcodeEnabled, isTrue);
+    });
+  });
+
+  group('the Face ID sheet and the app lifecycle', () {
+    Future<(UnlockController, DeferredBiometricGate, FakeClock)> pendingRig() async {
+      final secrets = MemorySecretStore();
+      final store = AppLockStore(store: secrets, iterations: 64);
+      await store.save(locked(biometric: true));
+      final gate = DeferredBiometricGate();
+      final clock = FakeClock();
+      final controller = UnlockController(
+        lockStore: store,
+        gate: gate,
+        clock: clock.now,
+      );
+      await controller.start();
+      return (controller, gate, clock);
+    }
+
+    test('a resume while the sheet is up does not undo the unlock', () async {
+      final (controller, gate, _) = await pendingRig();
+      expect(controller.phase, UnlockPhase.requestingBiometric);
+
+      final prompt = controller.promptBiometric();
+      // iOS sends inactive then resumed around the sheet.
+      controller.onPaused();
+      await controller.onResumed();
+      expect(controller.phase, UnlockPhase.requestingBiometric,
+          reason: 'the sheet is still up');
+      expect(controller.awaitingBiometric, isTrue);
+
+      gate.answer(BiometricOutcome.success);
+      await prompt;
+
+      expect(controller.isLocked, isFalse);
+      expect(controller.phase, UnlockPhase.unlocked);
+    });
+
+    test('a sheet that never answers falls back to the passcode', () async {
+      final (controller, gate, clock) = await pendingRig();
+      unawaited(controller.promptBiometric());
+      await Future<void>.delayed(Duration.zero);
+
+      clock.advance(const Duration(seconds: 13));
+      controller.tickBiometricWatchdog();
+
+      expect(controller.phase, UnlockPhase.needsPasscode);
+      expect(controller.awaitingBiometric, isFalse);
+      expect(controller.message, contains('没有响应'));
+      // Still locked: waiting out the watchdog is not a way in.
+      expect(controller.isLocked, isTrue);
+      gate.answer(BiometricOutcome.userCancel);
+    });
+
+    test('after the watchdog the sensor can be asked again', () async {
+      final (controller, gate, clock) = await pendingRig();
+      unawaited(controller.promptBiometric());
+      await Future<void>.delayed(Duration.zero);
+      clock.advance(const Duration(seconds: 13));
+      controller.tickBiometricWatchdog();
+
+      expect(controller.canOfferBiometric, isTrue);
+      final second = controller.promptBiometric();
+      expect(controller.awaitingBiometric, isTrue,
+          reason: 'the second prompt must actually start');
+
+      gate.answer(BiometricOutcome.success);
+      await second;
+      expect(controller.isLocked, isFalse);
+    });
+
+    test('a cancelled sheet leaves the passcode usable', () async {
+      final (controller, gate, _) = await pendingRig();
+      final prompt = controller.promptBiometric();
+      gate.answer(BiometricOutcome.userCancel);
+      await prompt;
+
+      expect(controller.phase, UnlockPhase.needsPasscode);
+      expect(controller.canOfferBiometric, isTrue,
+          reason: 'a cancel must not hide the sensor for good');
+      expect(await controller.submitPasscode('correct-horse'), isTrue);
+      expect(controller.isLocked, isFalse);
+    });
+
+    test('a second prompt cannot open a second sheet', () async {
+      final (controller, gate, _) = await pendingRig();
+      final first = controller.promptBiometric();
+      await Future<void>.delayed(Duration.zero);
+      final second = controller.promptBiometric();
+      await Future<void>.delayed(Duration.zero);
+
+      expect(gate.authenticateCount, 1);
+      gate.answer(BiometricOutcome.success);
+      await Future.wait(<Future<void>>[first, second]);
+      expect(controller.isLocked, isFalse);
+    });
+
+    test('backgrounding for real still re-locks', () async {
+      final (controller, gate, _) = await pendingRig();
+      final prompt = controller.promptBiometric();
+      gate.answer(BiometricOutcome.success);
+      await prompt;
+      expect(controller.isLocked, isFalse);
+
+      controller.onPaused();
+      await controller.onResumed();
+
+      expect(controller.isLocked, isTrue,
+          reason: 'the inactive exemption must not disable auto-lock');
     });
   });
 }

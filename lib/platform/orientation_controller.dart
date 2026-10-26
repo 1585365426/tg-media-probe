@@ -61,8 +61,19 @@ class OrientationBridge {
     }
   }
 
-  /// Called when a page is destroyed. Every page resets to follow-system, so a
-  /// page that forced landscape cannot leave the next page stuck sideways.
+  /// Returns the app to its default: **portrait**, not "whatever the phone is
+  /// doing".
+  ///
+  /// `followSystem` was the old reset value and it was the wrong one: the app's
+  /// Info.plist allows landscape, so leaving a page put the whole UI at the
+  /// mercy of however the device was being held. That is how "视频页自动横屏，
+  /// 而且切不回竖屏" happens — nothing was holding portrait.
+  Future<void> resetToPortrait() async {
+    await setMode(ScreenOrientationMode.lockedPortrait);
+    await _invokeReset();
+  }
+
+  /// Kept for diagnostics: returns everything to the OS.
   Future<void> resetToSystem() async {
     if (_current == ScreenOrientationMode.followSystem && _applyCount > 0) {
       // Still send the reset: the native side may have been left locked by a
@@ -85,8 +96,10 @@ class OrientationBridge {
 
 /// Binds an orientation mode to a page lifetime.
 ///
-/// `enter()` applies the page's mode; `dispose()` returns the app to
-/// follow-system exactly once, no matter how many times it is called.
+/// `enter()` applies the page's mode; `dispose()` returns the app to portrait
+/// exactly once, no matter how many times it is called. The app has no page
+/// that wants free rotation: landscape only exists while the feed is asked for
+/// it explicitly.
 class PageOrientationScope {
   PageOrientationScope(this.bridge, {this.mode = ScreenOrientationMode.followSystem});
 
@@ -108,6 +121,6 @@ class PageOrientationScope {
   Future<void> dispose() async {
     if (_disposed) return;
     _disposed = true;
-    await bridge.resetToSystem();
+    await bridge.resetToPortrait();
   }
 }

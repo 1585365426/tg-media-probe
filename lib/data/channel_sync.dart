@@ -49,6 +49,7 @@ class PageLoadResult {
     this.error,
     this.inserted = 0,
     this.cancelled = false,
+    this.reachedEnd = false,
   });
 
   const PageLoadResult.failure({
@@ -61,7 +62,8 @@ class PageLoadResult {
         nextCursor = null,
         hasMore = false,
         inserted = 0,
-        cancelled = false;
+        cancelled = false,
+        reachedEnd = false;
 
   const PageLoadResult.cancelled({required this.chatId})
       : records = const <MediaRecord>[],
@@ -72,12 +74,18 @@ class PageLoadResult {
         hasMore = false,
         error = null,
         inserted = 0,
-        cancelled = true;
+        cancelled = true,
+        reachedEnd = false;
 
   final int chatId;
   final List<MediaRecord> records;
   final int rawMessageCount;
   final int requestedLimit;
+
+  /// True when TDLib returned a short page: the channel has no older messages.
+  /// `hasMore == false` alone cannot tell this apart from "the cursor refused
+  /// to advance", and the UI must show a different message for each.
+  final bool reachedEnd;
   final int? cursor;
 
   /// Pass this back as [ChannelSyncEngine.loadPage]'s `cursor` to get the next
@@ -98,6 +106,8 @@ class SyncCycleReport {
     required this.insertedRecords,
     required this.errors,
     required this.cancelled,
+    this.reachedEnd = false,
+    this.lastError,
   });
 
   final int pages;
@@ -105,6 +115,15 @@ class SyncCycleReport {
   final int insertedRecords;
   final List<String> errors;
   final bool cancelled;
+
+  /// True when the walk stopped because TDLib returned a short page: there is
+  /// no older history. Distinct from "we ran out of page budget" and from "the
+  /// cursor refused to move", both of which must stay retryable.
+  final bool reachedEnd;
+
+  /// The last error text, for the screen. Kept alongside [errors] so callers
+  /// that only show one line do not have to parse the list.
+  final String? lastError;
 
   bool get isError => errors.isNotEmpty;
 }
@@ -162,9 +181,21 @@ class ChannelSyncEngine {
     }
 
     final records = <MediaRecord>[];
-    var lowestId = cursor;
-    var highestId = cursor;
+    // Cursor and watermark come from the **raw** batch, never from the filtered
+    // video list. A batch of 100 messages may contain one video as its newest
+    // entry; taking that video's id as the cursor re-requests the same batch
+    // forever and the channel stops growing — which is exactly the "38 items,
+    // bottom never loads more" report.
+    int? lowestId;
+    int? highestId;
+    int? rawLowestId;
+    int? rawHighestId;
     for (final message in page.messages) {
+      final rawId = message['id'];
+      if (rawId is int) {
+        if (rawLowestId == null || rawId < rawLowestId) rawLowestId = rawId;
+        if (rawHighestId == null || rawId > rawHighestId) rawHighestId = rawId;
+      }
       final record = MediaRecord.fromMessage(chatId: chatId, message: message);
       if (record == null) continue;
       records.add(record);
@@ -172,6 +203,9 @@ class ChannelSyncEngine {
       if (lowestId == null || id < lowestId) lowestId = id;
       if (highestId == null || id > highestId) highestId = id;
     }
+    // Media ids for the "what did we store" watermark, raw ids for the walk.
+    lowestId ??= rawLowestId;
+    highestId ??= rawHighestId;
 
     final inserted = await store.upsertAll(records);
     if (lowestId != null || highestId != null) {
@@ -186,10 +220,14 @@ class ChannelSyncEngine {
 
     // TDLib returns fewer than `limit` messages when it hits the start of the
     // history; that is the only end-of-channel signal available.
-    final hasMore = page.messages.length >= limit && page.messages.isNotEmpty;
-    final nextCursor = page.messages.isEmpty
-        ? null
-        : (records.isNotEmpty ? records.last.messageId : null);
+    final filledPage = page.messages.length >= limit && page.messages.isNotEmpty;
+    // The next request is "older than the oldest message in this batch".
+    final rawCursor = rawLowestId;
+    // A cursor that does not move would make the caller loop on one batch
+    // forever, so a non-progressing page counts as the end of the walk.
+    final advanced = rawCursor != null && (cursor == null || rawCursor < cursor);
+    final hasMore = filledPage && advanced;
+    final nextCursor = hasMore ? rawCursor : null;
 
     return PageLoadResult(
       chatId: chatId,
@@ -197,9 +235,12 @@ class ChannelSyncEngine {
       rawMessageCount: page.messages.length,
       requestedLimit: limit,
       cursor: cursor,
-      nextCursor: hasMore ? (nextCursor ?? lowestId) : null,
+      nextCursor: nextCursor,
       hasMore: hasMore,
       inserted: inserted,
+      // Distinguishes "this batch had no video, keep walking" from "the channel
+      // has no more history": the caller needs both to decide what to show.
+      reachedEnd: !filledPage,
     );
   }
 
@@ -215,6 +256,8 @@ class ChannelSyncEngine {
     var inserted = 0;
     final errors = <String>[];
     var cancelled = false;
+    var reachedEnd = false;
+    String? lastError;
 
     for (final chatId in chatIds) {
       int? cursor;
@@ -230,11 +273,16 @@ class ChannelSyncEngine {
         }
         if (result.isError) {
           errors.add('chat $chatId: ${result.error}');
+          lastError = result.error;
           break;
         }
         pages++;
         raw += result.rawMessageCount;
         inserted += result.inserted;
+        if (result.reachedEnd) {
+          reachedEnd = true;
+          break;
+        }
         if (!result.hasMore || result.nextCursor == null) break;
         cursor = result.nextCursor;
       }
@@ -247,6 +295,8 @@ class ChannelSyncEngine {
       insertedRecords: inserted,
       errors: errors,
       cancelled: cancelled,
+      reachedEnd: reachedEnd,
+      lastError: lastError,
     );
   }
 
@@ -263,6 +313,8 @@ class ChannelSyncEngine {
     var inserted = 0;
     final errors = <String>[];
     var cancelled = false;
+    var reachedEnd = false;
+    String? lastError;
 
     while (pages < maxPages) {
       if (cancel?.isCancelled ?? false) {
@@ -276,11 +328,16 @@ class ChannelSyncEngine {
       }
       if (result.isError) {
         errors.add(result.error!);
+        lastError = result.error;
         break;
       }
       pages++;
       raw += result.rawMessageCount;
       inserted += result.inserted;
+      if (result.reachedEnd) {
+        reachedEnd = true;
+        break;
+      }
       if (!result.hasMore || result.nextCursor == null) break;
       cursor = result.nextCursor;
     }
@@ -291,6 +348,8 @@ class ChannelSyncEngine {
       insertedRecords: inserted,
       errors: errors,
       cancelled: cancelled,
+      reachedEnd: reachedEnd,
+      lastError: lastError,
     );
   }
 

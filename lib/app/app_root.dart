@@ -17,6 +17,7 @@ import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 
 import '../lock/lock_screens.dart';
+import '../platform/orientation_controller.dart';
 import '../lock/unlock_controller.dart';
 import '../security/biometric.dart';
 import '../security/lock_policy.dart';
@@ -107,10 +108,18 @@ class _TgMediaAppState extends State<TgMediaApp> with WidgetsBindingObserver {
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed) {
-      unawaited(_lock.onResumed());
-    } else {
-      _lock.onPaused();
+    switch (state) {
+      case AppLifecycleState.resumed:
+        unawaited(_lock.onResumed());
+      case AppLifecycleState.inactive:
+        // iOS reports inactive for the Face ID sheet, the app switcher and the
+        // notification shade. Treating those as "left the app" made every
+        // unlock re-lock itself while the scan was still on screen.
+        break;
+      case AppLifecycleState.paused:
+      case AppLifecycleState.hidden:
+      case AppLifecycleState.detached:
+        _lock.onPaused();
     }
   }
 
@@ -260,10 +269,34 @@ class AppShell extends StatefulWidget {
 class _AppShellState extends State<AppShell> {
   int _index = 0;
 
+  /// The shell holds portrait for every tab that is not the feed.
+  ///
+  /// The feed pushes its own scope on top and restores portrait when it leaves.
+  /// Without a holder here, the app had no page asserting portrait at all, so a
+  /// phone held sideways rotated the list and settings — the reported
+  /// "自动横屏、切不回竖屏".
+  late final OrientationBridge _orientation = OrientationBridge();
+  late final PageOrientationScope _orientationScope = PageOrientationScope(
+    _orientation,
+    mode: ScreenOrientationMode.lockedPortrait,
+  );
+
   /// The feed is built on first visit only: constructing it opens a player and
   /// starts a transfer, which must not happen while the user is reading the
   /// channel list.
   bool _feedBuilt = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _orientationScope.enter();
+  }
+
+  @override
+  void dispose() {
+    _orientationScope.dispose();
+    super.dispose();
+  }
 
   void _select(int index) {
     if (index == _index) return;

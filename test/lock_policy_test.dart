@@ -295,13 +295,34 @@ void main() {
       );
     });
 
-    test('a user cancel keeps the sensor tappable', () async {
+    test('a user cancel lands on the passcode instead of re-asking', () async {
       final store = await newStore();
       final settings = await settingsWithPasscode(store, biometrics: true);
+      // The sensor stays tappable through the UI (capability is unchanged), but
+      // the state machine must not treat a cancel as "open the sheet again".
       expect(
         LockEvaluator.afterOutcome(BiometricOutcome.userCancel, settings),
-        LockRequirement.biometricThenPasscode,
+        LockRequirement.passcodeOnly,
       );
+    });
+
+    test('a failed scan also lands on the passcode', () async {
+      final store = await newStore();
+      final settings = await settingsWithPasscode(store, biometrics: true);
+      for (final outcome in <BiometricOutcome>[
+        BiometricOutcome.userCancel,
+        BiometricOutcome.systemCancel,
+        BiometricOutcome.userFallback,
+        BiometricOutcome.lockout,
+        BiometricOutcome.error,
+        BiometricOutcome.notEnrolled,
+      ]) {
+        expect(
+          LockEvaluator.afterOutcome(outcome, settings),
+          LockRequirement.passcodeOnly,
+          reason: '$outcome must not reopen the sheet',
+        );
+      }
     });
 
     test('a user cancel without biometrics stays on the passcode', () async {

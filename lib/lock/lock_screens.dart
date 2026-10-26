@@ -38,12 +38,18 @@ class _UnlockScreenState extends State<UnlockScreen> {
   Timer? _ticker;
   bool _autoPrompted = false;
 
+  /// The phase the screen last rendered, so a transition **back** into
+  /// `requestingBiometric` (re-lock while the screen is already up) re-arms the
+  /// sheet instead of leaving a disabled "正在请求…" button behind.
+  UnlockPhase? _lastPhase;
+
   @override
   void initState() {
     super.initState();
     widget.controller.addListener(_onChanged);
     _ticker = Timer.periodic(const Duration(seconds: 1), (_) {
       widget.controller.tickCooldown();
+      widget.controller.tickBiometricWatchdog();
     });
     WidgetsBinding.instance.addPostFrameCallback((_) => _maybeAutoPrompt());
   }
@@ -57,7 +63,17 @@ class _UnlockScreenState extends State<UnlockScreen> {
   }
 
   void _onChanged() {
-    if (mounted) setState(() {});
+    if (!mounted) return;
+    final phase = widget.controller.phase;
+    final rearmed = phase == UnlockPhase.requestingBiometric &&
+        _lastPhase != UnlockPhase.requestingBiometric;
+    _lastPhase = phase;
+    setState(() {});
+    if (!rearmed) return;
+    if (widget.controller.awaitingBiometric) return;
+    if (!widget.controller.canOfferBiometric) return;
+    // A fresh lock cycle: one prompt per cycle, never a loop.
+    scheduleMicrotask(widget.controller.promptBiometric);
   }
 
   /// §8.3: with biometrics available, the sheet opens by itself — once. A

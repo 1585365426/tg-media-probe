@@ -219,12 +219,16 @@ class LockEvaluator {
     AppLockSettings settings,
   ) {
     if (outcome.isSuccess) return LockRequirement.none;
-    // "Use app passcode" in the system sheet is a decision, not a failure: the
-    // next thing the user must see is the passcode field, not another scan.
-    if (outcome.requiresFallback || outcome == BiometricOutcome.userFallback) {
-      return LockRequirement.passcodeOnly;
-    }
-    if (settings.biometricEnabled) return LockRequirement.biometricThenPasscode;
+    // Every non-success lands on the passcode — including a plain cancel.
+    //
+    // Returning `biometricThenPasscode` here meant "ask again", and once the
+    // unlock screen re-armed the sheet on each transition into that phase (it
+    // must, or a re-lock while the screen is up never prompts), a cancel
+    // reopened the sheet immediately. That is a prompt loop with no way out.
+    //
+    // The sensor is still reachable: the unlock screen keeps its button visible
+    // whenever the capability allows it, so retrying is a deliberate tap rather
+    // than something the app does to the user.
     return LockRequirement.passcodeOnly;
   }
 }

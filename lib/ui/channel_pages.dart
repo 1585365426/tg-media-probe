@@ -5,6 +5,8 @@
 /// local mirror 30 at a time and pulls more history only when asked.
 library;
 
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../app/app_preferences.dart';
@@ -247,10 +249,59 @@ class _ChannelDetailPageState extends State<ChannelDetailPage> {
   bool _loading = true;
   bool _syncing = false;
 
+  /// True once a sync reported a short page: Telegram has no older messages.
+  /// Without this the footer cannot tell "end of channel" from "the cursor
+  /// refused to move", and the user keeps pulling on nothing.
+  bool _reachedEnd = false;
+
+  /// Guards the scroll-triggered auto load so one flick cannot start two walks.
+  bool _autoLoading = false;
+  final ScrollController _scroll = ScrollController();
+
   @override
   void initState() {
     super.initState();
+    _scroll.addListener(_onScroll);
     _open();
+  }
+
+  @override
+  void dispose() {
+    _scroll.removeListener(_onScroll);
+    _scroll.dispose();
+    super.dispose();
+  }
+
+  /// Bottom-of-list trigger.
+  ///
+  /// This is the piece that was missing: the footer buttons existed but nothing
+  /// fired on scroll, so with a short index the list simply stopped at the
+  /// indexed count (the reported "always 38") and never asked for more.
+  void _onScroll() {
+    if (!_scroll.hasClients) return;
+    final position = _scroll.position;
+    if (position.pixels < position.maxScrollExtent - 240) return;
+    unawaited(_loadFurther());
+  }
+
+  /// Loads the next slice: local index first, Telegram only when the mirror is
+  /// exhausted and we have not been told we reached the end.
+  Future<void> _loadFurther() async {
+    if (_autoLoading || _loading || _syncing) return;
+    _autoLoading = true;
+    try {
+      final pager = _pager;
+      if (pager != null && pager.hasMore) {
+        final before = _items.length;
+        await _loadMore();
+        // A page that adds nothing is the mirror's way of saying "done here".
+        if (_items.length > before) return;
+      }
+      if (_reachedEnd) return;
+      await _syncMore();
+    } finally {
+      _autoLoading = false;
+    }
   }
 
   Future<void> _open() async {
@@ -296,7 +347,18 @@ class _ChannelDetailPageState extends State<ChannelDetailPage> {
     if (_syncing) return;
     setState(() => _syncing = true);
     try {
-      await widget.session.syncChannel(widget.chatId);
+      final report = await widget.session.syncChannel(widget.chatId);
+      // A null report means the call could not run at all (signed out, no
+      // client). Keep the screen retryable instead of pretending we reached
+      // the end of the channel.
+      if (report != null) {
+        _reachedEnd = report.reachedEnd;
+        final lastError = report.lastError;
+        if (lastError != null) {
+          _failure = classifyFailure(lastError);
+          _error = lastError;
+        }
+      }
       await _loadMore();
     } finally {
       if (mounted) setState(() => _syncing = false);
@@ -343,11 +405,16 @@ class _ChannelDetailPageState extends State<ChannelDetailPage> {
     return RefreshIndicator(
       onRefresh: _syncMore,
       child: ListView.separated(
+        controller: _scroll,
         itemCount: _items.length + 1,
         separatorBuilder: (_, _) => const Divider(height: 1, indent: 16),
         itemBuilder: (context, index) {
           if (index == _items.length) return _buildFooter(videoCount);
-          return _MediaRow(record: _items[index]);
+          final record = _items[index];
+          return _MediaRow(
+            record: record,
+            onTap: () => _openRecord(record),
+          );
         },
       ),
     );
@@ -360,7 +427,9 @@ class _ChannelDetailPageState extends State<ChannelDetailPage> {
       child: Column(
         children: <Widget>[
           Text(
-            '已加载 ${_items.length} 条，其中视频 $videoCount 条',
+            _reachedEnd
+                ? '已加载 ${_items.length} 条，其中视频 $videoCount 条 · 已到历史末尾'
+                : '已加载 ${_items.length} 条，其中视频 $videoCount 条',
             style: Theme.of(context).textTheme.bodySmall,
           ),
           const SizedBox(height: 12),
@@ -376,13 +445,33 @@ class _ChannelDetailPageState extends State<ChannelDetailPage> {
               if (hasMore) const SizedBox(width: 12),
               Expanded(
                 child: FilledButton.tonal(
-                  onPressed: _syncing ? null : _syncMore,
-                  child: Text(_syncing ? '正在同步…' : '从 Telegram 同步 2 页'),
+                  onPressed: _syncing
+                      ? null
+                      : (_reachedEnd ? null : _syncMore),
+                  child: Text(_syncing
+                      ? '正在同步…'
+                      : (_reachedEnd ? '已到历史末尾' : '从 Telegram 同步 2 页')),
                 ),
               ),
             ],
           ),
         ],
+      ),
+    );
+  }
+
+  /// One row = one message. Open the feed on that exact item.
+  Future<void> _openRecord(MediaRecord record) async {
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => FeedPage(
+          session: widget.session,
+          preferences: widget.preferences,
+          activeFiles: widget.activeFiles,
+          initialChatId: widget.chatId,
+          initialMessageId: record.messageId,
+          showBackButton: true,
+        ),
       ),
     );
   }
@@ -403,9 +492,13 @@ class _ChannelDetailPageState extends State<ChannelDetailPage> {
 }
 
 class _MediaRow extends StatelessWidget {
-  const _MediaRow({required this.record});
+  const _MediaRow({required this.record, required this.onTap});
 
   final MediaRecord record;
+
+  /// Every row is a real target. A list of rows that does nothing when tapped
+  /// was reported on device as "点击没反应"; the callback is not decorative.
+  final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
@@ -426,6 +519,7 @@ class _MediaRow extends StatelessWidget {
       date,
     ];
     return ListTile(
+      onTap: onTap,
       leading: Icon(icon, size: 22),
       title: Text(
         record.fileName ?? record.kind.name,

@@ -9,6 +9,8 @@
 ///   directory, never Telegram.
 library;
 
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:video_player/video_player.dart';
 
@@ -31,6 +33,7 @@ class FeedPage extends StatefulWidget {
     required this.session,
     required this.preferences,
     this.initialChatId,
+    this.initialMessageId,
     this.showBackButton = false,
     this.activeFiles,
     this.orientation,
@@ -42,6 +45,9 @@ class FeedPage extends StatefulWidget {
 
   /// When set, the feed is limited to one channel.
   final int? initialChatId;
+
+  /// When set, the feed opens on this message (the row the user tapped).
+  final int? initialMessageId;
 
   /// True when the page was pushed as a route (channel detail -> play).
   final bool showBackButton;
@@ -118,7 +124,15 @@ class _FeedPageState extends State<FeedPage> with WidgetsBindingObserver {
     );
     controller.addListener(_onControllerChanged);
     _controller = controller;
-    controller.load();
+    final messageId = widget.initialMessageId;
+    final chatId = _chatFilter;
+    unawaited(() async {
+      await controller.load();
+      // Tapping a row must open that video, not just the channel: load() lands
+      // on the newest item, so jump once the index has a first page.
+      if (messageId == null || chatId == null) return;
+      await controller.goToMessage(chatId, messageId);
+    }());
   }
 
   void _onControllerChanged() {

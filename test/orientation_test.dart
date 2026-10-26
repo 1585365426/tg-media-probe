@@ -51,7 +51,7 @@ void main() {
       expect(bridge.current, ScreenOrientationMode.forcedLandscape);
     });
 
-    test('page scope resets to system on dispose, exactly once', () async {
+    test('page scope returns to portrait on dispose, exactly once', () async {
       final bridge = OrientationBridge(channel: orientationChannel);
       final scope = PageOrientationScope(
         bridge,
@@ -68,7 +68,49 @@ void main() {
 
       expect(scope.isDisposed, isTrue);
       expect(orientationCalls.where((c) => c.method == 'reset'), hasLength(1));
-      expect(bridge.current, ScreenOrientationMode.followSystem);
+      // Portrait, not "whatever the phone is doing": the app has no page that
+      // wants free rotation, and followSystem here was the stuck-landscape bug.
+      expect(bridge.current, ScreenOrientationMode.lockedPortrait);
+      expect(
+        orientationCalls
+            .where((c) => c.method == 'setMode')
+            .map((c) => (c.arguments as Map)['mode'])
+            .toList(),
+        <String>['portrait'],
+      );
+    });
+
+    test('resetToPortrait applies portrait before telling the system to reset',
+        () async {
+      final bridge = OrientationBridge(channel: orientationChannel);
+      await bridge.setMode(ScreenOrientationMode.forcedLandscape);
+      orientationCalls.clear();
+
+      await bridge.resetToPortrait();
+
+      expect(orientationCalls.map((c) => c.method).toList(),
+          <String>['setMode', 'reset']);
+      expect((orientationCalls.first.arguments as Map)['mode'], 'portrait');
+      expect(bridge.current, ScreenOrientationMode.lockedPortrait);
+    });
+
+    test('the shell holds portrait while the feed borrows landscape', () async {
+      final bridge = OrientationBridge(channel: orientationChannel);
+      final shell = PageOrientationScope(bridge,
+          mode: ScreenOrientationMode.lockedPortrait);
+      final feed = PageOrientationScope(bridge,
+          mode: ScreenOrientationMode.forcedLandscape);
+
+      await shell.enter();
+      await feed.enter();
+      expect(bridge.current, ScreenOrientationMode.forcedLandscape);
+
+      await feed.dispose();
+      expect(bridge.current, ScreenOrientationMode.lockedPortrait,
+          reason: 'leaving the feed must not leave the app sideways');
+
+      await shell.dispose();
+      expect(bridge.current, ScreenOrientationMode.lockedPortrait);
     });
 
     test('a page that never entered still resets on dispose', () async {

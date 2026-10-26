@@ -79,6 +79,22 @@ class UnlockController extends ChangeNotifier {
   /// burns another failure.
   bool _biometricBlocked = false;
 
+  /// True while a system sheet is up.
+  ///
+  /// The sheet makes iOS send `inactive`, and answering it sends `resumed`.
+  /// Treating that round trip as "the app came back from the background"
+  /// re-locked the app in the middle of its own unlock: the phase flipped back
+  /// to `requestingBiometric` after a successful scan, which is the "开了 Face ID
+  /// 就进不去" report. While the sheet is in flight, resume must not re-evaluate.
+  bool _promptInFlight = false;
+
+  /// When the current prompt started, for the watchdog.
+  DateTime? _promptStartedAt;
+
+  /// How long a system sheet may stay unanswered before the app stops waiting
+  /// and offers the passcode instead. A stuck sheet must not be a dead end.
+  static const Duration biometricWatchdog = Duration(seconds: 12);
+
   AppLockSettings get settings => _settings;
   UnlockPhase get phase => _phase;
   BiometricCapability get capability => _capability;
@@ -157,24 +173,53 @@ class UnlockController extends ChangeNotifier {
   /// nothing, so a double tap cannot produce two system sheets.
   Future<void> promptBiometric() async {
     if (_phase == UnlockPhase.unlocked || _phase == UnlockPhase.checking) return;
+    if (_promptInFlight) return;
     if (!canOfferBiometric) return;
 
+    _promptInFlight = true;
+    _promptStartedAt = _clock();
     _phase = UnlockPhase.requestingBiometric;
     _message = null;
     notifyListeners();
 
-    final outcome = await gate.authenticate(reason: biometricReason);
-    if (outcome.isSuccess) {
-      _failedAttempts = 0;
-      _cooldownUntil = null;
-      _markUnlocked();
-      return;
-    }
+    try {
+      final outcome = await gate.authenticate(reason: biometricReason);
+      if (outcome.isSuccess) {
+        _failedAttempts = 0;
+        _cooldownUntil = null;
+        _markUnlocked();
+        return;
+      }
 
-    // A hard failure hides the sensor; a cancellation keeps it tappable.
-    if (outcome.requiresFallback) _biometricBlocked = true;
-    _message = outcome.message;
-    _apply(LockEvaluator.afterOutcome(outcome, _settings));
+      // A hard failure hides the sensor; a cancellation keeps it tappable.
+      if (outcome.requiresFallback) _biometricBlocked = true;
+      _message = outcome.message;
+      _apply(LockEvaluator.afterOutcome(outcome, _settings));
+    } finally {
+      _promptInFlight = false;
+      _promptStartedAt = null;
+    }
+  }
+
+  /// True while the system sheet owns the screen.
+  bool get awaitingBiometric => _promptInFlight;
+
+  /// Falls back to the passcode when a sheet never answers.
+  ///
+  /// Driven by the unlock screen's 1 s ticker. It does not unlock anything: it
+  /// only stops the UI from sitting on "正在请求 Face ID…" forever, which is
+  /// indistinguishable from a frozen app.
+  void tickBiometricWatchdog() {
+    if (!_promptInFlight) return;
+    final started = _promptStartedAt;
+    if (started == null) return;
+    if (_clock().difference(started) < biometricWatchdog) return;
+    _promptInFlight = false;
+    _promptStartedAt = null;
+    _biometricBlocked = false;
+    _phase = UnlockPhase.needsPasscode;
+    _message = '生物识别没有响应，请用应用密码解锁';
+    notifyListeners();
   }
 
   /// Verifies [passcode]. Returns true only when the app became unlocked.
@@ -230,6 +275,11 @@ class UnlockController extends ChangeNotifier {
   Future<void> onResumed() async {
     if (!_backgrounded) return;
     _backgrounded = false;
+    if (_promptInFlight) {
+      // The sheet itself caused the inactive->resumed pair; re-evaluating here
+      // is what turned a successful scan back into a locked screen.
+      return;
+    }
     final leftAt = _leftForegroundAt;
     _leftForegroundAt = null;
     if (_phase == UnlockPhase.recovering) return;
