@@ -2,7 +2,9 @@ name: ios-probe
 
 on:
   push:
-    branches: [main]
+    # `rebuild-step3` is the branch the project was restarted on. Building it
+    # from CI keeps device validation independent of whatever is on main.
+    branches: [main, rebuild-step3]
   workflow_dispatch:
 
 permissions:
