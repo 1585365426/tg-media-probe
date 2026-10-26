@@ -6,6 +6,7 @@ import 'package:tg_media_probe/app/app_settings.dart';
 import 'package:tg_media_probe/data/chat_title_store.dart';
 import 'package:tg_media_probe/data/favorites_store.dart';
 import 'package:tg_media_probe/data/index_store.dart';
+import 'package:tg_media_probe/data/media_record.dart';
 import 'package:tg_media_probe/playback/playback_lifecycle.dart';
 import 'package:tg_media_probe/playback/player_slot.dart';
 import 'package:tg_media_probe/security/app_lock.dart';
@@ -205,5 +206,89 @@ void main() {
 
     expect(find.text('没有匹配的视频'), findsOneWidget);
     expect(find.text('清空条件'), findsOneWidget);
+  });
+
+  testWidgets('the feed pages past a full screen of photos to reach videos',
+      (tester) async {
+    final harness = await boot(tester);
+    harness.model.markSignedIn(true);
+
+    // 60 photos newer than 3 videos. One 40-row page holds only photos, and an
+    // empty list cannot be scrolled, so the load-more trigger at the bottom
+    // never fires — the tab used to sit on "no videos" with the index full.
+    await tester.runAsync(() async {
+      final records = <MediaRecord>[];
+      for (var i = 0; i < 60; i++) {
+        records.add(MediaRecord(
+          chatId: 100,
+          messageId: 900 - i,
+          fileId: 5000 + i,
+          kind: MediaKind.photo,
+          sizeBytes: 1024,
+          messageDateUnix: 1700000000 + i,
+        ));
+      }
+      for (var i = 0; i < 3; i++) {
+        records.add(MediaRecord(
+          chatId: 100,
+          messageId: 100 - i,
+          fileId: 7000 + i,
+          kind: MediaKind.video,
+          durationSeconds: 30,
+          sizeBytes: 2048,
+          messageDateUnix: 1699999000 + i,
+        ));
+      }
+      await harness.services.index.upsertAll(records);
+    });
+
+    await tester.pumpWidget(wrap(harness.services, harness.model));
+    await tester.pump();
+    await tester.tap(find.text('视频').last);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    expect(find.text('索引里还没有视频'), findsNothing);
+  });
+
+  testWidgets('returning to the tab after a sync reloads the mirror',
+      (tester) async {
+    final harness = await boot(tester);
+    harness.model.markSignedIn(true);
+
+    await tester.pumpWidget(wrap(harness.services, harness.model));
+    await tester.pump();
+
+    // Start on 频道 with an empty index, so the feed builds its snapshot of
+    // nothing.
+    await tester.tap(find.text('视频').last);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(find.text('索引里还没有视频'), findsOneWidget);
+
+    await tester.tap(find.text('频道').last);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    // A sync lands while the feed is hidden.
+    await tester.runAsync(() async {
+      await harness.services.index.upsertAll(<MediaRecord>[
+        MediaRecord(
+          chatId: 100,
+          messageId: 1,
+          fileId: 8000,
+          kind: MediaKind.video,
+          durationSeconds: 12,
+          sizeBytes: 4096,
+          messageDateUnix: 1700000000,
+        ),
+      ]);
+    });
+
+    await tester.tap(find.text('视频').last);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    expect(find.text('索引里还没有视频'), findsNothing);
   });
 }

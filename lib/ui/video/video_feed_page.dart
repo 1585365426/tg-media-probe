@@ -48,6 +48,15 @@ class VideoFeedPage extends StatefulWidget {
 class _VideoFeedPageState extends State<VideoFeedPage> {
   static const int pageSize = 40;
 
+  /// Upper bound on pages pulled for the first screen. 10 x 40 = 400 rows,
+  /// comfortably past the current index size while keeping a videoless index
+  /// from spinning.
+  static const int _maxFirstPageRounds = 10;
+
+  /// Rows needed before the list is scrollable enough to reach the load-more
+  /// trigger at the bottom.
+  static const int _minFirstScreen = 3;
+
   late AppModel _model;
   late AppServices _services;
 
@@ -55,6 +64,10 @@ class _VideoFeedPageState extends State<VideoFeedPage> {
   final List<MediaRecord> _all = <MediaRecord>[];
   List<MediaRecord> _filtered = const <MediaRecord>[];
   VideoQuery _query = VideoQuery.none;
+
+  /// `IndexStore.revision` when this page last read the mirror. Compared on
+  /// resume to detect a sync that happened while the tab was hidden.
+  int _indexRevision = -1;
 
   final PageController _pageController = PageController();
   final TextEditingController _searchController = TextEditingController();
@@ -110,7 +123,15 @@ class _VideoFeedPageState extends State<VideoFeedPage> {
       // the shell's lifecycle binder (both paths are idempotent).
       _releasePlayer();
     } else if (!oldWidget.active && widget.active) {
-      _activateCurrent();
+      if (!_initialized) return;
+      // The mirror can change while this tab is hidden — a sync runs from 频道.
+      // Without this check the feed keeps the snapshot it read at startup and
+      // shows "no videos" over an index that now holds hundreds.
+      if (_services.index.revision != _indexRevision) {
+        _reloadAfterIndexChange();
+      } else {
+        _activateCurrent();
+      }
     }
   }
 
@@ -131,13 +152,37 @@ class _VideoFeedPageState extends State<VideoFeedPage> {
   Future<void> _loadFirstPage() async {
     _pager = MediaPager(store: _services.index, pageSize: pageSize);
     _all.clear();
-    await _loadMore();
+    _indexRevision = _services.index.revision;
+
+    // The index holds every media kind, so one 40-row page can be all photos
+    // and documents. An empty list cannot be scrolled, which means the
+    // load-more trigger at the bottom never fires and the tab would sit on
+    // "no videos" while the index holds hundreds. Pull more pages up front,
+    // bounded so an index with genuinely no video still settles quickly.
+    var rounds = 0;
+    while (rounds < _maxFirstPageRounds) {
+      await _loadMore();
+      rounds++;
+      if (_all.length >= _minFirstScreen) break;
+      if (_pager == null || !_pager!.hasMore) break;
+    }
+
     if (!mounted) return;
     setState(() {
       _firstPageDone = true;
       _rebuildFiltered();
     });
     if (widget.active) _activateCurrent();
+  }
+
+  /// Re-reads the mirror after a sync changed it.
+  ///
+  /// The player is dropped first: it is bound to a record that may no longer be
+  /// in the list, and the relaunch below re-activates whatever is now current.
+  Future<void> _reloadAfterIndexChange() async {
+    _releasePlayer();
+    setState(() => _firstPageDone = false);
+    await _loadFirstPage();
   }
 
   Future<void> _loadMore() async {
@@ -510,7 +555,14 @@ class _VideoFeedPageState extends State<VideoFeedPage> {
                   Padding(
                     padding: const EdgeInsets.only(right: 8),
                     child: ChoiceChip(
-                      label: Text(filter.label, style: const TextStyle(fontSize: 12)),
+                      label: Text(filter.label,
+                          style: const TextStyle(fontSize: 11)),
+                      // Four duration chips have to fit one 375 pt line. At the
+                      // default density and 12 pt label the row overflows by a
+                      // few points and clips the last option to "5 分钟以".
+                      labelPadding: const EdgeInsets.symmetric(horizontal: 2),
+                      visualDensity: VisualDensity.compact,
+                      materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
                       selected: _query.duration == filter,
                       onSelected: (_) {
                         _model.setDurationFilter(filter);
@@ -529,7 +581,11 @@ class _VideoFeedPageState extends State<VideoFeedPage> {
                 Padding(
                   padding: const EdgeInsets.only(right: 8),
                   child: FilterChip(
-                    label: const Text('全部频道', style: TextStyle(fontSize: 12)),
+                    label: const Text('全部频道',
+                        style: TextStyle(fontSize: 11)),
+                    labelPadding: const EdgeInsets.symmetric(horizontal: 2),
+                    visualDensity: VisualDensity.compact,
+                    materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
                     selected: _query.categoryChatId == null,
                     onSelected: (_) => _model.setCategory(null),
                   ),
@@ -540,8 +596,11 @@ class _VideoFeedPageState extends State<VideoFeedPage> {
                     child: FilterChip(
                       label: Text(
                         _services.chatTitles.labelOf(chatId),
-                        style: const TextStyle(fontSize: 12),
+                        style: const TextStyle(fontSize: 11),
                       ),
+                      labelPadding: const EdgeInsets.symmetric(horizontal: 2),
+                      visualDensity: VisualDensity.compact,
+                      materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
                       selected: _query.categoryChatId == chatId,
                       onSelected: (_) => _model.setCategory(
                         _query.categoryChatId == chatId ? null : chatId,

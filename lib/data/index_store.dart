@@ -92,6 +92,7 @@ class IndexStore {
   int _journalOps = 0;
   bool _opened = false;
   int _droppedJournalLines = 0;
+  int _revision = 0;
 
   String get journalPath => p.join(directory, 'media_journal.jsonl');
   String get snapshotPath => p.join(directory, 'media_snapshot.json');
@@ -100,6 +101,15 @@ class IndexStore {
   int get favoriteCount => _records.values.where((r) => r.favorite).length;
   int get channelCount => _watermarks.length;
   bool get isOpen => _opened;
+
+  /// Bumped on every mutation made after [open].
+  ///
+  /// A screen caches the value it saw when it last read and compares on resume,
+  /// so a page built before a sync can tell its in-memory slice is stale without
+  /// polling or importing Flutter here. Replay during [open] deliberately does
+  /// not bump: no reader exists yet, and a counter of hundreds of replay ops
+  /// would say nothing useful.
+  int get revision => _revision;
 
   /// Journal lines that could not be parsed during replay. Non-zero means the
   /// file was damaged; the app keeps working with what it could read.
@@ -227,6 +237,7 @@ class IndexStore {
       _sortDirty = true;
     }
     if (buffer.isEmpty) return 0;
+    _revision++;
     await ops.appendAsString(journalPath, buffer.toString());
     await _maybeCompact();
     return inserted;
@@ -241,6 +252,7 @@ class IndexStore {
     final existing = _records[key];
     if (existing == null) return false;
     _records[key] = existing.copyWith(favorite: value);
+    _revision++;
     await ops.appendAsString(
       journalPath,
       '${jsonEncode(<String, Object?>{'op': 'f', 'k': key, 'v': value})}\n',
@@ -264,6 +276,7 @@ class IndexStore {
       updatedAtUnix: nowUnix,
     );
     _watermarks[chatId] = merged;
+    _revision++;
     await ops.appendAsString(
       journalPath,
       '${jsonEncode(<String, Object?>{'op': 'w', ...merged.toJson()})}\n',
@@ -285,6 +298,7 @@ class IndexStore {
     _sortDirty = true;
     final removed = before - _records.length;
     if (removed > 0) {
+      _revision++;
       await ops.appendAsString(
         journalPath,
         '${jsonEncode(<String, Object?>{'op': 'rm', 'chat': chatId})}\n',
