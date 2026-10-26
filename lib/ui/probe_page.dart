@@ -5,12 +5,16 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:video_player/video_player.dart';
 
 import '../security/tdlib_key.dart';
+import '../storage/active_files.dart';
 import '../storage/app_paths.dart';
+import '../storage/file_ops.dart';
 import '../storage/storage_layout.dart';
+import '../storage/temp_zone_report.dart';
 import '../td/media_probe.dart';
 import '../td/td_client.dart';
 import '../td/td_models.dart';
 import '../util/redact.dart';
+import 'storage_panel.dart';
 
 /// Minimal verification UI. It is deliberately not the product UI: the only
 /// job is to prove each step of the chain with real Telegram data and real
@@ -44,6 +48,12 @@ class _ProbePageState extends State<ProbePage> {
   bool _credentialsSaved = false;
   StorageLayout? _layout;
   ProbeInitInfo? _initInfo;
+  TempZoneReport? _storageReport;
+
+  /// Files the player currently holds open. Registered so a cache clear can
+  /// skip them instead of pulling a file out from under the decoder.
+  final ActiveFileRegistry _activeFiles = ActiveFileRegistry();
+  String? _playingPath;
 
   @override
   void initState() {
@@ -53,6 +63,7 @@ class _ProbePageState extends State<ProbePage> {
 
   @override
   void dispose() {
+    _releasePlayingPath();
     _video?.dispose();
     _client?.dispose();
     _apiId.dispose();
@@ -150,6 +161,13 @@ class _ProbePageState extends State<ProbePage> {
       setState(() {
         _layout = layout;
         _initInfo = info;
+        // Built here, not in build(): the report holds the file-system surface
+        // and the in-use registry, both of which must survive a rebuild.
+        _storageReport = TempZoneReport(
+          layout: layout,
+          ops: const IoFileOps(),
+          activeFiles: _activeFiles,
+        );
         _status = 'TDLib 已配置（数据库已加密），等待手机号';
       });
     } catch (e) {
@@ -225,7 +243,11 @@ class _ProbePageState extends State<ProbePage> {
   }
 
   Future<void> _playVideo(String path, ProbeRunner runner) async {
-    await _video?.dispose();
+    await _releaseVideo();
+    // Register before handing the file to AVPlayer, so a cache clear that lands
+    // mid-playback skips it rather than deleting the bytes being decoded.
+    _activeFiles.markInUse(path, reason: 'playing');
+    _playingPath = path;
     final controller = VideoPlayerController.file(File(path));
     try {
       await controller.initialize();
@@ -237,9 +259,23 @@ class _ProbePageState extends State<ProbePage> {
       );
     } catch (e) {
       await controller.dispose();
+      _releasePlayingPath();
       runner.reportPlayback(initialized: false, error: e.toString());
     }
     if (mounted) setState(() {});
+  }
+
+  void _releasePlayingPath() {
+    final path = _playingPath;
+    if (path == null) return;
+    _activeFiles.release(path);
+    _playingPath = null;
+  }
+
+  Future<void> _releaseVideo() async {
+    _releasePlayingPath();
+    await _video?.dispose();
+    _video = null;
   }
 
   @override
@@ -374,6 +410,10 @@ class _ProbePageState extends State<ProbePage> {
                   style: TextStyle(fontSize: 12, color: Color(0xFFB3261E)),
                 ),
               ),
+          ],
+          if (_storageReport != null) ...<Widget>[
+            const Divider(height: 32),
+            StoragePanel(report: _storageReport!),
           ],
         ],
       ),

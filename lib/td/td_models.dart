@@ -228,6 +228,15 @@ class FileState {
   }
 }
 
+/// Extracts a [FileState] from a `getFile` response.
+///
+/// `getFile` returns the `file` object directly (no wrapper), which is why this
+/// cannot reuse the `updateFile` path — that one has to unwrap `file` first.
+FileState? fileFromResponse(Map<String, Object?> json) {
+  if (_asString(json['@type']) != 'file') return null;
+  return FileState.fromJson(json);
+}
+
 /// Extracts `messages` from a `getChatHistory` response, tolerating `error`.
 List<Map<String, Object?>> messagesFromResponse(Map<String, Object?> json) {
   if (_asString(json['@type']) == 'error') return const <Map<String, Object?>>[];

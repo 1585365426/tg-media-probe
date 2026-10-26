@@ -161,11 +161,32 @@ class StorageLayout {
   Future<String> canonical(String path) async =>
       p.normalize(p.absolute(await ops.realPath(path)));
 
+  /// Resolves all four zone roots **once**.
+  ///
+  /// Every containment check used to canonicalise its zone root on each call,
+  /// and [zoneOf] looped over four zones — eight `realpath` walks, each of which
+  /// stats every path component, for a single file. A clear over a real TDLib
+  /// pool (thousands of blobs) therefore spent tens of thousands of filesystem
+  /// calls before deleting anything, which is exactly the "tapped the button,
+  /// nothing happened" symptom. Resolving the roots once per run drops that to
+  /// one `realpath` per file.
+  Future<ResolvedZoneRoots> resolveRoots() async {
+    final map = <StorageZone, String>{};
+    for (final zone in StorageZone.values) {
+      map[zone] = await canonical(rootOf(zone));
+    }
+    return ResolvedZoneRoots(map);
+  }
+
   /// True when [path] is the zone root itself or lives underneath it.
-  Future<bool> contains(StorageZone zone, String path) async {
-    final root = await canonical(rootOf(zone));
+  Future<bool> contains(
+    StorageZone zone,
+    String path, {
+    ResolvedZoneRoots? roots,
+  }) async {
+    final resolved = roots ?? await resolveRoots();
     final target = await canonical(path);
-    return p.equals(root, target) || p.isWithin(root, target);
+    return resolved.isInside(zone, target);
   }
 
   Future<bool> isZoneRoot(String path) async {
@@ -177,22 +198,25 @@ class StorageLayout {
   }
 
   /// Which zone owns [path], or null when it belongs to none of them.
-  Future<StorageZone?> zoneOf(String path) async {
-    for (final zone in StorageZone.values) {
-      if (await contains(zone, path)) return zone;
-    }
-    return null;
+  Future<StorageZone?> zoneOf(String path, {ResolvedZoneRoots? roots}) async {
+    final resolved = roots ?? await resolveRoots();
+    final target = await canonical(path);
+    return resolved.zoneOf(target);
   }
 
   /// Throws [ZoneViolation] unless [path] is strictly inside [zone].
-  Future<void> assertInside(StorageZone zone, String path) async {
-    final root = await canonical(rootOf(zone));
+  Future<void> assertInside(
+    StorageZone zone,
+    String path, {
+    ResolvedZoneRoots? roots,
+  }) async {
+    final resolved = roots ?? await resolveRoots();
     final target = await canonical(path);
-    if (p.equals(root, target)) {
+    if (p.equals(resolved.rootOf(zone), target)) {
       throw ZoneViolation('refusing to operate on a zone root itself',
           zone: zone, path: path);
     }
-    if (!p.isWithin(root, target)) {
+    if (!resolved.isInside(zone, target)) {
       throw ZoneViolation('path escapes the zone root', zone: zone, path: path);
     }
   }
@@ -202,8 +226,16 @@ class StorageLayout {
   /// Two independent checks: the path must belong to [StorageZone.tempCache]
   /// (not merely "look like a cache path"), and it must resolve inside that
   /// zone after symlinks are followed.
-  Future<void> assertDeletableByCacheClear(String path) async {
-    final zone = await zoneOf(path);
+  ///
+  /// Pass [roots] from a [resolveRoots] call to avoid re-walking four zone roots
+  /// for every single file.
+  Future<void> assertDeletableByCacheClear(
+    String path, {
+    ResolvedZoneRoots? roots,
+  }) async {
+    final resolved = roots ?? await resolveRoots();
+    final target = await canonical(path);
+    final zone = resolved.zoneOf(target);
     if (zone == null) {
       throw ZoneViolation('path is outside every managed zone', path: path);
     }
@@ -211,6 +243,46 @@ class StorageLayout {
       throw ZoneViolation('zone is protected from cache clearing',
           zone: zone, path: path);
     }
-    await assertInside(StorageZone.tempCache, path);
+    // The zone root itself is never a delete candidate, only its contents.
+    if (p.equals(resolved.rootOf(StorageZone.tempCache), target)) {
+      throw ZoneViolation('refusing to operate on a zone root itself',
+          zone: StorageZone.tempCache, path: path);
+    }
+    if (!resolved.isInside(StorageZone.tempCache, target)) {
+      throw ZoneViolation('path escapes the zone root',
+          zone: StorageZone.tempCache, path: path);
+    }
   }
+}
+
+/// Zone roots with symlinks already resolved.
+///
+/// All comparisons are plain string operations, so a delete loop pays filesystem
+/// cost once per file instead of once per (file x zone).
+class ResolvedZoneRoots {
+  const ResolvedZoneRoots(this.byZone);
+
+  final Map<StorageZone, String> byZone;
+
+  String rootOf(StorageZone zone) => byZone[zone]!;
+
+  bool isInside(StorageZone zone, String canonicalPath) {
+    final root = byZone[zone]!;
+    return p.equals(root, canonicalPath) || p.isWithin(root, canonicalPath);
+  }
+
+  /// Innermost matching zone. Zones are disjoint by construction, so the first
+  /// match is the only match.
+  StorageZone? zoneOf(String canonicalPath) {
+    for (final entry in byZone.entries) {
+      final root = entry.value;
+      if (p.equals(root, canonicalPath) || p.isWithin(root, canonicalPath)) {
+        return entry.key;
+      }
+    }
+    return null;
+  }
+
+  @override
+  String toString() => 'ResolvedZoneRoots($byZone)';
 }

@@ -7,6 +7,7 @@ import '../security/tdlib_key.dart';
 import '../storage/download_mover.dart';
 import '../storage/storage_layout.dart';
 import '../util/redact.dart';
+import 'download_metrics.dart';
 import 'td_client.dart';
 import 'td_models.dart';
 import 'td_requests.dart';
@@ -45,6 +46,7 @@ class ProbeResult {
     this.video,
     this.localPath,
     this.poolPath,
+    this.downloadMetrics,
   });
 
   final bool ok;
@@ -58,6 +60,10 @@ class ProbeResult {
 
   /// TDLib's own copy inside the rebuildable pool, kept for diagnostics.
   final String? poolPath;
+
+  /// Measured timing for the download step. Null when the chain failed before
+  /// reaching it, so the UI cannot print a rate for a transfer that never ran.
+  final DownloadMetrics? downloadMetrics;
 }
 
 /// What [ProbeRunner.initialize] actually configured, so the UI can show the
@@ -295,47 +301,93 @@ class ProbeRunner {
       }
 
       // ---- 7. download -------------------------------------------------
-      _set(7, ProbeStepState.running, '请求 downloadFile');
-      final completion = Completer<FileState>();
-      late final StreamSubscription<Map<String, Object?>> sub;
-      sub = client.fileUpdates.listen((file) {
-        final state = FileState.fromJson(file);
-        if (state.id != video!.fileId) return;
-        if (state.isCompleted) {
-          if (!completion.isCompleted) completion.complete(state);
-        } else {
-          _set(7, ProbeStepState.running,
-              '${state.downloadedSize}/${state.expectedSize} B');
-        }
-      });
-
-      final downloadResponse =
-          await client.request(downloadFile(fileId: video.fileId));
-      final downloadErr = errorText(downloadResponse);
-      if (downloadErr != null) {
-        await sub.cancel();
-        _set(7, ProbeStepState.failed, downloadErr);
-        return ProbeResult(ok: false, message: downloadErr);
-      }
-
-      FileState finalState;
+      //
+      // Two changes over the previous version, both aimed at the "video never
+      // finishes loading" report:
+      //
+      // 1. `getFile` runs first. When TDLib already holds the bytes (a previous
+      //    attempt, or the same video opened twice) the step finishes without a
+      //    transfer instead of re-requesting a download that is already local.
+      // 2. Every `updateFile` event feeds a [DownloadMetrics], so the step
+      //    detail carries first-byte latency plus instantaneous and average
+      //    throughput. A bare "3 MB / 6 MB" cannot distinguish a slow link from
+      //    a stalled one — that ambiguity is why the earlier rounds were guesswork.
+      _set(7, ProbeStepState.running, '查询本地已有字节');
+      FileState? existing;
       try {
-        finalState = await completion.future.timeout(downloadTimeout);
-      } on TimeoutException {
-        await sub.cancel();
-        _set(7, ProbeStepState.failed,
-            '下载超时（${downloadTimeout.inMinutes} 分钟内未完成）');
-        return ProbeResult(ok: false, message: '下载超时');
+        final probeResponse = await client.request(
+          getFile(video.fileId),
+          timeout: const Duration(seconds: 20),
+        );
+        existing = fileFromResponse(probeResponse);
+      } catch (_) {
+        // A failed probe is not a failed download; fall through to a real one.
+        existing = null;
       }
-      await sub.cancel();
+
+      final metrics = DownloadMetrics(
+        startedAtMillis: DateTime.now().millisecondsSinceEpoch,
+        expectedBytes: video.expectedSize,
+      );
+
+      late final FileState finalState;
+      if (existing != null && existing.isCompleted && existing.path.isNotEmpty) {
+        finalState = existing;
+        metrics.complete(DateTime.now().millisecondsSinceEpoch);
+        _set(7, ProbeStepState.success,
+            '本地已有完整文件（未发起下载）→ ${finalState.path}');
+      } else {
+        final completion = Completer<FileState>();
+        var lastLabelAt = 0;
+        final subscription = client.fileUpdates.listen((file) {
+          final state = FileState.fromJson(file);
+          if (state.id != video!.fileId) return;
+          final now = DateTime.now().millisecondsSinceEpoch;
+          metrics.observe(now, state.downloadedSize);
+          if (state.isCompleted) {
+            if (!completion.isCompleted) completion.complete(state);
+            return;
+          }
+          // Throttle the label to ~8 Hz. Rebuilding the page on every
+          // updateFile event costs more than the transfer itself once TDLib
+          // starts emitting per-chunk notifications.
+          if (now - lastLabelAt >= 120) {
+            lastLabelAt = now;
+            _set(7, ProbeStepState.running, metrics.summary);
+          }
+        });
+
+        try {
+          final downloadResponse = await client.request(
+            downloadFile(fileId: video.fileId),
+            timeout: const Duration(seconds: 60),
+          );
+          final downloadErr = errorText(downloadResponse);
+          if (downloadErr != null) {
+            metrics.fail(DateTime.now().millisecondsSinceEpoch);
+            _set(7, ProbeStepState.failed, downloadErr);
+            return ProbeResult(ok: false, message: downloadErr);
+          }
+          finalState = await completion.future.timeout(downloadTimeout);
+        } on TimeoutException {
+          metrics.fail(DateTime.now().millisecondsSinceEpoch);
+          _set(7, ProbeStepState.failed,
+              '下载超时（${downloadTimeout.inMinutes} 分钟内未完成）· ${metrics.summary}');
+          return ProbeResult(
+            ok: false,
+            message: '下载超时',
+            downloadMetrics: metrics,
+          );
+        } finally {
+          await subscription.cancel();
+        }
+        metrics.complete(DateTime.now().millisecondsSinceEpoch);
+        _set(7, ProbeStepState.success,
+            '${metrics.summary} → TDLib 池 ${finalState.path}');
+      }
+
       final expected =
           finalState.size > 0 ? finalState.size : finalState.expectedSize;
-      _set(
-        7,
-        ProbeStepState.success,
-        '${finalState.downloadedSize}/${finalState.expectedSize} B '
-        '→ TDLib 池 ${finalState.path}',
-      );
 
       // ---- 8. promote into the user download zone -----------------------
       _set(8, ProbeStepState.running);
@@ -363,12 +415,14 @@ class ProbeRunner {
 
       return ProbeResult(
         ok: true,
-        message: '链路完成：频道 ${chat.title}，视频 ${video.width}x${video.height}',
+        message: '链路完成：频道 ${chat.title}，视频 ${video.width}x${video.height}'
+            '（${metrics.summary}）',
         chatId: chat.id,
         messageId: lastMessageId,
         video: video,
         localPath: promoted.path,
         poolPath: finalState.path,
+        downloadMetrics: metrics,
       );
     } catch (e) {
       final text = redactText(e.toString());
