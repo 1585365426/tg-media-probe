@@ -1,6 +1,6 @@
 # TG Media 第 2 步：技术可行性验证状态
 
-最后更新：2026-10-26 09:10（Windows 开发机）
+最后更新：2026-10-26 10:25（Windows 开发机）
 仓库：https://github.com/1585365426/tg-media-probe （public，`main`，源码与脚本已推送）
 
 ## 1. 已验证（真实执行过，可复现）
@@ -10,7 +10,7 @@
 | Flutter 工具链 | `flutter --version` | Flutter 3.47.8 stable / Dart 3.13.7 / engine dfd2e6cb7d |
 | 依赖解析 | `flutter pub get` | 成功，45 个依赖 |
 | 静态检查 | `flutter analyze` | `No issues found!` |
-| 自动化测试 | `flutter test` | **37 passed, 1 skipped**（native 加载用 skip） |
+| 自动化测试 | `flutter test` | 当前 **288 passed, 1 skipped**（native 加载用 skip）；第 2 步当时为 37 |
 | TDLib 请求与官方 schema 一致性 | `test/schema_conformance_test.dart` | 16 个请求字段名/必填项全部对得上 `td_api.tl`（3365 行，上游 master） |
 | 只读约束 | `test/readonly_guard_test.dart` | `lib/` 下无任何云端写入/删除方法名 |
 | 日志脱敏 | `test/redact_test.dart` | api_hash / 手机号 / 验证码 / 密码全部脱敏 |
@@ -150,10 +150,30 @@ run [40198573231](https://github.com/1585365426/tg-media-probe/actions/runs/4019
 |---|---|---|---|
 | [40223283270](https://github.com/1585365426/tg-media-probe/actions/runs/40223283270) | `7fbee2f` | `08842ca7…401fd7` | 第 4 步 + E/F |
 | [40252236401](https://github.com/1585365426/tg-media-probe/actions/runs/40252236401) | `0a728e6` | `0daed69c…0f4c62` | H/I/J 修复，274 passed |
+| [40257900132](https://github.com/1585365426/tg-media-probe/actions/runs/40257900132) | `9d11c26` | `238367ac…fcd0f4` | 抖音 Tab / 全屏 / 缓存统计 / 时长 6 档，288 passed |
 
 真机首轮复测（截图）暴露三个问题并已修：H 探针页抢 TDLib 数据库锁（error 400）、
 I 视频页首屏只取一页且切 Tab 不刷新导致空态、J 时长 chip 被裁。详见
 `docs/BUILD-40252236401.md`。
+
+### 6.2 第六轮（用户 8 条需求）
+
+真机第三轮截图提出的 8 条，其中第 3、4 条用户取消，第 8 条按 F1（全屏沉浸）实现。
+代码提交 `27da705`，CI 修复 `9d11c26`，详情 `docs/BUILD-40257900132.md`。
+
+| # | 需求 | 状态 |
+|---|---|---|
+| 1 | 收藏页被强制横屏 | 已修：收藏页锁竖屏 + 视频页切 Tab 时释放横屏 |
+| 2 | 视频不能全屏 | 已修：`FittedBox` + `BoxFit.cover` |
+| 3 | 收藏长按删除 | 用户取消 |
+| 4 | 去除下载功能 | 用户取消（仅文案改为「加载中」） |
+| 5 | 临时缓存始终 0 B | 已修：扫描漏了 `tdlib_files`，新增 `CacheKind.tdlibBlobPool` |
+| 6 | 视频加载慢 | 已修：后两条预取，TDLib 优先级 1 |
+| 7 | 时长 6 档可换行 | 已修：7 项枚举 + `Wrap` |
+| 8 | 新增抖音 Tab | 已修：第 4 个 Tab，immersive + randomOrder |
+
+**这六项都还没有真机证据。** 另外 CI 曾因 `xcodebuild -version | head -1` 触发
+SIGPIPE（exit 134）失败一次，已在 workflow 里改掉。
 
 **真机交互全部未验证**——装包、启动、登录、频道、播放、下载、横竖屏、Face ID、收藏、缓存清理都还没跑过。
 
