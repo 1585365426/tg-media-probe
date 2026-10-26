@@ -18,6 +18,7 @@ import 'dart:async';
 import 'dart:io';
 
 import '../td/td_client.dart';
+import 'playback_trace.dart';
 import '../td/td_models.dart';
 import '../td/td_requests.dart';
 
@@ -111,9 +112,21 @@ class VideoSourceException implements Exception {
 }
 
 class VideoSourceTimeout extends VideoSourceException {
-  VideoSourceTimeout(this.limit) : super('加载超时（${limit.inSeconds} 秒）');
+  VideoSourceTimeout(this.limit, {this.downloadedBytes = 0, this.expectedBytes = 0})
+      : super(_message(limit, downloadedBytes, expectedBytes));
 
   final Duration limit;
+  final int downloadedBytes;
+  final int expectedBytes;
+
+  /// The message carries the byte progress: "超时（15 秒）" alone hides whether
+  /// the transfer was at 2% or 99%, and those need different advice.
+  static String _message(Duration limit, int got, int expected) {
+    if (expected <= 0) return '加载超时（${limit.inSeconds} 秒）';
+    final percent = (got * 100 / expected).clamp(0, 100).toStringAsFixed(0);
+    return '加载超时（${limit.inSeconds} 秒，已下载 ${got}B/'
+        '${expected}B，$percent%）';
+  }
 }
 
 class VideoSourceResolver {
@@ -147,21 +160,60 @@ class VideoSourceResolver {
 
   final Set<int> _cancelled = <int>{};
 
+  /// One resolve per file id at a time.
+  ///
+  /// Two callers can race for the same item: the page starts the current video
+  /// while the preload window is resolving its neighbour, and a rapid
+  /// back-and-forth can land on the item that is already being fetched. Sharing
+  /// the future means one `downloadFile`, one wait, one answer.
+  final Map<int, Future<String>> _inflight = <int, Future<String>>{};
+
   /// Resolves [fileId] to an absolute path. Throws [VideoSourceTimeout] when
   /// the transfer does not complete in time and [VideoSourceException] for a
   /// TDLib error.
   Future<String> resolve(
     int fileId, {
     void Function(VideoSourceUpdate update)? onProgress,
+    PlaybackTrace? trace,
+  }) {
+    final running = _inflight[fileId];
+    if (running != null) return running;
+    final future = _resolveOnce(fileId, onProgress: onProgress, trace: trace);
+    _inflight[fileId] = future;
+    return future.whenComplete(() => _inflight.remove(fileId));
+  }
+
+  /// How many resolves are in flight, for diagnostics and tests.
+  int get inflightCount => _inflight.length;
+
+  Future<String> _resolveOnce(
+    int fileId, {
+    void Function(VideoSourceUpdate update)? onProgress,
+    PlaybackTrace? trace,
   }) async {
     _cancelled.remove(fileId);
+    trace?.mark(PlaybackStage.resolveStarted);
     onProgress?.call(const VideoSourceUpdate(stage: SourceStage.probing));
 
     final existing = await api.stat(fileId);
+    if (existing != null) {
+      trace?.mark(PlaybackStage.fileRecordKnown,
+          bytes: existing.downloadedSize);
+      if (existing.expectedSize > 0) trace?.expectedBytes = existing.expectedSize;
+    }
+    // A "completed" record is only a cache hit if the bytes are actually there
+    // and the size agrees. TDLib occasionally reports completion for a record
+    // whose file was removed or truncated; trusting it hands the player a dead
+    // path and the failure surfaces as a decode error instead of a download.
+    final sizeMatches = existing == null ||
+        existing.expectedSize <= 0 ||
+        existing.size >= existing.expectedSize;
     if (existing != null &&
         existing.isCompleted &&
         existing.path.isNotEmpty &&
+        sizeMatches &&
         await _fileExists(existing.path)) {
+      trace?.mark(PlaybackStage.fileReady, bytes: existing.size);
       onProgress?.call(VideoSourceUpdate(
         stage: SourceStage.ready,
         downloadedBytes: existing.size,
@@ -185,6 +237,10 @@ class VideoSourceResolver {
         return;
       }
       final now = DateTime.now();
+      if (state.downloadedSize > 0) {
+        trace?.downloadedBytes = state.downloadedSize;
+        trace?.mark(PlaybackStage.firstBytes, bytes: state.downloadedSize);
+      }
       if (now.difference(lastEmit) < progressInterval) return;
       lastEmit = now;
       onProgress?.call(VideoSourceUpdate(
@@ -199,6 +255,7 @@ class VideoSourceResolver {
         stage: SourceStage.fetching,
         expectedBytes: expected,
       ));
+      trace?.mark(PlaybackStage.downloadRequested);
       await api.start(fileId);
 
       final state = await completion.future.timeout(fetchTimeout);
@@ -211,6 +268,7 @@ class VideoSourceResolver {
         // string to AVPlayer, which reports it as an unknown format error.
         throw VideoSourceException('TDLib 报告下载完成但没有返回本地路径');
       }
+      trace?.mark(PlaybackStage.fileReady, bytes: state.size);
       if (!await _fileExists(state.path)) {
         // TDLib says done, the filesystem disagrees. Say so instead of handing
         // a dead path to AVPlayer, which would report it as a format error.
@@ -224,7 +282,14 @@ class VideoSourceResolver {
       ));
       return state.path;
     } on TimeoutException {
-      final failure = VideoSourceTimeout(fetchTimeout);
+      final got = trace?.downloadedBytes ?? 0;
+      final expected = trace?.expectedBytes ?? 0;
+      trace?.errorCategory = 'timeout';
+      final failure = VideoSourceTimeout(
+        fetchTimeout,
+        downloadedBytes: got,
+        expectedBytes: expected,
+      );
       onProgress?.call(VideoSourceUpdate(
         stage: SourceStage.failed,
         error: failure.message,
@@ -234,9 +299,11 @@ class VideoSourceResolver {
       await cancel(fileId);
       throw failure;
     } on VideoSourceException catch (e) {
+      trace?.errorCategory ??= e.runtimeType.toString();
       onProgress?.call(VideoSourceUpdate(stage: SourceStage.failed, error: e.message));
       rethrow;
     } on Object catch (e) {
+      trace?.errorCategory ??= e.runtimeType.toString();
       onProgress?.call(VideoSourceUpdate(stage: SourceStage.failed, error: '$e'));
       throw VideoSourceException('$e');
     } finally {

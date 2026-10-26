@@ -25,6 +25,7 @@ import '../data/channel_directory.dart';
 import '../data/channel_sync.dart';
 import '../data/history_source.dart';
 import '../data/index_store.dart';
+import '../playback/playback_trace.dart';
 import '../security/tdlib_key.dart';
 import '../storage/file_ops.dart';
 import '../storage/storage_layout.dart';
@@ -554,6 +555,9 @@ class AppSession extends ChangeNotifier {
         for (final entry in layout.allRoots.entries) entry.key.name: entry.value,
       },
       'error': _error,
+      // Stage timings for the last few plays: the only way to tell "waiting for
+      // a full download" apart from "waiting for the player" without a debugger.
+      'playback': PlaybackTraceLog.instance.diagnosticLines(),
     });
   }
 

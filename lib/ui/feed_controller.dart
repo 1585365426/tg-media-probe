@@ -24,6 +24,7 @@ import '../data/index_store.dart';
 import '../app/app_preferences.dart';
 import '../data/media_record.dart';
 import '../data/video_number_lookup.dart';
+import '../playback/playback_trace.dart';
 import '../playback/player_slot.dart';
 import '../playback/video_source.dart';
 import '../playback/watch_store.dart';
@@ -431,13 +432,26 @@ class FeedController extends ChangeNotifier {
     _phase = FeedPhase.buffering;
     _notify();
 
+    final trace = PlaybackTrace(
+      fileId: record.fileId,
+      chatId: record.chatId,
+      messageId: record.messageId,
+    );
+    trace.mark(PlaybackStage.selected);
+    _lastTrace = trace;
+
     String? path;
     try {
       path = await _gate.run(() async {
         final cached = _pathCache.remove(record.fileId);
-        if (cached != null) return cached;
+        if (cached != null) {
+          // A prefetched path is a real cache hit: no TDLib request, no wait.
+          trace.mark(PlaybackStage.fileReady);
+          return cached;
+        }
         return sources.resolve(
           record.fileId,
+          trace: trace,
           onProgress: (update) {
             if (update.stage == SourceStage.fetching) {
               _bufferFraction = update.fraction;
@@ -462,13 +476,18 @@ class FeedController extends ChangeNotifier {
     if (path == null || _disposed) return;
 
     try {
+      trace.mark(PlaybackStage.playerCreated);
       await player.activate(path);
+      trace.mark(PlaybackStage.playerInitialized);
     } on Object {
+      trace.errorCategory = 'player';
+      PlaybackTraceLog.instance.add(trace);
       _fail('此视频无法解码');
       return;
     }
     if (_disposed) return;
 
+    PlaybackTraceLog.instance.add(trace);
     await _applyVolume();
     _phase = FeedPhase.ready;
     _bufferFraction = 0;
@@ -509,6 +528,10 @@ class FeedController extends ChangeNotifier {
       }
     }
   }
+
+  /// The trace of the most recent play, for the diagnostics export.
+  PlaybackTrace? _lastTrace;
+  PlaybackTrace? get lastTrace => _lastTrace;
 
   /// Counters for the report: how many prefetches finished, failed, or were
   /// dropped because the user moved on. No gameplay depends on them.
