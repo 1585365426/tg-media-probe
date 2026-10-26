@@ -16,6 +16,7 @@ import 'package:path/path.dart' as p;
 
 import '../storage/file_ops.dart';
 import '../td/td_client.dart';
+import '../td/td_error_kind.dart';
 import '../td/td_models.dart';
 import '../td/td_requests.dart';
 
@@ -44,7 +45,10 @@ class TdChatSource implements ChatSource {
   Future<List<ChatSummary>> load() async {
     final response = await client.request(getChats(limit: limit), timeout: timeout);
     final error = errorText(response);
-    if (error != null) throw ChannelDirectoryException(error);
+    if (error != null) {
+      throw ChannelDirectoryException(error,
+          failure: classifyFailure(response));
+    }
 
     final ids = chatIdsFromResponse(response);
     final channels = <ChatSummary>[];
@@ -65,9 +69,13 @@ class TdChatSource implements ChatSource {
 }
 
 class ChannelDirectoryException implements Exception {
-  const ChannelDirectoryException(this.message);
+  const ChannelDirectoryException(this.message, {this.failure = RequestFailure.generic});
 
   final String message;
+
+  /// What kind of failure this is, so the list can show "没有权限" instead of a
+  /// generic error with a retry button that can only fail again.
+  final RequestFailure failure;
 
   @override
   String toString() => 'ChannelDirectoryException: $message';
@@ -113,11 +121,15 @@ class ChannelDirectory extends ChangeNotifier {
   final List<ChannelEntry> _entries = <ChannelEntry>[];
   DirectoryState _state = DirectoryState.idle;
   String? _error;
+  RequestFailure _failure = RequestFailure.none;
   bool _disposed = false;
 
   List<ChannelEntry> get entries => List<ChannelEntry>.unmodifiable(_entries);
   DirectoryState get state => _state;
   String? get error => _error;
+
+  /// Why the last refresh failed. [RequestFailure.none] when it did not.
+  RequestFailure get failure => _failure;
   bool get isEmpty => _entries.isEmpty;
 
   String get cachePath => p.join(directory, cacheFileName);
@@ -167,6 +179,7 @@ class ChannelDirectory extends ChangeNotifier {
   Future<void> refresh() async {
     _state = DirectoryState.loading;
     _error = null;
+    _failure = RequestFailure.none;
     _notify();
     try {
       final channels = await source.load();
@@ -182,7 +195,10 @@ class ChannelDirectory extends ChangeNotifier {
       _state = _entries.isEmpty ? DirectoryState.empty : DirectoryState.ready;
       await _writeCache();
     } on Object catch (e) {
-      _error = '$e';
+      _error = e is ChannelDirectoryException ? e.message : '$e';
+      _failure = e is ChannelDirectoryException
+          ? e.failure
+          : classifyFailure(e);
       // Cached content is kept on purpose: an error banner over a stale list is
       // more useful than an empty screen.
       _state = _entries.isEmpty ? DirectoryState.error : DirectoryState.ready;

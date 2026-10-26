@@ -8,7 +8,6 @@ import '../security/tdlib_key.dart';
 import '../storage/active_files.dart';
 import '../storage/app_paths.dart';
 import '../storage/file_ops.dart';
-import '../storage/storage_layout.dart';
 import '../storage/temp_zone_report.dart';
 import '../td/media_probe.dart';
 import '../td/td_client.dart';
@@ -46,7 +45,6 @@ class _ProbePageState extends State<ProbePage> {
   String _status = '未初始化 TDLib';
   bool _busy = false;
   bool _credentialsSaved = false;
-  StorageLayout? _layout;
   ProbeInitInfo? _initInfo;
   TempZoneReport? _storageReport;
 
@@ -159,7 +157,6 @@ class _ProbePageState extends State<ProbePage> {
       );
       if (!mounted) return;
       setState(() {
-        _layout = layout;
         _initInfo = info;
         // Built here, not in build(): the report holds the file-system surface
         // and the in-use registry, both of which must survive a rebuild.
@@ -399,8 +396,6 @@ class _ProbePageState extends State<ProbePage> {
             _section('4. 存储落点（四区隔离）'),
             _pathLine('TDLib 数据库（加密 / 受保护）', _initInfo!.databaseDir),
             _pathLine('TDLib 文件池（可重建）', _initInfo!.filesDir),
-            if (_layout != null)
-              _pathLine('用户下载区（受保护）', _layout!.downloadsDir),
             if (_initInfo!.legacyPlaintextDb)
               const Padding(
                 padding: EdgeInsets.only(top: 8),

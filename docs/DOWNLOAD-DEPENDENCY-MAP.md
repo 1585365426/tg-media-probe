@@ -132,16 +132,47 @@
 
 ---
 
-## 5. 本轮（第 3 步）实际做了什么
+## 5. 实际执行记录
 
-| 动作 | 状态 |
-|---|---|
-| 全量引用链分析 | 已完成（本文档） |
-| 删除任何下载代码 | **未做**。本轮明确不删，避免在 UI 未就位时破坏已验证的播放链路 |
-| 修改 `download_mover.dart` | 未做 |
-| 修改 `StorageZone` 枚举 | 未做 |
+| 动作 | 第 3 步 | 第 4 步（2026-10-26 收尾） |
+|---|---|---|
+| 全量引用链分析 | 已完成（本文档） | 复查一次，引用链与第 3 步一致 |
+| 步骤 1：改播放路径 | 未做 | **已具备**。新的播放链路走 `VideoSourceResolver`，直接读 TDLib 池内路径，不经过 `Documents`；`media_probe.dart` 的 `localPath` 改为取 `finalState.path` |
+| 步骤 2：删下载专属代码 | 未做 | **已执行**（见下表） |
+| 步骤 3：移除 `userDownloads` zone | 未做 | **不做**。理由见 §2.3：zone 是安全判定的一部分，删枚举会波及守卫与 6 个测试，收益为零 |
+| 修改 `StorageZone` 枚举 | 未做 | 未做（同上） |
 
-本轮只新增了一条约束：设置页的「存储与下载」分组在规格里改为只保留缓存部分（`docs/PRODUCT-SPEC.md` §5.3），不再规划下载记录与下载管理界面。
+步骤 2 的实际删除与修改：
+
+```
+删除（4 个文件，共约 302 行 + 测试）
+  lib/storage/download_mover.dart
+  lib/storage/download_paths.dart
+  test/download_mover_test.dart
+  test/download_paths_test.dart
+
+修改
+  lib/td/media_probe.dart      删 import / mover 字段 / 第 8 步；步骤数 9 -> 8；
+                               播放校验索引 9 -> 8；localPath 改为池内路径；
+                               新增大小一致性检查与空路径检查
+  lib/ui/probe_page.dart       删「用户下载区（受保护）」一行与随之无用的 _layout 字段
+  lib/storage/storage_layout.dart  userDownloads 的注释从「download screen」改为「Files app」
+```
+
+删除后的验证（真实输出，2026-10-26 21:15）：
+
+```
+grep -rn "download_mover|download_paths|DownloadMover" lib/ test/   → clean
+grep -rn "'@type': 'downloadFile'" lib/td/td_requests.dart         → 133: '@type': 'downloadFile'（播放入口仍在）
+flutter analyze                                                    → No issues found!
+flutter test                                                       → 539 passed / 1 skipped
+```
+
+`grep "deleteMessages|sendMessage|editMessage" lib/` 只命中 `td_readonly_guard.dart` 的黑名单本身——那是**拒绝清单里的字符串**，不是调用。
+
+测试数从 548 降到 539 的账：删掉的两个测试文件合计 35 项，`td_error_kind_test.dart` 新增 22 项、`channel_directory_test.dart` 的失败分类新增 4 项，548 − 35 + 26 = 539。
+
+**没有删的东西，以及为什么**：`td_requests.dart` 的 `downloadFile`（播放入口）、`download_metrics.dart`（测量拉流速度）、`active_files.dart`（防止清理删掉正在播的文件）、`storage_layout.dart` 的 `tdlibFilesDir`（池路径）、`StorageZone.userDownloads`（受保护区测试样本）。
 
 ---
 

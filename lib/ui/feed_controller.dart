@@ -24,6 +24,7 @@ import '../data/index_store.dart';
 import '../data/media_record.dart';
 import '../playback/player_slot.dart';
 import '../playback/video_source.dart';
+import '../td/td_error_kind.dart';
 import '../util/latest_only.dart';
 
 enum FeedPhase {  /// Nothing requested yet.
@@ -114,6 +115,7 @@ class FeedController extends ChangeNotifier {
   int _index = -1;
   FeedPhase _phase = FeedPhase.idle;
   String? _error;
+  RequestFailure _failure = RequestFailure.none;
   bool _controlVisible = false;
   bool _muted;
   bool _loadingMore = false;
@@ -129,6 +131,10 @@ class FeedController extends ChangeNotifier {
   int get length => _items.length;
   FeedPhase get phase => _phase;
   String? get error => _error;
+
+  /// What kind of failure put the feed into [FeedPhase.error]. A generic
+  /// "读取失败" is useless when the real answer is "登录已失效".
+  RequestFailure get failure => _failure;
   bool get controlVisible => _controlVisible;
   bool get muted => _muted;
   bool get isLoadingMore => _loadingMore;
@@ -182,6 +188,7 @@ class FeedController extends ChangeNotifier {
     _index = -1;
     _pathCache.clear();
     _error = null;
+    _failure = RequestFailure.none;
     _phase = FeedPhase.loading;
     _bufferFraction = 0;
     _notify();
@@ -190,7 +197,7 @@ class FeedController extends ChangeNotifier {
       source.reset();
       await _appendUntilNonEmpty();
     } on Object catch (e) {
-      _fail('读取媒体索引失败：$e');
+      _fail('读取媒体索引失败：$e', failure: classifyFailure(e));
       return;
     }
 
@@ -303,13 +310,14 @@ class FeedController extends ChangeNotifier {
         );
       });
     } on VideoSourceTimeout catch (e) {
-      _fail(e.message);
+      // A transfer that never finishes is a network symptom, not a bug.
+      _fail(e.message, failure: RequestFailure.offline);
       return;
     } on VideoSourceException catch (e) {
-      _fail(e.message);
+      _fail(e.message, failure: classifyFailure(e));
       return;
     } on Object catch (e) {
-      _fail('$e');
+      _fail('$e', failure: classifyFailure(e));
       return;
     }
 
@@ -439,9 +447,10 @@ class FeedController extends ChangeNotifier {
     _poll = null;
   }
 
-  void _fail(String message) {
+  void _fail(String message, {RequestFailure failure = RequestFailure.generic}) {
     _phase = FeedPhase.error;
     _error = message;
+    _failure = failure;
     _bufferFraction = 0;
     _stopPolling();
     _notify();

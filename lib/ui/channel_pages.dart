@@ -16,6 +16,7 @@ import '../storage/active_files.dart';
 import '../util/byte_format.dart';
 import 'app_theme.dart';
 import 'feed_page.dart';
+import '../td/td_error_kind.dart';
 import 'status_view.dart';
 
 class ChannelListPage extends StatefulWidget {
@@ -128,11 +129,12 @@ class _ChannelListPageState extends State<ChannelListPage> {
       return const StatusView.loading(title: '正在读取频道列表');
     }
     if (directory.state == DirectoryState.error && directory.entries.isEmpty) {
-      return StatusView.error(
-        title: '频道列表读取失败',
-        message: directory.error ?? '未知错误',
-        actionLabel: '重试',
-        onAction: widget.session.refreshDirectory,
+      // Permission and dead-session failures get their own wording and lose the
+      // retry button: pressing it would fail the same way every time.
+      return FailureView(
+        failure: directory.failure,
+        detail: directory.error,
+        onRetry: widget.session.refreshDirectory,
       );
     }
     if (directory.entries.isEmpty) {
@@ -241,6 +243,7 @@ class _ChannelDetailPageState extends State<ChannelDetailPage> {
   final List<MediaRecord> _items = <MediaRecord>[];
   MediaPager? _pager;
   String? _error;
+  RequestFailure _failure = RequestFailure.none;
   bool _loading = true;
   bool _syncing = false;
 
@@ -256,6 +259,8 @@ class _ChannelDetailPageState extends State<ChannelDetailPage> {
       setState(() {
         _loading = false;
         _error = '本地索引尚未打开';
+        // Nothing has been read from Telegram yet; this is a local problem.
+        _failure = RequestFailure.generic;
       });
       return;
     }
@@ -275,9 +280,13 @@ class _ChannelDetailPageState extends State<ChannelDetailPage> {
       setState(() {
         _items.addAll(page.items);
         _error = null;
+        _failure = RequestFailure.none;
       });
     } on Object catch (e) {
-      setState(() => _error = '$e');
+      setState(() {
+        _error = '$e';
+        _failure = classifyFailure(e);
+      });
     } finally {
       if (mounted) setState(() => _loading = false);
     }
@@ -317,11 +326,10 @@ class _ChannelDetailPageState extends State<ChannelDetailPage> {
       return const StatusView.loading(title: '正在读取消息');
     }
     if (_error != null && _items.isEmpty) {
-      return StatusView.error(
-        title: '读取失败',
-        message: _error!,
-        actionLabel: '重试',
-        onAction: _syncMore,
+      return FailureView(
+        failure: _failure,
+        detail: _error,
+        onRetry: _syncMore,
       );
     }
     if (_items.isEmpty) {

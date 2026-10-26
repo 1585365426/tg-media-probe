@@ -8,6 +8,7 @@ library;
 
 import 'package:flutter/material.dart';
 
+import '../td/td_error_kind.dart';
 import 'app_theme.dart';
 
 enum StatusKind { loading, empty, error, permission, signedOut }
@@ -119,6 +120,49 @@ class StatusView extends StatelessWidget {
           ],
         ),
       ),
+    );
+  }
+}
+
+/// Renders a classified failure with the wording that matches its cause.
+///
+/// A retry button is only shown for failures a retry can fix: permission
+/// errors and a dead session are not among them, and offering the button
+/// anyway trains people to press it and blame the app.
+class FailureView extends StatelessWidget {
+  const FailureView({
+    super.key,
+    required this.failure,
+    this.detail,
+    this.onRetry,
+  });
+
+  final RequestFailure failure;
+
+  /// Raw error text, shown under the guidance sentence. Redacted upstream.
+  final String? detail;
+
+  final VoidCallback? onRetry;
+
+  StatusKind get _kind => switch (failure) {
+        RequestFailure.permissionDenied => StatusKind.permission,
+        RequestFailure.sessionExpired => StatusKind.signedOut,
+        _ => StatusKind.error,
+      };
+
+  @override
+  Widget build(BuildContext context) {
+    final retryable = isRetryable(failure);
+    final message = <String>[
+      failureHint(failure),
+      if (detail != null && detail!.isNotEmpty) detail!,
+    ].join('\n');
+    return StatusView(
+      kind: _kind,
+      title: failureTitle(failure),
+      message: message,
+      actionLabel: retryable ? '重试' : null,
+      onAction: retryable ? onRetry : null,
     );
   }
 }

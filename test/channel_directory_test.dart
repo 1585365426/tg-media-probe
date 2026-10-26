@@ -1,8 +1,10 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:tg_media_probe/data/channel_directory.dart';
+import 'package:tg_media_probe/td/td_error_kind.dart';
 import 'package:tg_media_probe/td/td_models.dart';
 
 import 'support/sandbox.dart';
@@ -345,6 +347,69 @@ void main() {
       await directory.refresh();
 
       expect(notifications, 0);
+    });
+  });
+
+  group('failure classification', () {
+    test('a forbidden channel surfaces as permissionDenied, not a retryable error',
+        () async {
+      final source = FakeChatSource()
+        ..failure = const ChannelDirectoryException(
+          'TDLib error 403: CHAT_FORBIDDEN',
+          failure: RequestFailure.permissionDenied,
+        );
+      final directory = build(source);
+
+      await directory.refresh();
+
+      expect(directory.state, DirectoryState.error);
+      expect(directory.failure, RequestFailure.permissionDenied);
+      expect(directory.error, contains('CHAT_FORBIDDEN'));
+      // The list must not offer a retry button for a permission error; that is
+      // what isRetryable drives in FailureView.
+      expect(isRetryable(directory.failure), isFalse);
+    });
+
+    test('a dead session surfaces as sessionExpired', () async {
+      final source = FakeChatSource()
+        ..failure = const ChannelDirectoryException(
+          'TDLib error 401: AUTH_KEY_UNREGISTERED',
+          failure: RequestFailure.sessionExpired,
+        );
+      final directory = build(source);
+
+      await directory.refresh();
+
+      expect(directory.failure, RequestFailure.sessionExpired);
+      expect(isRetryable(directory.failure), isFalse);
+    });
+
+    test('a timeout from the transport is classified as offline', () async {
+      final source = FakeChatSource()
+        ..failure = TimeoutException('TDLib did not answer getChats within 20s');
+      final directory = build(source);
+
+      await directory.refresh();
+
+      expect(directory.failure, RequestFailure.offline);
+      expect(isRetryable(directory.failure), isTrue);
+    });
+
+    test('a successful refresh clears the previous failure', () async {
+      final source = FakeChatSource()
+        ..failure = const ChannelDirectoryException('boom',
+            failure: RequestFailure.permissionDenied);
+      final directory = build(source);
+      await directory.refresh();
+      expect(directory.failure, RequestFailure.permissionDenied);
+
+      source
+        ..failure = null
+        ..channels = <ChatSummary>[channel(1, 'Alpha')];
+      await directory.refresh();
+
+      expect(directory.failure, RequestFailure.none);
+      expect(directory.state, DirectoryState.ready);
     });
   });
 }

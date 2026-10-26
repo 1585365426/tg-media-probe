@@ -9,7 +9,7 @@ import 'file_ops.dart';
 /// | zone            | location on iOS                                  | who may delete it                     |
 /// |-----------------|--------------------------------------------------|---------------------------------------|
 /// | [tempCache]     | `Library/Caches/tgmedia`                          | "clear cache" only                    |
-/// | [userDownloads] | `Documents/TGMediaDownloads`                      | the user, from the download screen     |
+/// | [userDownloads] | `Documents/TGMediaDownloads`                      | the user, from the Files app         |
 /// | [indexDb]       | `Library/Application Support/tgmedia/index`       | never (it is the local mirror)         |
 /// | [authMeta]      | `Library/Application Support/tgmedia/secure`      | never (session/account metadata)       |
 ///

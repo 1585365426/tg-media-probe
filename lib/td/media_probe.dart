@@ -4,7 +4,6 @@ import 'dart:io';
 import 'package:path_provider/path_provider.dart';
 
 import '../security/tdlib_key.dart';
-import '../storage/download_mover.dart';
 import '../storage/storage_layout.dart';
 import '../util/redact.dart';
 import 'download_metrics.dart';
@@ -55,10 +54,12 @@ class ProbeResult {
   final int? messageId;
   final VideoMeta? video;
 
-  /// File the player should open: the copy inside the user download zone.
+  /// File the player should open. After the download feature was removed this
+  /// is the file inside TDLib's rebuildable pool, not a copy under Documents.
   final String? localPath;
 
-  /// TDLib's own copy inside the rebuildable pool, kept for diagnostics.
+  /// Same path as [localPath]; kept so diagnostics can print where the bytes
+  /// actually live without changing the meaning of "local".
   final String? poolPath;
 
   /// Measured timing for the download step. Null when the chain failed before
@@ -94,12 +95,10 @@ class ProbeRunner {
   ProbeRunner({
     required this.client,
     required this.layout,
-    DownloadMover? mover,
-  }) : mover = mover ?? DownloadMover(layout: layout);
+  });
 
   final TdClient client;
   final StorageLayout layout;
-  final DownloadMover mover;
 
   final List<ProbeStep> steps = <ProbeStep>[
     ProbeStep('加载 TDLib 原生库'),
@@ -109,7 +108,6 @@ class ProbeRunner {
     ProbeStep('读取频道消息'),
     ProbeStep('读取视频元数据'),
     ProbeStep('下载真实媒体文件'),
-    ProbeStep('复制到用户下载区（校验大小）'),
     ProbeStep('播放校验（AVPlayer 初始化）'),
   ];
 
@@ -389,29 +387,19 @@ class ProbeRunner {
       final expected =
           finalState.size > 0 ? finalState.size : finalState.expectedSize;
 
-      // ---- 8. promote into the user download zone -----------------------
-      _set(8, ProbeStepState.running);
-      final DownloadMoveResult promoted;
-      try {
-        promoted = await mover.promote(
-          sourcePath: finalState.path,
-          chatId: chat.id,
-          fileId: video.fileId,
-          expectedBytes: expected,
-          fileName: video.fileName,
-          mimeType: video.mimeType,
-        );
-      } on DownloadPromoteException catch (e) {
-        _set(8, ProbeStepState.failed, e.toString());
-        return ProbeResult(ok: false, message: e.message);
+      // 用户下载功能在第 4 步取消，所以这里不再把字节复制到
+      // Documents/TGMediaDownloads。播放器直接打开 TDLib 池内的路径：
+      // 那个池是可重建的，缓存清理只会动它，不会碰任何受保护区。
+      if (finalState.path.isEmpty) {
+        throw StateError('TDLib 没有返回本地路径');
       }
-      lastLocalPath = promoted.path;
-      _set(
-        8,
-        ProbeStepState.success,
-        '${promoted.bytes} B → ${promoted.path}'
-        '${promoted.reused ? '（复用已有文件）' : ''}',
-      );
+      if (expected > 0 && finalState.size != expected) {
+        // 大小不符时宁可报错，也不要让播放器拿到一个截断的文件。
+        _set(7, ProbeStepState.failed,
+            '本地大小 ${finalState.size} B 与元数据 $expected B 不一致');
+        return ProbeResult(ok: false, message: '本地文件大小不一致');
+      }
+      lastLocalPath = finalState.path;
 
       return ProbeResult(
         ok: true,
@@ -420,7 +408,7 @@ class ProbeRunner {
         chatId: chat.id,
         messageId: lastMessageId,
         video: video,
-        localPath: promoted.path,
+        localPath: finalState.path,
         poolPath: finalState.path,
         downloadMetrics: metrics,
       );
@@ -441,10 +429,10 @@ class ProbeRunner {
     String? error,
   }) {
     if (initialized) {
-      _set(9, ProbeStepState.success,
+      _set(8, ProbeStepState.success,
           'AVPlayer 已初始化，时长=${duration?.inSeconds ?? '?'}s');
     } else {
-      _set(9, ProbeStepState.failed, error ?? '播放器初始化失败');
+      _set(8, ProbeStepState.failed, error ?? '播放器初始化失败');
     }
   }
 }

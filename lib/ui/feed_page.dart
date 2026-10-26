@@ -210,11 +210,10 @@ class _FeedPageState extends State<FeedPage> with WidgetsBindingObserver {
           onAction: controller.retry,
         );
       case FeedPhase.error:
-        return StatusView.error(
-          title: '无法播放',
-          message: controller.error ?? '未知原因',
-          actionLabel: '重试',
-          onAction: controller.retry,
+        return FailureView(
+          failure: controller.failure,
+          detail: controller.error,
+          onRetry: controller.retry,
         );
       case FeedPhase.buffering:
       case FeedPhase.ready:
