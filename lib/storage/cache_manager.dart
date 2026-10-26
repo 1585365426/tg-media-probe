@@ -102,6 +102,9 @@ class CacheClearReport {
     required this.protectedZonesIntact,
     required this.integrityPreserved,
     required this.freedByKind,
+    this.integrityProbeError = false,
+    this.scannedFiles = 0,
+    this.scannedBytes = 0,
   });
 
   final int deletedFiles;
@@ -118,7 +121,18 @@ class CacheClearReport {
   /// and after clearing (index rows, favourites, download records).
   final bool integrityPreserved;
 
+  /// True when the probe itself threw, so "preserved" could not be checked.
+  /// Reported separately: a broken probe must not silently pass as intact.
+  final bool integrityProbeError;
+
   final Map<CacheKind, int> freedByKind;
+
+  /// Candidates the scan found, and what they weighed.
+  final int scannedFiles;
+  final int scannedBytes;
+
+  /// Nothing the scan found could be removed, and nothing was even attempted.
+  bool get nothingToDo => scannedFiles == 0;
 
   /// Honest success: nothing failed and nothing protected changed.
   bool get succeeded =>
@@ -135,6 +149,7 @@ class CacheClearReport {
       if (failures.isNotEmpty) '失败 ${failures.length} 个',
       if (!protectedZonesIntact) '受保护目录异常',
       if (!integrityPreserved) '索引完整性校验失败',
+      if (integrityProbeError) '完整性校验未执行（读数失败）',
     ];
     return parts.join(' · ');
   }
@@ -147,10 +162,30 @@ class CacheClearNotConfirmed implements Exception {
   String toString() => 'CacheClearNotConfirmed: user confirmation is required';
 }
 
+/// Snapshot of a clear run in progress, so the settings screen can show that
+/// something is actually happening on a pool with thousands of blobs.
+class CacheClearProgress {
+  const CacheClearProgress({
+    required this.done,
+    required this.total,
+    required this.freedBytes,
+    required this.currentName,
+  });
+
+  final int done;
+  final int total;
+  final int freedBytes;
+
+  /// Basename of the file being handled, for the progress line.
+  final String currentName;
+
+  double get fraction => total <= 0 ? 0 : (done / total).clamp(0.0, 1.0);
+}
+
 /// Clears **only** [StorageZone.tempCache].
 ///
 /// Safety contract, in order of enforcement:
-/// 1. `scan()` walks the three temp sub-directories and nothing else. The
+/// 1. `scan()` walks the four temp sub-directories and nothing else. The
 ///    downloads / index / auth roots are only ever `exists()`-checked.
 /// 2. Every candidate goes through
 ///    [StorageLayout.assertDeletableByCacheClear] immediately before deletion,
@@ -161,6 +196,11 @@ class CacheClearNotConfirmed implements Exception {
 /// 5. A delete that throws is reported as a failure; no fake success.
 /// 6. Before/after integrity probes must match, otherwise the run is reported
 ///    as failed even though some files were removed.
+///
+/// Performance note: the zone roots are resolved once per run and every scan
+/// directory is canonicalised once, so the per-file cost is one `realpath` +
+/// one stat. The previous code re-resolved four zone roots per file, which on a
+/// real pool took long enough that the tap looked like it did nothing.
 class CacheManager {
   CacheManager({
     required this.layout,
@@ -177,27 +217,47 @@ class CacheManager {
   /// records) that must be identical before and after a clear.
   final Future<Map<String, int>> Function()? integrityProbe;
 
+  /// Cache kinds that are actually walked, in display order.
+  static const List<CacheKind> scannedKinds = <CacheKind>[
+    CacheKind.thumbnail,
+    CacheKind.playbackTemp,
+    CacheKind.partialDownload,
+    CacheKind.tdlibBlobPool,
+  ];
+
   Future<CacheScan> scan() async {
     final entries = <CacheEntry>[];
     final unsafe = <String>[];
-    for (final kind in <CacheKind>[
-      CacheKind.thumbnail,
-      CacheKind.playbackTemp,
-      CacheKind.partialDownload,
-      CacheKind.tdlibBlobPool,
-    ]) {
+
+    for (final kind in scannedKinds) {
       final dir = _dirFor(kind);
       final files = await ops.listFilesRecursive(dir);
       for (final path in files) {
-        final ok = await _isSafelyInsideTemp(path);
-        if (!ok) {
+        // Cheap string containment: both sides come from this same layout, so
+        // they share one prefix form. The symlink-aware check runs once per
+        // file at delete time, inside assertDeletableByCacheClear — doing it
+        // here as well would double the realpath traffic for no extra safety.
+        if (!p.isWithin(layout.tempRoot, path)) {
           unsafe.add(path);
+          continue;
+        }
+        var bytes = 0;
+        try {
+          bytes = await ops.sizeOf(path);
+        } catch (_) {
+          // A file that vanished between list and stat is simply not counted;
+          // aborting the whole scan over it is what used to leave the settings
+          // screen stuck on "正在统计…" forever.
           continue;
         }
         entries.add(CacheEntry(
           path: path,
-          bytes: await ops.sizeOf(path),
+          bytes: bytes,
           kind: kind,
+          // Registered paths are layout-derived, exactly like these, so the
+          // lookup is a plain string compare. Canonicalising here would move
+          // /var to /private/var and make a playing file look unregistered —
+          // that is how a cache clear ends up deleting the video on screen.
           inUse: activeFiles.isInUse(path),
         ));
       }
@@ -207,11 +267,16 @@ class CacheManager {
 
   /// Deletes temp cache files. Refuses to run without explicit confirmation —
   /// there is no "clean up quietly on launch" path.
-  Future<CacheClearReport> clear({required bool userConfirmed}) async {
+  Future<CacheClearReport> clear({
+    required bool userConfirmed,
+    void Function(CacheClearProgress)? onProgress,
+  }) async {
     if (!userConfirmed) throw const CacheClearNotConfirmed();
 
-    final protectedBefore = await _protectedSnapshot();
-    final integrityBefore = await integrityProbe?.call();
+    final roots = await layout.resolveRoots();
+    final protectedBefore = await _protectedSnapshot(roots);
+    final integrityBefore = await _runIntegrityProbe();
+    final integrityProbeErrorBefore = integrityBefore == null;
 
     final scanResult = await scan();
     var deleted = 0;
@@ -221,28 +286,56 @@ class CacheManager {
     final failures = <CacheClearFailure>[];
     final freedByKind = <CacheKind, int>{};
 
+    final total = scanResult.entries.length;
+    var done = 0;
+    onProgress?.call(CacheClearProgress(
+      done: 0,
+      total: total,
+      freedBytes: 0,
+      currentName: '',
+    ));
+
     for (final entry in scanResult.entries) {
       if (activeFiles.isInUse(entry.path)) {
         skippedInUse.add(entry.path);
+        done++;
+        onProgress?.call(CacheClearProgress(
+          done: done,
+          total: total,
+          freedBytes: freed,
+          currentName: p.basename(entry.path),
+        ));
         continue;
       }
       try {
         // Re-validate right before the delete: the scan may be seconds old.
-        await layout.assertDeletableByCacheClear(entry.path);
+        await layout.assertDeletableByCacheClear(entry.path, roots: roots);
         await ops.deleteFile(entry.path);
         if (await ops.exists(entry.path)) {
-          failures.add(CacheClearFailure(entry.path, 'file still present after delete'));
-          continue;
+          failures.add(CacheClearFailure(
+              entry.path, 'file still present after delete'));
+        } else {
+          deleted++;
+          freed += entry.bytes;
+          freedByKind[entry.kind] =
+              (freedByKind[entry.kind] ?? 0) + entry.bytes;
         }
-        deleted++;
-        freed += entry.bytes;
-        freedByKind[entry.kind] = (freedByKind[entry.kind] ?? 0) + entry.bytes;
       } on ZoneViolation catch (e) {
         skippedUnsafe.add(entry.path);
         failures.add(CacheClearFailure(entry.path, e.message));
       } catch (e) {
         failures.add(CacheClearFailure(entry.path, e.toString()));
       }
+      done++;
+      onProgress?.call(CacheClearProgress(
+        done: done,
+        total: total,
+        freedBytes: freed,
+        currentName: p.basename(entry.path),
+      ));
+      // Yield a frame every so often: the delete loop is otherwise a long run
+      // of awaits that never lets the progress dialog repaint.
+      if (done % 32 == 0) await Future<void>.delayed(Duration.zero);
     }
 
     // Only empty temp sub-directories are removed, and they are recreated so
@@ -260,8 +353,8 @@ class CacheManager {
     await ops.createDirectory(layout.partialDownloadDir);
     await ops.createDirectory(layout.tdlibFilesDir);
 
-    final protectedAfter = await _protectedSnapshot();
-    final integrityAfter = await integrityProbe?.call();
+    final protectedAfter = await _protectedSnapshot(roots);
+    final integrityAfter = await _runIntegrityProbe();
 
     return CacheClearReport(
       deletedFiles: deleted,
@@ -269,12 +362,33 @@ class CacheManager {
       skippedInUse: skippedInUse,
       skippedUnsafe: skippedUnsafe,
       failures: failures,
-      protectedZonesIntact: _protectedUnchanged(protectedBefore, protectedAfter),
+      protectedZonesIntact:
+          _protectedUnchanged(protectedBefore, protectedAfter),
       integrityPreserved: integrityBefore == null
           ? true
           : _sameCounters(integrityBefore, integrityAfter),
+      integrityProbeError: integrityProbeErrorBefore || integrityAfter == null,
       freedByKind: freedByKind,
+      scannedFiles: total,
+      scannedBytes: scanResult.totalBytes,
     );
+  }
+
+  /// Integrity probe that never aborts a clear.
+  ///
+  /// The probe reads the index journal, which can fail for reasons that have
+  /// nothing to do with the cache (a torn journal, a busy file). Throwing out of
+  /// it used to abort the run *before any file was deleted*, so the user saw a
+  /// failure snackbar and an unchanged total — the "清理没反应" report. A probe
+  /// error is now recorded and reported, and the clear still runs.
+  Future<Map<String, int>?> _runIntegrityProbe() async {
+    final probe = integrityProbe;
+    if (probe == null) return null;
+    try {
+      return await probe();
+    } catch (_) {
+      return null;
+    }
   }
 
   /// Counters come back as fresh maps, so `==` would compare identity and always
@@ -295,6 +409,7 @@ class CacheManager {
   /// gets their size too, but the walk happens through this read-only helper
   /// and never feeds the delete path.
   Future<Map<StorageZone, int>> usage({bool includeProtected = false}) async {
+    final roots = await layout.resolveRoots();
     final sizes = <StorageZone, int>{
       StorageZone.tempCache: (await scan()).totalBytes,
     };
@@ -306,7 +421,7 @@ class CacheManager {
         continue;
       }
       var total = 0;
-      for (final path in await ops.listFilesRecursive(layout.rootOf(zone))) {
+      for (final path in await ops.listFilesRecursive(roots.rootOf(zone))) {
         total += await ops.sizeOf(path);
       }
       sizes[zone] = total;
@@ -325,20 +440,13 @@ class CacheManager {
         CacheKind.unknownFromDirectory => layout.tempRoot,
       };
 
-  Future<bool> _isSafelyInsideTemp(String path) async {
-    try {
-      await layout.assertInside(StorageZone.tempCache, path);
-      return true;
-    } on ZoneViolation {
-      return false;
-    }
-  }
-
-  Future<Map<StorageZone, bool>> _protectedSnapshot() async {
+  Future<Map<StorageZone, bool>> _protectedSnapshot(
+    ResolvedZoneRoots roots,
+  ) async {
     final map = <StorageZone, bool>{};
     for (final zone in StorageZone.values) {
       if (!zone.isProtected) continue;
-      map[zone] = await ops.exists(layout.rootOf(zone));
+      map[zone] = await ops.exists(roots.rootOf(zone));
     }
     return map;
   }

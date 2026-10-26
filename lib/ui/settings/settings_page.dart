@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../../app/app_model.dart';
@@ -32,13 +34,14 @@ class _SettingsPageState extends State<SettingsPage> {
   BiometricAvailability _availability = BiometricAvailability.unsupported;
 
   CacheScan? _scan;
+  String? _scanError;
   bool _busy = false;
 
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
     if (_lockEnabled == null) _loadSecurityState();
-    if (_scan == null) _refreshScan();
+    if (_scan == null && _scanError == null) _refreshScan();
   }
 
   Future<void> _loadSecurityState() async {
@@ -60,19 +63,64 @@ class _SettingsPageState extends State<SettingsPage> {
     });
   }
 
+  /// Rescans the cache directories.
+  ///
+  /// A failed scan is now visible and retryable. It used to be swallowed, which
+  /// left the tile on "正在统计…" for the rest of the session and made the whole
+  /// storage section look dead.
   Future<void> _refreshScan() async {
     try {
       final scan = await widget.services.cache.scan();
       if (!mounted) return;
-      setState(() => _scan = scan);
-    } catch (_) {
-      // A failed scan shows "无法统计" rather than a fake 0 B.
+      setState(() {
+        _scan = scan;
+        _scanError = null;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _scan = null;
+        _scanError = '统计失败：$e';
+      });
     }
   }
 
   Future<void> _clearCache() async {
     if (_busy) return;
-    final scan = _scan;
+
+    // Never promise numbers the scan has not produced yet.
+    if (_scan == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('正在统计缓存，请稍候再试')),
+      );
+      await _refreshScan();
+      return;
+    }
+
+    if ((_scan!.reclaimableCount) == 0) {
+      await showDialog<void>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('没有可清理的内容'),
+          content: Text(
+            _scan!.fileCount == 0
+                ? '临时缓存目录是空的。已下载文件、收藏、媒体索引与账号数据不在统计范围内。'
+                : '扫描到 ${_scan!.fileCount} 个文件，但全部正在占用中，本次没有可删除的内容。'
+                    '播放或下载结束后重试即可。',
+          ),
+          actions: <Widget>[
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('知道了'),
+            ),
+          ],
+        ),
+      );
+      await _refreshScan();
+      return;
+    }
+
+    final scan = _scan!;
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
@@ -82,8 +130,8 @@ class _SettingsPageState extends State<SettingsPage> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: <Widget>[
             Text(
-              '将删除 ${scan?.reclaimableCount ?? 0} 个可重建的临时文件，'
-              '约 ${_formatBytes(scan?.reclaimableBytes ?? 0)}。',
+              '将删除 ${scan.reclaimableCount} 个可重建的临时文件，'
+              '约 ${_formatBytes(scan.reclaimableBytes)}。',
             ),
             const SizedBox(height: 10),
             const Text(
@@ -92,10 +140,10 @@ class _SettingsPageState extends State<SettingsPage> {
             ),
             const SizedBox(height: 8),
             Text(cacheClearConfirmationText, style: const TextStyle(fontSize: 12)),
-            if ((scan?.inUseCount ?? 0) > 0) ...<Widget>[
+            if (scan.inUseCount > 0) ...<Widget>[
               const SizedBox(height: 8),
               Text(
-                '正在使用的 ${scan!.inUseCount} 个文件会被跳过。',
+                '正在使用的 ${scan.inUseCount} 个文件会被跳过。',
                 style: const TextStyle(fontSize: 12),
               ),
             ],
@@ -115,55 +163,111 @@ class _SettingsPageState extends State<SettingsPage> {
     );
     if (confirmed != true || !mounted) return;
 
+    await _runClear(scan);
+  }
+
+  /// Runs the clear behind a modal progress dialog.
+  ///
+  /// The dialog is not cosmetic. A real TDLib pool holds thousands of blobs and
+  /// the delete loop runs one filesystem round-trip after another, so without
+  /// visible progress the tap looks like it did nothing until the result
+  /// appears — which is exactly what was reported.
+  Future<void> _runClear(CacheScan before) async {
     setState(() => _busy = true);
+    final progress = ValueNotifier<CacheClearProgress?>(null);
+    var dialogOpen = true;
+
+    unawaited(showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => _CacheProgressDialog(
+        progress: progress,
+        startingFiles: before.reclaimableCount,
+        startingBytes: before.reclaimableBytes,
+      ),
+    ));
+
     try {
-      final report = await widget.services.cache.clear(userConfirmed: true);
+      final report = await widget.services.cache.clear(
+        userConfirmed: true,
+        onProgress: (p) => progress.value = p,
+      );
       if (!mounted) return;
+
+      if (dialogOpen) {
+        dialogOpen = false;
+        Navigator.of(context, rootNavigator: true).pop();
+      }
       await _refreshScan();
       if (!mounted) return;
-      await showDialog<void>(
-        context: context,
-        builder: (context) => AlertDialog(
-          title: Text(report.succeeded ? '清理完成' : '清理未完全成功'),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: <Widget>[
-              Text(report.summary),
-              if (!report.protectedZonesIntact)
-                const Padding(
-                  padding: EdgeInsets.only(top: 8),
-                  child: Text(
-                    '受保护目录出现异常，已中止后续操作。用户下载、索引与账号数据未被触碰。',
-                    style: TextStyle(fontSize: 12),
-                  ),
-                ),
-              if (!report.integrityPreserved)
-                const Padding(
-                  padding: EdgeInsets.only(top: 8),
-                  child: Text(
-                    '索引完整性校验未通过（清理前后计数不一致）。请到诊断页复核。',
-                    style: TextStyle(fontSize: 12),
-                  ),
-                ),
-            ],
-          ),
-          actions: <Widget>[
-            TextButton(
-              onPressed: () => Navigator.of(context).pop(),
-              child: const Text('知道了'),
-            ),
-          ],
-        ),
-      );
+      await _showReport(report, before);
     } catch (e) {
+      if (dialogOpen && mounted) {
+        dialogOpen = false;
+        Navigator.of(context, rootNavigator: true).pop();
+      }
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('清理失败：$e')),
       );
+      await _refreshScan();
     } finally {
+      progress.dispose();
       if (mounted) setState(() => _busy = false);
     }
+  }
+
+  Future<void> _showReport(CacheClearReport report, CacheScan before) async {
+    final after = _scan;
+    await showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(report.succeeded ? '清理完成' : '清理未完全成功'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            Text(report.summary),
+            const SizedBox(height: 8),
+            Text(
+              '清理前 ${before.fileCount} 个文件 / ${_formatBytes(before.totalBytes)}'
+              '${after == null ? '' : '　→　清理后 ${after.fileCount} 个 / ${_formatBytes(after.totalBytes)}'}',
+              style: const TextStyle(fontSize: 12),
+            ),
+            if (!report.protectedZonesIntact)
+              const Padding(
+                padding: EdgeInsets.only(top: 8),
+                child: Text(
+                  '受保护目录出现异常，已中止后续操作。用户下载、索引与账号数据未被触碰。',
+                  style: TextStyle(fontSize: 12),
+                ),
+              ),
+            if (!report.integrityPreserved)
+              const Padding(
+                padding: EdgeInsets.only(top: 8),
+                child: Text(
+                  '索引完整性校验未通过（清理前后计数不一致）。请到诊断页复核。',
+                  style: TextStyle(fontSize: 12),
+                ),
+              ),
+            if (report.integrityProbeError)
+              const Padding(
+                padding: EdgeInsets.only(top: 8),
+                child: Text(
+                  '完整性校验本次没有跑起来（读取索引计数失败），清理照常完成。',
+                  style: TextStyle(fontSize: 12),
+                ),
+              ),
+          ],
+        ),
+        actions: <Widget>[
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('知道了'),
+          ),
+        ],
+      ),
+    );
   }
 
   Future<void> _toggleLock(bool enable) async {
@@ -258,10 +362,14 @@ class _SettingsPageState extends State<SettingsPage> {
                   leading: const Icon(Icons.cleaning_services_outlined),
                   title: const Text('清理临时缓存'),
                   subtitle: Text(
-                    _scan == null
-                        ? '正在统计…'
-                        : '可清理 ${_scan!.reclaimableCount} 个文件 · '
-                            '${_formatBytes(_scan!.reclaimableBytes)}',
+                    _scanError != null
+                        ? _scanError!
+                        : _scan == null
+                            ? '正在统计…'
+                            : '可清理 ${_scan!.reclaimableCount} 个文件 · '
+                                '${_formatBytes(_scan!.reclaimableBytes)}'
+                                '（共 ${_scan!.fileCount} 个 / '
+                                '${_formatBytes(_scan!.totalBytes)}）',
                   ),
                   trailing: _busy
                       ? const SizedBox(
@@ -269,13 +377,25 @@ class _SettingsPageState extends State<SettingsPage> {
                           height: 18,
                           child: CircularProgressIndicator(strokeWidth: 2),
                         )
-                      : const Icon(Icons.chevron_right),
+                      : IconButton(
+                          icon: const Icon(Icons.refresh),
+                          tooltip: '重新统计',
+                          onPressed: _busy
+                              ? null
+                              : () {
+                                  setState(() {
+                                    _scan = null;
+                                    _scanError = null;
+                                  });
+                                  _refreshScan();
+                                },
+                        ),
                   onTap: _busy ? null : _clearCache,
                 ),
                 Padding(
                   padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
                   child: Text(
-                    '只清理缩略图、临时播放文件与未完成分片。'
+                    '只清理缩略图、临时播放文件、未完成分片与 TDLib 文件池。'
                     '已下载文件、收藏、媒体索引、账号授权与云端消息都不在清理范围内。',
                     style: theme.textTheme.bodySmall,
                   ),
@@ -388,13 +508,83 @@ class _SettingsPageState extends State<SettingsPage> {
         ),
       );
 
-  static String _formatBytes(int bytes) {
-    if (bytes <= 0) return '0 B';
-    if (bytes < 1024) return '$bytes B';
-    if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(1)} KB';
-    if (bytes < 1024 * 1024 * 1024) {
-      return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
-    }
-    return '${(bytes / (1024 * 1024 * 1024)).toStringAsFixed(2)} GB';
+  static String _formatBytes(int bytes) => formatBytes(bytes);
+}
+
+/// Byte size for humans. Top-level so the progress dialog can use it without
+/// reaching into a private State class.
+String formatBytes(int bytes) {
+  if (bytes <= 0) return '0 B';
+  if (bytes < 1024) return '$bytes B';
+  if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(1)} KB';
+  if (bytes < 1024 * 1024 * 1024) {
+    return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
+  }
+  return '${(bytes / (1024 * 1024 * 1024)).toStringAsFixed(2)} GB';
+}
+
+/// Modal progress for a clear run.
+///
+/// Deliberately non-dismissible: the delete loop cannot be interrupted safely,
+/// so a tap outside must not pretend it was cancelled.
+class _CacheProgressDialog extends StatelessWidget {
+  const _CacheProgressDialog({
+    required this.progress,
+    required this.startingFiles,
+    required this.startingBytes,
+  });
+
+  final ValueNotifier<CacheClearProgress?> progress;
+  final int startingFiles;
+  final int startingBytes;
+
+  @override
+  Widget build(BuildContext context) {
+    return PopScope(
+      canPop: false,
+      child: AlertDialog(
+        title: const Text('正在清理临时缓存'),
+        content: ValueListenableBuilder<CacheClearProgress?>(
+          valueListenable: progress,
+          builder: (context, value, _) {
+            final done = value?.done ?? 0;
+            final total = value?.total ?? startingFiles;
+            final freed = value?.freedBytes ?? 0;
+            final name = value?.currentName ?? '';
+            return Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                LinearProgressIndicator(
+                  value: total <= 0 ? null : (done / total).clamp(0.0, 1.0),
+                ),
+                const SizedBox(height: 12),
+                Text(
+                  total <= 0
+                      ? '正在统计…'
+                      : '已处理 $done / $total 个文件',
+                  style: const TextStyle(fontSize: 13),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  '已释放 ${formatBytes(freed)} '
+                  '（可清理 ${formatBytes(startingBytes)}）',
+                  style: const TextStyle(fontSize: 12),
+                ),
+                if (name.isNotEmpty) ...<Widget>[
+                  const SizedBox(height: 4),
+                  Text(
+                    name,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(fontSize: 11),
+                  ),
+                ],
+              ],
+            );
+          },
+        ),
+      ),
+    );
   }
 }
