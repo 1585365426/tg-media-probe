@@ -111,14 +111,12 @@ enum OrientationChannel {
       target = .landscapeRight
     }
     UIDevice.current.setValue(target.rawValue, forKey: "orientation")
-    // iOS 15 needs both: the KVC write asks for a rotation, and telling the
-    // root controller its supported set changed is what makes UIKit accept it.
-    // Only calling attemptRotationToDeviceOrientation leaves the mask stale on
-    // some 15.x builds, which looked like "landscape stuck / cannot go back".
-    UIApplication.shared.connectedScenes
-      .compactMap { $0 as? UIWindowScene }
-      .compactMap { $0.keyWindow?.rootViewController }
-      .forEach { $0.setNeedsUpdateOfSupportedInterfaceOrientations() }
+    // `setNeedsUpdateOfSupportedInterfaceOrientations()` would be the clean way
+    // to make UIKit re-read the mask, but it exists only from iOS 16 — this
+    // branch is the 15.x path, so it cannot be called here (first attempt at
+    // this fix failed CI on exactly that). The KVC write plus
+    // attemptRotationToDeviceOrientation is what iOS 15 offers; the AppDelegate
+    // mask above still governs the next rotation.
     UIViewController.attemptRotationToDeviceOrientation()
   }
 
