@@ -80,6 +80,73 @@ class ProbeInitInfo {
   final bool legacyPlaintextDb;
 }
 
+/// True when the plaintext database written by a pre-encryption build is still
+/// on disk.
+///
+/// Only used to decide whether to show a warning line; nothing here deletes it.
+/// Any I/O failure reports false rather than throwing, because a missing
+/// Documents directory means there is nothing to warn about.
+Future<bool> detectLegacyPlaintextDb() async {
+  try {
+    final docs = await getApplicationDocumentsDirectory();
+    return await Directory('${docs.path}/tdlib/db').exists();
+  } catch (_) {
+    return false;
+  }
+}
+
+/// The nine-step ledger.
+///
+/// Split out of [ProbeRunner] because a runner needs a live [TdClient], which
+/// needs the native library; verdicts have to be assertable without one.
+class ProbeProgress {
+  final List<ProbeStep> steps = <ProbeStep>[
+    ProbeStep('加载 TDLib 原生库'),
+    ProbeStep('配置 TDLib 参数（api_id / api_hash 运行期输入）'),
+    ProbeStep('账号登录（验证码 / 两步验证）'),
+    ProbeStep('读取已授权频道'),
+    ProbeStep('读取频道消息'),
+    ProbeStep('读取视频元数据'),
+    ProbeStep('下载真实媒体文件'),
+    ProbeStep('复制到用户下载区（校验大小）'),
+    ProbeStep('播放校验（AVPlayer 初始化）'),
+  ];
+
+  VoidCallback? onChanged;
+
+  ProbeStep step(int index) => steps[index - 1];
+
+  void set(int index, ProbeStepState state, [String detail = '']) {
+    final s = step(index);
+    s.state = state;
+    s.detail = redactText(detail);
+    onChanged?.call();
+  }
+
+  /// Records that steps 1 and 2 are satisfied by a client this page did not
+  /// open.
+  ///
+  /// TDLib holds an exclusive lock on `td.binlog` for as long as a client is
+  /// alive. Calling `setTdlibParameters` against the same directory from a
+  /// second client fails with `error 400: Can't lock file ... already in use by
+  /// current program`. Once the app is signed in, the probe therefore has to
+  /// reuse that client instead of configuring its own — but the two steps still
+  /// need an honest verdict rather than staying blank.
+  void adoptExisting({
+    required String databaseDir,
+    required String filesDir,
+  }) {
+    set(1, ProbeStepState.success,
+        '复用已登录实例（TDLib 静态链接进主二进制，本页未重新打开）');
+    set(
+      2,
+      ProbeStepState.success,
+      'db=$databaseDir\nfiles=$filesDir\n'
+      '（由主客户端持有并加密，本页不重复 setTdlibParameters）',
+    );
+  }
+}
+
 /// Runs the minimal real-data chain:
 /// login -> authorised channels -> channel messages -> video metadata ->
 /// download -> local file verification. Playback is verified by the UI layer
@@ -95,35 +162,33 @@ class ProbeRunner {
   final StorageLayout layout;
   final DownloadMover mover;
 
-  final List<ProbeStep> steps = <ProbeStep>[
-    ProbeStep('加载 TDLib 原生库'),
-    ProbeStep('配置 TDLib 参数（api_id / api_hash 运行期输入）'),
-    ProbeStep('账号登录（验证码 / 两步验证）'),
-    ProbeStep('读取已授权频道'),
-    ProbeStep('读取频道消息'),
-    ProbeStep('读取视频元数据'),
-    ProbeStep('下载真实媒体文件'),
-    ProbeStep('复制到用户下载区（校验大小）'),
-    ProbeStep('播放校验（AVPlayer 初始化）'),
-  ];
+  final ProbeProgress progress = ProbeProgress();
 
-  VoidCallback? onChanged;
+  List<ProbeStep> get steps => progress.steps;
+
+  VoidCallback? get onChanged => progress.onChanged;
+  set onChanged(VoidCallback? value) => progress.onChanged = value;
 
   VideoMeta? lastVideo;
   int? lastChatId;
   int? lastMessageId;
   String? lastLocalPath;
 
-  ProbeStep step(int index) => steps[index - 1];
+  ProbeStep step(int index) => progress.step(index);
 
-  void _set(int index, ProbeStepState state, [String detail = '']) {
-    final s = step(index);
-    s.state = state;
-    s.detail = redactText(detail);
-    onChanged?.call();
-  }
+  void _set(int index, ProbeStepState state, [String detail = '']) =>
+      progress.set(index, state, detail);
 
   void markLibraryLoaded(String path) => _set(1, ProbeStepState.success, path);
+
+  void adoptExisting({
+    required String databaseDir,
+    required String filesDir,
+  }) =>
+      progress.adoptExisting(
+        databaseDir: databaseDir,
+        filesDir: filesDir,
+      );
 
   /// Configures TDLib against the four storage zones.
   ///
@@ -146,13 +211,7 @@ class ProbeRunner {
 
       // Detect the plaintext database written by the previous build. It is not
       // deleted here — that would be destroying user data to fix a bug.
-      bool legacy = false;
-      try {
-        final docs = await getApplicationDocumentsDirectory();
-        legacy = await Directory('${docs.path}/tdlib/db').exists();
-      } catch (_) {
-        legacy = false;
-      }
+      final legacy = await detectLegacyPlaintextDb();
 
       final response = await client.request(
         setTdlibParameters(

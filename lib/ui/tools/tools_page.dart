@@ -83,7 +83,13 @@ class _ToolsPageState extends State<ToolsPage> {
                 subtitle: const Text('逐项验证 TDLib 加载、登录、读取、下载、播放'),
                 trailing: const Icon(Icons.chevron_right),
                 onTap: () => Navigator.of(context).push(
-                  MaterialPageRoute<void>(builder: (_) => const ProbePage()),
+                  MaterialPageRoute<void>(
+                    // Hand over the live client when one exists: TDLib locks its
+                    // database per client, so a second instance would die with
+                    // error 400. Null means not signed in yet, and the probe
+                    // then opens its own without contention.
+                    builder: (_) => ProbePage(reuseClient: services.client),
+                  ),
                 ),
               ),
             ],

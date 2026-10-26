@@ -350,7 +350,12 @@ class _SettingsPageState extends State<SettingsPage> {
                   subtitle: const Text('逐项复核 TDLib 只读链路'),
                   trailing: const Icon(Icons.chevron_right),
                   onTap: () => Navigator.of(context).push(
-                    MaterialPageRoute<void>(builder: (_) => const ProbePage()),
+                    MaterialPageRoute<void>(
+                      // Reuse the live client so the probe cannot collide with
+                      // TDLib's exclusive database lock.
+                      builder: (_) =>
+                          ProbePage(reuseClient: widget.services.client),
+                    ),
                   ),
                 ),
                 const Divider(height: 1),

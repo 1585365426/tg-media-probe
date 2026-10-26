@@ -11,14 +11,24 @@ import '../storage/storage_layout.dart';
 import '../td/media_probe.dart';
 import '../td/td_client.dart';
 import '../td/td_models.dart';
+import '../td/td_requests.dart';
 import '../util/path_text.dart';
 import '../util/redact.dart';
 
 /// Minimal verification UI. It is deliberately not the product UI: the only
 /// job is to prove each step of the chain with real Telegram data and real
 /// device capabilities.
+///
+/// H-c: when the app already holds a TDLib client, that client is handed in and
+/// reused. TDLib takes an exclusive lock on its database for the lifetime of a
+/// client, so a second client pointed at the same directory dies with
+/// `error 400: Can't lock file ... already in use by current program`. Only an
+/// unauthenticated app — where no client exists yet — opens its own.
 class ProbePage extends StatefulWidget {
-  const ProbePage({super.key});
+  const ProbePage({super.key, this.reuseClient});
+
+  /// Client owned by `AppServices`, supplied whenever the user is signed in.
+  final TdClient? reuseClient;
 
   @override
   State<ProbePage> createState() => _ProbePageState();
@@ -47,22 +57,96 @@ class _ProbePageState extends State<ProbePage> {
   StorageLayout? _layout;
   ProbeInitInfo? _initInfo;
 
+  /// True when [_client] belongs to AppServices rather than to this page.
+  /// `dispose` must not close it — the rest of the app is still using it.
+  bool _reused = false;
+
   @override
   void initState() {
     super.initState();
     _restoreCredentials();
+    final reused = widget.reuseClient;
+    if (reused != null) _attachReused(reused);
   }
 
   @override
   void dispose() {
     _video?.dispose();
-    _client?.dispose();
+    // Only close a client this page opened. A reused one is still serving the
+    // channel page, the feed and the resolver.
+    if (!_reused) _client?.dispose();
     _apiId.dispose();
     _apiHash.dispose();
     _phone.dispose();
     _code.dispose();
     _password.dispose();
     super.dispose();
+  }
+
+  /// Wires the probe onto an already-open client without touching its
+  /// configuration.
+  Future<void> _attachReused(TdClient client) async {
+    try {
+      final layout = await AppPaths.resolveLayout();
+      await layout.ensureCreated();
+      if (!mounted) return;
+
+      final runner = ProbeRunner(client: client, layout: layout)
+        ..onChanged = () {
+          if (mounted) setState(() {});
+        };
+      runner.adoptExisting(
+        databaseDir: layout.tdlibDatabaseDir,
+        filesDir: layout.tdlibFilesDir,
+      );
+
+      final legacy = await detectLegacyPlaintextDb();
+      if (!mounted) return;
+
+      setState(() {
+        _reused = true;
+        _client = client;
+        _runner = runner;
+        _layout = layout;
+        _initInfo = ProbeInitInfo(
+          databaseDir: layout.tdlibDatabaseDir,
+          filesDir: layout.tdlibFilesDir,
+          keyMask: '已由主客户端持有',
+          legacyPlaintextDb: legacy,
+        );
+        _status = '复用已登录实例，等待读取授权状态…';
+      });
+
+      client.updates.listen((event) {
+        if (event['@type'] != 'updateAuthorizationState') return;
+        final raw = event['authorization_state'];
+        if (raw is! Map) return;
+        final state = AuthState.fromJson(raw.cast<String, Object?>());
+        if (!mounted) return;
+        setState(() => _stage = state.stage);
+        if (state.stage == AuthStage.ready) runner.markAuthorized();
+      });
+
+      // A client that logged in long ago never re-emits updateAuthorizationState
+      // on its own, so ask once instead of waiting for an event that will not
+      // arrive and leaving the chain button disabled forever.
+      final response = await client.request(getAuthorizationState());
+      if (!mounted) return;
+      final raw = response['authorization_state'];
+      if (raw is Map) {
+        final state = AuthState.fromJson(raw.cast<String, Object?>());
+        setState(() {
+          _stage = state.stage;
+          _status = state.stage == AuthStage.ready
+              ? '复用已登录实例；本页只发只读请求'
+              : '复用实例的登录阶段为 ${state.stage.name}';
+        });
+        if (state.stage == AuthStage.ready) runner.markAuthorized();
+      }
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _status = '复用实例失败: ${redactText(e.toString())}');
+    }
   }
 
   Future<void> _restoreCredentials() async {
@@ -252,86 +336,99 @@ class _ProbePageState extends State<ProbePage> {
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: <Widget>[
-          _section('1. 凭据（运行期输入，Keychain 存储）'),
-          TextField(
-            controller: _apiId,
-            keyboardType: TextInputType.number,
-            decoration: const InputDecoration(labelText: 'api_id'),
-          ),
-          TextField(
-            controller: _apiHash,
-            obscureText: true,
-            decoration: InputDecoration(
-              labelText: 'api_hash',
-              hintText: _credentialsSaved ? '已保存于 Keychain，留空表示复用' : null,
+          if (_reused) ...<Widget>[
+            _reusedNotice(),
+            const SizedBox(height: 8),
+            Text('登录阶段: ${_stage.name}',
+                style: Theme.of(context).textTheme.bodySmall),
+            Text('状态: $_status',
+                style: Theme.of(context).textTheme.bodySmall),
+            const Divider(height: 32),
+          ] else ...<Widget>[
+            _section('1. 凭据（运行期输入，Keychain 存储）'),
+            TextField(
+              controller: _apiId,
+              keyboardType: TextInputType.number,
+              decoration: const InputDecoration(labelText: 'api_id'),
             ),
-          ),
-          const SizedBox(height: 8),
-          Wrap(
-            spacing: 8,
-            children: <Widget>[
-              FilledButton.tonal(
-                onPressed: _busy ? null : _saveCredentials,
-                child: const Text('保存到 Keychain'),
+            TextField(
+              controller: _apiHash,
+              obscureText: true,
+              decoration: InputDecoration(
+                labelText: 'api_hash',
+                hintText: _credentialsSaved ? '已保存于 Keychain，留空表示复用' : null,
               ),
-              FilledButton(
-                onPressed: _busy ? null : _initTdlib,
-                child: const Text('初始化 TDLib'),
-              ),
-            ],
-          ),
-          const SizedBox(height: 8),
-          Text('登录阶段: ${_stage.name}', style: Theme.of(context).textTheme.bodySmall),
-          Text('状态: $_status', style: Theme.of(context).textTheme.bodySmall),
-          const Divider(height: 32),
+            ),
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 8,
+              children: <Widget>[
+                FilledButton.tonal(
+                  onPressed: _busy ? null : _saveCredentials,
+                  child: const Text('保存到 Keychain'),
+                ),
+                FilledButton(
+                  onPressed: _busy ? null : _initTdlib,
+                  child: const Text('初始化 TDLib'),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Text('登录阶段: ${_stage.name}',
+                style: Theme.of(context).textTheme.bodySmall),
+            Text('状态: $_status',
+                style: Theme.of(context).textTheme.bodySmall),
+            const Divider(height: 32),
 
-          _section('2. 登录'),
-          TextField(
-            controller: _phone,
-            keyboardType: TextInputType.phone,
-            decoration: const InputDecoration(
-              labelText: '手机号（含国家码）',
-              hintText: '+8613800000000',
+            _section('2. 登录'),
+            TextField(
+              controller: _phone,
+              keyboardType: TextInputType.phone,
+              decoration: const InputDecoration(
+                labelText: '手机号（含国家码）',
+                hintText: '+8613800000000',
+              ),
             ),
-          ),
-          Row(
-            children: <Widget>[
-              Expanded(
-                child: TextField(
-                  controller: _code,
-                  keyboardType: TextInputType.number,
-                  decoration: const InputDecoration(labelText: '登录验证码'),
+            Row(
+              children: <Widget>[
+                Expanded(
+                  child: TextField(
+                    controller: _code,
+                    keyboardType: TextInputType.number,
+                    decoration: const InputDecoration(labelText: '登录验证码'),
+                  ),
                 ),
-              ),
-              const SizedBox(width: 8),
-              FilledButton.tonal(
-                onPressed: _busy ? null : _sendCode,
-                child: const Text('提交验证码'),
-              ),
-            ],
-          ),
-          Row(
-            children: <Widget>[
-              Expanded(
-                child: TextField(
-                  controller: _password,
-                  obscureText: true,
-                  decoration: const InputDecoration(labelText: '两步验证密码（如启用）'),
+                const SizedBox(width: 8),
+                FilledButton.tonal(
+                  onPressed: _busy ? null : _sendCode,
+                  child: const Text('提交验证码'),
                 ),
-              ),
-              const SizedBox(width: 8),
-              FilledButton.tonal(
-                onPressed: _busy ? null : _sendPassword,
-                child: const Text('提交密码'),
-              ),
-            ],
-          ),
-          const SizedBox(height: 8),
-          FilledButton(
-            onPressed: _busy ? null : _sendPhone,
-            child: const Text('发送手机号 / 请求验证码'),
-          ),
-          const Divider(height: 32),
+              ],
+            ),
+            Row(
+              children: <Widget>[
+                Expanded(
+                  child: TextField(
+                    controller: _password,
+                    obscureText: true,
+                    decoration:
+                        const InputDecoration(labelText: '两步验证密码（如启用）'),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                FilledButton.tonal(
+                  onPressed: _busy ? null : _sendPassword,
+                  child: const Text('提交密码'),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            FilledButton(
+              onPressed: _busy ? null : _sendPhone,
+              child: const Text('发送手机号 / 请求验证码'),
+            ),
+            const Divider(height: 32),
+          ],
 
           _section('3. 只读链路'),
           FilledButton(
@@ -473,6 +570,34 @@ class _ProbePageState extends State<ProbePage> {
       SnackBar(
         content: Text('已复制「$label」'),
         duration: const Duration(seconds: 2),
+      ),
+    );
+  }
+
+  /// Shown instead of the credential and login blocks when the page rides on
+  /// AppServices' client. Kept visually distinct so nobody thinks they are
+  /// looking at a second TDLib session.
+  Widget _reusedNotice() {
+    final theme = Theme.of(context);
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: theme.colorScheme.secondaryContainer.withValues(alpha: 0.5),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Text('复用已登录实例', style: theme.textTheme.titleSmall),
+          const SizedBox(height: 4),
+          Text(
+            'TDLib 对数据库持有排他锁，同一目录只允许一个客户端。本页因此接入'
+            '应用当前会话，只发只读请求，不再执行 setTdlibParameters。'
+            'api_id / api_hash 与登录表单在本模式下不显示。',
+            style: theme.textTheme.bodySmall,
+          ),
+        ],
       ),
     );
   }
