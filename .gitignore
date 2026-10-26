@@ -54,3 +54,6 @@ ci-report/
 
 # TDLib schema fixture is fetched at build time (1.2 MB, upstream source)
 test/fixtures/td_api.tl
+
+# Local IPA copies are build outputs, not source.
+*.ipa

@@ -101,3 +101,21 @@ run [40198573231](https://github.com/1585365426/tg-media-probe/actions/runs/4019
 
 - `ci-report` 分支：`summary.txt / macos.txt / xcode.txt / iphoneos-sdk.txt / cocoapods.txt / flutter.txt / fetch-tdlib.txt / tdlib-layout.txt / pod-install.txt / deployment-targets.txt / analyze.txt / test.txt / build-ios.txt / inspect.txt / package.txt`
 - Actions artifact：`tg-media-probe-ipa`（IPA + sha256 + 全部日志，14 天保留）
+
+---
+
+## 第 3 步重做（rebuild-step3 分支）
+
+| 项 | 值 |
+|---|---|
+| 基线 | `3480894`（第 3 步真机通过的稳定点） |
+| 提交 | `d572542` 功能 / `11dde64` CI 分支 / `92d560a` CI 修复 / 本轮文档 |
+| 测试 | 204 passed / 1 skipped（基线 164 → 新增 40） |
+| CI | run 40298435257 success |
+| IPA | `ea9035024a631778950b22865e7e418c334a6312d70cb21adcd332e880dd1ebf`（19,577,158 B） |
+| 核验 | arm64 / minos 15.2 / sdk 26.5 / 0 条 LC_CODE_SIGNATURE / 无 _CodeSignature / 无 mobileprovision / td_* 四符号在 / 中文文案 UTF-16LE 命中 |
+| 真机 | 未执行 |
+
+v1（第 1–8 步）保存在 `main` + 标签 `v1-step8-archive`，未删除。
+
+详见 `docs/STEP3-REBUILD.md`。

@@ -99,8 +99,9 @@ flutter test      204 passed, 1 skipped（基线 164 → 新增 40）
 | 静态检查 | ✅ `No issues found!` |
 | 单元测试 | ✅ 204 passed / 1 skipped |
 | 反向验证 | ✅ 两处注入缺陷均被抓出 |
-| iOS 构建 | 见 §5 |
-| IPA 生成 | 见 §5 |
+| iOS 构建 | ✅ run 40298435257 success |
+| IPA 生成 | ✅ `ea9035024a63…dd1ebf`，19,577,158 B |
+| IPA 解包核验 | ✅ arm64 / minos 15.2 / sdk 26.5 / 0 条 LC_CODE_SIGNATURE / 无 _CodeSignature / 无 mobileprovision / 四个 `td_*` 符号在 / 中文文案 UTF-16LE 命中 |
 | 真机安装 | ❌ 未执行 |
 | 真机登录 / 下载 / 播放 / 清理 | ❌ 未执行 |
 
@@ -108,4 +109,89 @@ flutter test      204 passed, 1 skipped（基线 164 → 新增 40）
 
 ## 5. 构建记录
 
-（CI 运行完成后补）
+### 5.1 第一次尝试失败：run 40297771363
+
+第 4 个步骤 `Assert toolchain is Xcode 26 or newer` 直接失败，第 5 步之后全部 skipped —— 一行代码都没编译。
+
+原因不在本轮代码，在基线本身：`3480894` 的 workflow 里是
+
+```bash
+major="$(xcodebuild -version | head -1 | awk '{print $2}' | cut -d. -f1)"
+```
+
+`head -1` 读完第一行就关管道，`xcodebuild` 正在写 banner 时吃 SIGPIPE 崩掉（第 8 步记录过 exit 134 的同一个坑），解析出来的 `major` 是空串，断言 `< 26` 成立 → 退出。main 上这个坑已经修过，第 3 步基线早于那修复。
+
+修法：只从 main 取回 `.github/workflows/ios-probe.yml` 一个文件，把 `rebuild-step3` 加回 push 触发列表。业务代码一行没从 main 捡 —— 第 4-8 步的东西不在这个分支上。
+
+### 5.2 第二次：run 40298435257 success
+
+| 项 | 值 |
+|---|---|
+| 提交 | `92d560a` |
+| 分支 | `rebuild-step3` |
+| 工作流 | ios-probe / build-ipa |
+| 结论 | success |
+
+步骤 1–21 全绿，含 `Analyze`、`Unit tests`（`All tests passed!`，`00:15 +204 ~1`）、`Build unsigned iOS app`、`Inspect linked binary (TDLib symbol proof)`、`Package unsigned IPA`。
+
+### 5.3 产物核验（本地解包，非 CI 自述）
+
+```
+sha256   ea9035024a631778950b22865e7e418c334a6312d70cb21adcd332e880dd1ebf
+size     19,577,158 bytes
+CI 自报 一致（build/ios/ipa/sha256.txt 与本地 sha256sum 完全相同）
+```
+
+| 检查项 | 结果 |
+|---|---|
+| `CFBundleIdentifier` | `com.tgmedia.tgMediaProbe` |
+| `MinimumOSVersion` | `15.2` |
+| Mach-O | thin `arm64`（`cputype 0x100000c`） |
+| `LC_BUILD_VERSION` | platform 2 (iOS)，minos `15.2.0`，sdk `26.5.0` |
+| `LC_CODE_SIGNATURE` | **0 条** |
+| `_CodeSignature/` | 不存在 |
+| `embedded.mobileprovision` | 不存在 |
+| TDLib 符号 | `td_create_client_id` / `td_send` / `td_receive` / `td_execute` 均在 Runner 二进制内 |
+| 本轮中文文案 | `清理临时缓存` / `存储四区` / `正在遍历四个存储区` / `下载超时` / `可重建` 全部在 `Frameworks/App.framework/App` 中按 UTF-16LE 命中 |
+| `NSAllowsLocalNetworking` | **无**（本轮无回环流式服务，第 7 步才需要） |
+
+核验脚本落在 `tool/verify_ipa.py`，本地可直接复跑：
+
+```bash
+unzip -q TGMediaProbe-step3rebuild.ipa -d /tmp/ipa-check
+python tool/verify_ipa.py /tmp/ipa-check "清理临时缓存" "存储四区"
+```
+
+### 5.4 产物位置
+
+| 位置 | 路径 |
+|---|---|
+| 桌面 | `C:\Users\Administrator\Desktop\TGMediaProbe-step3rebuild.ipa` |
+| 工程根 | `tg_media_probe/TGMediaProbe-step3rebuild.ipa` |
+
+TrollStore 安装路径不变：传到手机 → 用 TrollStore 打开该 .ipa。
+
+---
+
+## 6. 上一代的归档位置
+
+第 1–8 步的完整代码与最后一个可用包没有删：
+
+| 对象 | 位置 |
+|---|---|
+| 代码 | 分支 `main`，HEAD `f2fdd20` |
+| 标签 | `v1-step8-archive`（附注：最后一个 IPA `bcd3d232…972f11`，run 40290837814） |
+| IPA | 桌面 `TGMediaProbe-step8-session.ipa` |
+
+想回那一代：`git checkout main`。本分支不动 main。
+
+---
+
+## 7. 装上去先看什么
+
+本轮只解决"能测"，不保证"变快"。三个数字需要真机给：
+
+1. **第 7 步下载时**：首字节延迟、窗口速率、端到端均速。这三个数决定下一轮是加并发、换 CDN 路由、还是根本不该走整段下载。
+2. **存储面板点"盘点存储"**：四个区各多少文件、多少字节。`临时缓存` 那一行如果还是 0 B / 0 个文件而手机存储里 `tgmedia` 目录有东西，说明还有写入方不在 `tempRoot` 下，需要继续找。
+3. **点"清理临时缓存"**：进度条应该跳动（`done / total`），结束后给"清理完成 / 清理未完全成功"以及被拒路径列表。如果按钮点下去完全没动静，那是 `setState` 之外的问题，把 `状态:` 那行文字发回来。
+
