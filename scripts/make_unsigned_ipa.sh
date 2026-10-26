@@ -23,6 +23,9 @@ rm -rf "${REPO_ROOT}/build/ipa-work"
 
 echo "==> ${IPA}"
 ls -lh "${IPA}"
+# Exact bytes, so the report does not have to quote the rounded `ls -lh` value
+# or, worse, the size of the artifact zip that wraps it.
+echo "ipa_bytes: $(wc -c < "${IPA}" | tr -d ' ')"
 shasum -a 256 "${IPA}" | tee "${OUT_DIR}/sha256.txt"
 echo "==> bundle info"
 /usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "${APP_DIR}/Info.plist"
