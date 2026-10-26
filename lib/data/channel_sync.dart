@@ -245,10 +245,19 @@ class ChannelSyncEngine {
   }
 
   /// Bounded multi-page cycle used on app launch / pull-to-refresh.
+  /// Reads a bounded number of pages per channel.
+  ///
+  /// [resume] decides where the walk starts:
+  /// * `true` (default) continues from the oldest message already indexed, so
+  ///   repeated calls keep digging into a 4000-message channel instead of
+  ///   re-reading the same newest pages forever;
+  /// * `false` starts at the newest message, which is what a pull-to-refresh
+  ///   wants.
   Future<SyncCycleReport> syncCycle({
     required List<int> chatIds,
     int? pagesPerChannel,
     SyncCancelToken? cancel,
+    bool resume = true,
   }) async {
     final pagesBudget = (pagesPerChannel ?? maxPagesPerCycle).clamp(1, 10);
     var pages = 0;
@@ -260,7 +269,7 @@ class ChannelSyncEngine {
     String? lastError;
 
     for (final chatId in chatIds) {
-      int? cursor;
+      int? cursor = resume ? store.watermark(chatId)?.oldestMessageId : null;
       for (var i = 0; i < pagesBudget; i++) {
         if (cancel?.isCancelled ?? false) {
           cancelled = true;

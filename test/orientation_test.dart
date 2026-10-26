@@ -1,4 +1,7 @@
+import 'dart:io';
+
 import 'package:flutter/services.dart';
+import 'package:path/path.dart' as p;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:tg_media_probe/platform/orientation_controller.dart';
 import 'package:tg_media_probe/platform/video_rotation.dart';
@@ -204,6 +207,57 @@ void main() {
       );
       expect(unknown.width, 1920);
       expect(unknown.rotationKnown, isFalse);
+    });
+  });
+
+  group('portrait is the default for every non-player screen', () {
+    String source(String path) =>
+        File(p.normalize(path)).readAsStringSync();
+
+    test('the app root holds portrait around every route', () {
+      final root = source('lib/app/app_root.dart');
+      expect(root, contains('_PortraitHost'));
+      expect(root, contains('ScreenOrientationMode.lockedPortrait'));
+      // The host must wrap the router, not one branch of it.
+      expect(root, contains('_PortraitHost(child: _buildRoot())'));
+    });
+
+    test('the feed enters portrait and only user action asks for landscape',
+        () {
+      final feed = source('lib/ui/feed_page.dart');
+      // Scope default stays portrait; landscape appears only inside the toggle.
+      expect(feed, contains('mode: ScreenOrientationMode.lockedPortrait'));
+      final toggle = feed.indexOf('_toggleLandscape');
+      final forced = feed.indexOf('ScreenOrientationMode.forcedLandscape');
+      expect(forced, greaterThan(toggle),
+          reason: 'landscape must live inside the explicit toggle');
+      // Landscape appears only as the toggle's target, never as a page default.
+      final requests = 'ScreenOrientationMode.forcedLandscape'
+          .allMatches(feed)
+          .length;
+      final toggleRegion = feed.substring(toggle);
+      expect(requests, greaterThan(0));
+      expect(toggleRegion.contains('ScreenOrientationMode.forcedLandscape'),
+          isTrue);
+      // Everything before the toggle is the scope/initial state: no landscape.
+      expect(feed.substring(0, toggle).contains('forcedLandscape'), isFalse,
+          reason: 'entering the player must stay portrait');
+    });
+
+    test('switching videos never requests a rotation', () {
+      final controller = source('lib/ui/feed_controller.dart');
+      expect(controller.contains('setMode'), isFalse);
+      expect(controller.contains('OrientationBridge'), isFalse);
+      expect(controller.contains('SystemChrome'), isFalse);
+    });
+
+    test('the shell keeps portrait for the three tabs', () {
+      final root = source('lib/app/app_root.dart');
+      expect(root, contains('class _AppShellState'));
+      final portraitScopes =
+          RegExp('mode: ScreenOrientationMode.lockedPortrait').allMatches(root);
+      expect(portraitScopes.length, greaterThanOrEqualTo(2),
+          reason: 'host + shell both hold portrait');
     });
   });
 }

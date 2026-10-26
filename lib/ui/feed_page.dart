@@ -16,11 +16,12 @@ import 'package:video_player/video_player.dart';
 
 import '../app/app_preferences.dart';
 import '../app/app_session.dart';
-import '../data/channel_directory.dart';
 import '../platform/orientation_controller.dart';
 import '../playback/player_slot.dart';
 import '../playback/video_player_handle.dart';
 import '../playback/video_source.dart';
+import '../playback/watch_store.dart';
+import '../storage/file_ops.dart';
 import '../storage/active_files.dart';
 import '../util/byte_format.dart';
 import 'app_theme.dart';
@@ -118,6 +119,10 @@ class _FeedPageState extends State<FeedPage> with WidgetsBindingObserver {
         activeFiles: _activeFiles,
       ),
       sources: VideoSourceResolver(api: TdFileTransferApi(client)),
+      // Watch state lives next to the index (protected zone), keyed by
+      // chatId+messageId so a longer list never inherits another video's
+      // resume point.
+      watch: WatchStore(directory: store.directory, ops: const IoFileOps()),
       chatTitles: titles,
       defaultMuted: widget.preferences.defaultMuted,
       preloadAdjacent: widget.preferences.preloadAdjacent,
@@ -136,7 +141,27 @@ class _FeedPageState extends State<FeedPage> with WidgetsBindingObserver {
   }
 
   void _onControllerChanged() {
-    if (mounted) setState(() {});
+    if (!mounted) return;
+    setState(() {});
+    // The controller's index is the truth; the PageView has to follow it.
+    //
+    // Tapping a row, a number jump and a programmatic move all change the
+    // controller without touching the pager, so the page kept showing item 1
+    // while the player was already on item 5 — reported as "点击播放的不是这一条".
+    WidgetsBinding.instance.addPostFrameCallback((_) => _syncPagerToController());
+  }
+
+  void _syncPagerToController() {
+    if (!mounted || _disposed) return;
+    final controller = _controller;
+    if (controller == null || !_pager.hasClients) return;
+    final target = controller.index;
+    if (target < 0) return;
+    final current = _pager.page;
+    if (current == null) return;
+    if (current.round() == target) return;
+    // jumpToPage, not animate: this is a correction, not a navigation.
+    _pager.jumpToPage(target);
   }
 
   @override
@@ -236,10 +261,11 @@ class _FeedPageState extends State<FeedPage> with WidgetsBindingObserver {
           scrollDirection: Axis.vertical,
           itemCount: controller.length,
           onPageChanged: (index) {
-            // The pager already moved; the controller releases the old player
-            // before resolving the new item.
+            // One call, awaited by nobody on purpose: goToIndex now extends the
+            // list when the target is past the loaded window, so the old
+            // "goToIndex then goNext" pair (which raced and computed an
+            // out-of-range target from the stale index) is gone.
             controller.goToIndex(index);
-            if (index >= controller.length - 1) controller.goNext();
           },
           itemBuilder: (context, index) => _buildPage(controller, index),
         );
@@ -368,12 +394,13 @@ class _FeedPageState extends State<FeedPage> with WidgetsBindingObserver {
                 ),
               ),
             ),
-            // Search stays on the feed page (confirmed decision #3) and reads
-            // the local channel list only.
+            // Top entry is "jump to video number", not a text search: the
+            // product replaced filename search with a 1-based number over the
+            // current list. Nothing here touches Telegram.
             IconButton(
-              tooltip: '搜索频道',
-              icon: const Icon(Icons.search, color: Colors.white),
-              onPressed: _openSearch,
+              tooltip: '输入视频编号',
+              icon: const Icon(Icons.tag, color: Colors.white),
+              onPressed: _openNumberBox,
             ),
           ],
         ),
@@ -539,23 +566,61 @@ class _FeedPageState extends State<FeedPage> with WidgetsBindingObserver {
     }
   }
 
-  Future<void> _openSearch() async {
-    final directory = widget.session.directory;
-    if (directory == null) return;
-    final picked = await showModalBottomSheet<int>(
+  /// Asks for a 1-based number and opens that item.
+  Future<void> _openNumberBox() async {
+    final controller = _controller;
+    if (controller == null) return;
+    final input = await showDialog<String>(
       context: context,
-      isScrollControlled: true,
-      builder: (context) => _ChannelPicker(directory: directory),
+      builder: (context) {
+        final field = TextEditingController();
+        return AlertDialog(
+          title: const Text('输入视频编号'),
+          content: TextField(
+            controller: field,
+            autofocus: true,
+            keyboardType: TextInputType.number,
+            decoration: InputDecoration(
+              hintText: '1 – ${controller.length}',
+              helperText: '按当前列表顺序从 1 开始',
+            ),
+            onSubmitted: (value) => Navigator.of(context).pop(value),
+          ),
+          actions: <Widget>[
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('取消'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(context).pop(field.text),
+              child: const Text('打开'),
+            ),
+          ],
+        );
+      },
     );
-    if (!mounted || _disposed || picked == null) return;
-    setState(() {
-      _chatFilter = picked == _allChannels ? null : picked;
-    });
-    _rebuildController();
-    if (_pager.hasClients) _pager.jumpToPage(0);
+    if (!mounted || _disposed) return;
+    await _jumpToNumber(input ?? '');
   }
 
-  static const int _allChannels = -1;
+  Future<void> _jumpToNumber(String raw) async {
+    final controller = _controller;
+    if (controller == null) return;
+    final trimmed = raw.trim();
+    final number = int.tryParse(trimmed);
+    final outcome = number == null || trimmed.isEmpty
+        ? NumberJumpResult.invalid
+        : await controller.openNumber(number);
+    if (!mounted || _disposed) return;
+    if (outcome == NumberJumpResult.opened) {
+      if (_pager.hasClients) _pager.jumpToPage(controller.index);
+      return;
+    }
+    final message = outcome == NumberJumpResult.invalid
+        ? '请输入 1 – ${controller.length} 之间的编号'
+        : '未找到该编号（当前共 ${controller.length} 条）';
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
+  }
 
   static String _formatDate(int unixSeconds) {
     if (unixSeconds <= 0) return '日期未知';
@@ -570,85 +635,5 @@ class _FeedPageState extends State<FeedPage> with WidgetsBindingObserver {
     final minutes = (total ~/ 60).toString().padLeft(2, '0');
     final seconds = (total % 60).toString().padLeft(2, '0');
     return '$minutes:$seconds';
-  }
-}
-
-/// Channel picker backed by the local directory.
-///
-/// Pops `-1` for "all channels", a chat id for one channel, or null when
-/// dismissed. The list and the filtering both come from
-/// [ChannelDirectory.search], which never touches the network.
-class _ChannelPicker extends StatefulWidget {
-  const _ChannelPicker({required this.directory});
-
-  final ChannelDirectory directory;
-
-  @override
-  State<_ChannelPicker> createState() => _ChannelPickerState();
-}
-
-class _ChannelPickerState extends State<_ChannelPicker> {
-  final TextEditingController _query = TextEditingController();
-
-  @override
-  void dispose() {
-    _query.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final results = widget.directory.search(_query.text);
-    return SafeArea(
-      child: Padding(
-        padding: EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: <Widget>[
-            Padding(
-              padding: const EdgeInsets.all(AppTheme.pagePadding),
-              child: TextField(
-                controller: _query,
-                autofocus: true,
-                decoration: const InputDecoration(
-                  labelText: '搜索频道（本地）',
-                  prefixIcon: Icon(Icons.search),
-                ),
-                onChanged: (_) => setState(() {}),
-              ),
-            ),
-            ListTile(
-              leading: const Icon(Icons.all_inclusive),
-              title: const Text('全部频道'),
-              onTap: () => Navigator.of(context).pop(-1),
-            ),
-            const Divider(height: 1),
-            Flexible(
-              child: results.isEmpty
-                  ? const Padding(
-                      padding: EdgeInsets.all(24),
-                      child: Text('没有匹配的频道'),
-                    )
-                  : ListView.builder(
-                      shrinkWrap: true,
-                      itemCount: results.length,
-                      itemBuilder: (context, index) {
-                        final entry = results[index];
-                        return ListTile(
-                          title: Text(entry.title),
-                          subtitle: Text(
-                            entry.videoCount == null
-                                ? '统计中'
-                                : '${entry.videoCount} 个视频',
-                          ),
-                          onTap: () => Navigator.of(context).pop(entry.id),
-                        );
-                      },
-                    ),
-            ),
-          ],
-        ),
-      ),
-    );
   }
 }

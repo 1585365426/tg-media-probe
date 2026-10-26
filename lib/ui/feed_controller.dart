@@ -24,8 +24,22 @@ import '../data/index_store.dart';
 import '../data/media_record.dart';
 import '../playback/player_slot.dart';
 import '../playback/video_source.dart';
+import '../playback/watch_store.dart';
 import '../td/td_error_kind.dart';
 import '../util/latest_only.dart';
+
+/// Outcome of a "jump to number" request.
+enum NumberJumpResult {
+  /// The item was located and is now current.
+  opened,
+
+  /// The number is valid but this list does not have that many items, even
+  /// after parging to the end of the mirror.
+  notFound,
+
+  /// Empty, zero, negative, absurdly large or not a number at all.
+  invalid,
+}
 
 enum FeedPhase {  /// Nothing requested yet.
   idle,
@@ -89,6 +103,7 @@ class FeedController extends ChangeNotifier {
     bool defaultMuted = false,
     this.preloadAdjacent = true,
     this.pollInterval = const Duration(milliseconds: 250),
+    this.watch,
   })  : _muted = defaultMuted;
 
   final FeedPageSource source;
@@ -103,6 +118,14 @@ class FeedController extends ChangeNotifier {
 
   /// Playhead polling. Null in tests, where time does not pass.
   final Duration? pollInterval;
+
+  /// Local watch state (position + finished). Optional so a test without one
+  /// exercises exactly the same playback path minus the bookkeeping.
+  final WatchStore? watch;
+
+  /// Set once the finish for the current item has been recorded, so a 250 ms
+  /// poll does not write the same row eight times a second.
+  String? _finishedKey;
 
   final List<MediaRecord> _items = <MediaRecord>[];
   final LatestOnlySlot<String> _gate = LatestOnlySlot<String>();
@@ -269,15 +292,7 @@ class FeedController extends ChangeNotifier {
   Future<void> goNext() async {
     if (_phase == FeedPhase.loading) return;
     if (_index + 1 >= _items.length) {
-      if (!source.hasMore || _loadingMore) return;
-      _loadingMore = true;
-      _notify();
-      try {
-        await _appendUntilNonEmpty();
-      } finally {
-        _loadingMore = false;
-        _notify();
-      }
+      await _loadMoreAhead();
       if (_index + 1 >= _items.length) return;
     }
     await _moveTo(_index + 1);
@@ -292,9 +307,85 @@ class FeedController extends ChangeNotifier {
   /// the controller did not choose itself.
   Future<void> goToIndex(int target) async {
     if (target == _index) return;
-    if (target < 0 || target >= _items.length) return;
+    if (target < 0) return;
+    // Reaching the last page must extend the list before the swipe is refused.
+    //
+    // The page used to call goToIndex() and then goNext() without awaiting the
+    // first one; goNext() saw the *old* index, computed target+1, and returned
+    // because it was out of range. A 38-item first page therefore never grew:
+    // there was no page 39 to swipe to, so onPageChanged never fired again.
+    if (target >= _items.length) {
+      if (!source.hasMore || _loadingMore) return;
+      _loadingMore = true;
+      _notify();
+      try {
+        await _appendUntilNonEmpty();
+      } finally {
+        _loadingMore = false;
+        _notify();
+      }
+      if (target >= _items.length) return;
+    }
+    // Landing on the tail of the loaded window: fetch the next page in the
+    // background so the following swipe has somewhere to go.
+    if (target == _items.length - 1 && source.hasMore && !_loadingMore) {
+      unawaited(_loadMoreAhead());
+    }
     await _moveTo(target);
   }
+
+  /// Appends one more page without moving the playhead.
+  ///
+  /// Called when the user reaches the tail of the loaded window: the list has
+  /// to be longer than what is on screen, otherwise the vertical PageView has
+  /// nowhere to scroll and no further callback ever arrives.
+  Future<void> _loadMoreAhead() async {
+    if (_loadingMore || !source.hasMore) return;
+    _loadingMore = true;
+    try {
+      await _appendUntilNonEmpty();
+    } finally {
+      _loadingMore = false;
+      _notify();
+    }
+  }
+
+  /// True once the mirror has no further pages for this filter.
+  bool get atEnd => !source.hasMore;
+
+  /// Opens position [number] in the **current** list, numbering from 1.
+  ///
+  /// The number is a view over a stable identity, not over an array slot: the
+  /// item is resolved to (chatId, messageId) first, then the jump verifies that
+  /// the item actually reached is the one that was asked for. If the list grew
+  /// between the two moments the call reports [NumberJumpResult.notFound]
+  /// instead of silently playing a neighbour.
+  Future<NumberJumpResult> openNumber(int number) async {
+    if (number < 1 || number > maxNumber) return NumberJumpResult.invalid;
+    final target = number - 1;
+
+    var guard = 0;
+    while (target >= _items.length && source.hasMore && guard++ < 200) {
+      final before = _items.length;
+      await _loadMoreAhead();
+      if (_items.length == before) break;
+    }
+    if (target >= _items.length) return NumberJumpResult.notFound;
+
+    final expected = _items[target];
+    await _moveTo(target);
+    final landed = current;
+    if (landed == null ||
+        landed.messageId != expected.messageId ||
+        landed.chatId != expected.chatId) {
+      return NumberJumpResult.notFound;
+    }
+    return NumberJumpResult.opened;
+  }
+
+  /// Upper bound for the number box. Not a list limit — it only keeps a typo
+  /// like 999999999 from becoming a million page requests.
+  static const int maxNumber = 100000;
 
   Future<void> _moveTo(int target) async {
     if (target < 0 || target >= _items.length) return;
@@ -367,6 +458,7 @@ class FeedController extends ChangeNotifier {
     _phase = FeedPhase.ready;
     _bufferFraction = 0;
     _startPolling();
+    await _restoreProgress(record);
     _notify();
     await _prefetchNext();
   }
@@ -450,7 +542,81 @@ class FeedController extends ChangeNotifier {
       _position = (active as PlayerProgress).position;
       _duration = (active as PlayerProgress).duration;
     }
+    _maybeRecordProgress();
     _notify();
+  }
+
+  /// Jumps to the saved position for [record], if there is one worth using.
+  Future<void> _restoreProgress(MediaRecord record) async {
+    final store = watch;
+    if (store == null) return;
+    try {
+      await store.load();
+      final entry = store.read(record.chatId, record.messageId);
+      if (entry == null) return;
+      final target = entry.resumePositionMs;
+      if (target <= 0) return;
+      final active = player.active;
+      if (active is PlayerSeek) await (active as PlayerSeek).seekTo(Duration(milliseconds: target));
+      _position = Duration(milliseconds: target);
+    } on Object {
+      // History is a convenience; a failure here must not stop playback.
+    }
+  }
+
+  /// Writes the playhead, and marks the item finished when it reaches the end.
+  void _maybeRecordProgress() {
+    final store = watch;
+    final record = current;
+    if (store == null || record == null) return;
+    if (_duration <= Duration.zero) return;
+    final reachedEnd = _position >= _duration - const Duration(milliseconds: 600);
+    if (!reachedEnd) {
+      // Nothing to persist every tick: only meaningful movement, and only on a
+      // whole second, keeps the file small and the writes rare.
+      if (_position.inSeconds == _lastPersistedSecond) return;
+      _lastPersistedSecond = _position.inSeconds;
+      unawaited(_writePosition(store, record, completed: false));
+      return;
+    }
+    final key = WatchEntry.keyOf(record.chatId, record.messageId);
+    if (_finishedKey == key) return;
+    _finishedKey = key;
+    unawaited(_writePosition(store, record, completed: true));
+  }
+
+  int _lastPersistedSecond = -1;
+
+  Future<void> _writePosition(
+    WatchStore store,
+    MediaRecord record, {
+    required bool completed,
+  }) async {
+    try {
+      await store.upsert(
+        record.chatId,
+        record.messageId,
+        (current, now) => current.copyWith(
+          positionMs: completed ? _duration.inMilliseconds : _position.inMilliseconds,
+          durationMs: _duration.inMilliseconds,
+          completed: completed || current.completed,
+          updatedAtUnix: now,
+        ),
+      );
+    } on Object {
+      // Swallowed on purpose: a full disk must not break playback.
+    }
+  }
+
+  /// Forgets the saved position for one item ("从头再看").
+  Future<void> resetProgress(int chatId, int messageId) async {
+    try {
+      await watch?.clear(chatId, messageId);
+    } on Object {
+      // Same rule as the write path.
+    }
+    _finishedKey = null;
+    _lastPersistedSecond = -1;
   }
 
   /// §4.5: releasing on background keeps audio from continuing and frees the

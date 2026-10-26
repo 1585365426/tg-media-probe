@@ -36,6 +36,44 @@ import '../util/redact.dart';
 import 'app_preferences.dart';
 import 'app_session.dart';
 
+/// Holds portrait for every route that is not the feed.
+///
+/// The feed pushes its own landscape scope on top and restores portrait when it
+/// leaves, so this host only has to guarantee the default. Login, unlock,
+/// settings and the channel pages live under it and therefore cannot inherit a
+/// sideways window from however the phone is being held.
+class _PortraitHost extends StatefulWidget {
+  const _PortraitHost({required this.child});
+
+  final Widget child;
+
+  @override
+  State<_PortraitHost> createState() => _PortraitHostState();
+}
+
+class _PortraitHostState extends State<_PortraitHost> {
+  late final OrientationBridge _bridge = OrientationBridge();
+  late final PageOrientationScope _scope = PageOrientationScope(
+    _bridge,
+    mode: ScreenOrientationMode.lockedPortrait,
+  );
+
+  @override
+  void initState() {
+    super.initState();
+    _scope.enter();
+  }
+
+  @override
+  void dispose() {
+    _scope.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => widget.child;
+}
+
 class TgMediaApp extends StatefulWidget {
   const TgMediaApp({
     super.key,
@@ -142,7 +180,7 @@ class _TgMediaAppState extends State<TgMediaApp> with WidgetsBindingObserver {
         theme: AppTheme.light(),
         darkTheme: AppTheme.dark(),
         themeMode: _preferences.value.theme.themeMode,
-        home: _buildRoot(),
+        home: _PortraitHost(child: _buildRoot()),
       ),
     );
   }
