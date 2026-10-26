@@ -237,6 +237,74 @@ FileState? fileFromResponse(Map<String, Object?> json) {
   return FileState.fromJson(json);
 }
 
+/// The signed-in account, as far as the settings page needs it.
+///
+/// Parsed from `getMe`. Nothing here is derived: a missing field stays null and
+/// the row renders "—" rather than an invented placeholder.
+class AccountInfo {
+  const AccountInfo({
+    required this.userId,
+    this.firstName = '',
+    this.lastName = '',
+    this.username,
+    this.phoneNumber,
+  });
+
+  final int userId;
+  final String firstName;
+  final String lastName;
+  final String? username;
+
+  /// Raw E.164 number from TDLib. Masked before display; never logged.
+  final String? phoneNumber;
+
+  String get displayName {
+    final full = '$firstName $lastName'.trim();
+    if (full.isNotEmpty) return full;
+    if (username != null && username!.isNotEmpty) return '@$username';
+    return 'Telegram 账号';
+  }
+
+  String get handle {
+    if (username != null && username!.isNotEmpty) return '@$username';
+    return '#$userId';
+  }
+
+  /// `+86 138****0000` style masking. Returns null when there is no number, so
+  /// the caller can omit the row instead of printing "null".
+  String? get maskedPhone {
+    final phone = phoneNumber;
+    if (phone == null || phone.isEmpty) return null;
+    final digits = phone.replaceAll(RegExp(r'[^0-9]'), '');
+    if (digits.length < 7) return '****';
+    final head = digits.substring(0, digits.length > 11 ? 4 : 3);
+    final tail = digits.substring(digits.length - 4);
+    final prefix = phone.startsWith('+') ? '+' : '';
+    return '$prefix$head****$tail';
+  }
+
+  static AccountInfo? fromJson(Map<String, Object?> json) {
+    if (_asString(json['@type']) != 'user') return null;
+    final id = _asInt(json['id']);
+    if (id == null) return null;
+    final usernames = _asMap(json['usernames']);
+    final active = usernames['active_usernames'];
+    final firstUsername =
+        active is List && active.isNotEmpty ? _asString(active.first) : null;
+    return AccountInfo(
+      userId: id,
+      firstName: _asString(json['first_name']) ?? '',
+      lastName: _asString(json['last_name']) ?? '',
+      username: firstUsername ?? _asString(usernames['editable_username']),
+      phoneNumber: _asString(json['phone_number']),
+    );
+  }
+}
+
+/// Extracts an [AccountInfo] from a `getMe` response.
+AccountInfo? accountFromResponse(Map<String, Object?> json) =>
+    AccountInfo.fromJson(json);
+
 /// Extracts `messages` from a `getChatHistory` response, tolerating `error`.
 List<Map<String, Object?>> messagesFromResponse(Map<String, Object?> json) {
   if (_asString(json['@type']) == 'error') return const <Map<String, Object?>>[];

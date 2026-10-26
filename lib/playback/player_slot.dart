@@ -21,6 +21,28 @@ abstract class PlayerFactory {
   PlayerHandle create(String path);
 }
 
+/// Optional capability: a handle that can report its playhead.
+///
+/// Declared as a separate interface rather than a method on [PlayerHandle] so
+/// the existing test doubles (which only care about lifecycle) stay valid, and
+/// so the feed can read the position without importing `video_player` into the
+/// controller. A handle that does not implement this simply reports "unknown"
+/// and the progress bar stays at zero instead of inventing a number.
+abstract class PlayerProgress {
+  Duration get position;
+  Duration get duration;
+}
+
+/// Optional capability: volume control, used by the "默认静音" preference.
+abstract class PlayerVolume {
+  Future<void> setVolume(double volume);
+}
+
+/// Optional capability: seeking from the progress bar.
+abstract class PlayerSeek {
+  Future<void> seekTo(Duration position);
+}
+
 class PlayerError implements Exception {
   PlayerError(this.path, this.cause);
 

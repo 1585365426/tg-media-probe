@@ -17,7 +17,7 @@ class VideoPlayerFactory implements PlayerFactory {
 /// four things the task book asks for: pause, detach the listener, null out the
 /// Dart-held reference (so nothing can reach the AVPlayer afterwards) and call
 /// the plugin's dispose, which releases the underlying `AVPlayerItem`.
-class VideoPlayerHandle implements PlayerHandle {
+class VideoPlayerHandle implements PlayerHandle, PlayerProgress, PlayerVolume, PlayerSeek {
   VideoPlayerHandle({required this.path})
       : _controller = VideoPlayerController.file(File(path));
 
@@ -32,11 +32,29 @@ class VideoPlayerHandle implements PlayerHandle {
   Duration _duration = Duration.zero;
   String? _error;
 
+  @override
   Duration get position => _position;
+  @override
   Duration get duration => _duration;
   String? get error => _error;
 
   VideoPlayerController? get controller => _controller;
+
+  @override
+  Future<void> setVolume(double volume) async {
+    final controller = _controller;
+    if (controller == null || _disposed) return;
+    if (!controller.value.isInitialized) return;
+    await controller.setVolume(volume.clamp(0, 1).toDouble());
+  }
+
+  @override
+  Future<void> seekTo(Duration position) async {
+    final controller = _controller;
+    if (controller == null || _disposed) return;
+    if (!controller.value.isInitialized) return;
+    await controller.seekTo(position);
+  }
 
   @override
   bool get isDisposed => _disposed;

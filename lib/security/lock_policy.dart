@@ -219,7 +219,11 @@ class LockEvaluator {
     AppLockSettings settings,
   ) {
     if (outcome.isSuccess) return LockRequirement.none;
-    if (outcome.requiresFallback) return LockRequirement.passcodeOnly;
+    // "Use app passcode" in the system sheet is a decision, not a failure: the
+    // next thing the user must see is the passcode field, not another scan.
+    if (outcome.requiresFallback || outcome == BiometricOutcome.userFallback) {
+      return LockRequirement.passcodeOnly;
+    }
     if (settings.biometricEnabled) return LockRequirement.biometricThenPasscode;
     return LockRequirement.passcodeOnly;
   }

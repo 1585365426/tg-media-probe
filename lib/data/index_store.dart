@@ -341,6 +341,20 @@ class IndexStore {
   bool contains(int chatId, int messageId) =>
       _records.containsKey('$chatId:$messageId');
 
+  /// Rows per channel in **one pass**.
+  ///
+  /// The channel list needs "N 个视频" for every row; computing that by paging
+  /// the store once per channel would be O(channels x rows). One pass is O(rows)
+  /// no matter how many channels there are.
+  Map<int, int> countByChat({bool videosOnly = true}) {
+    final counts = <int, int>{};
+    for (final record in _records.values) {
+      if (videosOnly && record.kind != MediaKind.video) continue;
+      counts[record.chatId] = (counts[record.chatId] ?? 0) + 1;
+    }
+    return counts;
+  }
+
   /// Counters that must be identical before and after a cache clear.
   Future<Map<String, int>> integritySnapshot() async => <String, int>{
         'index': count,

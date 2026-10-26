@@ -11,15 +11,22 @@
 library;
 
 class TdReadOnlyViolation implements Exception {
-  const TdReadOnlyViolation(this.method, {this.source});
+  const TdReadOnlyViolation(
+    this.method, {
+    this.source,
+    this.reason = 'is a cloud-mutating TDLib method; TG Media is read-only',
+  });
 
   final Object? method;
   final String? source;
 
+  /// Why the method was refused. Kept separate from the message so the
+  /// "known write" and "unclassified" cases read differently.
+  final String reason;
+
   @override
   String toString() =>
-      'TdReadOnlyViolation: ${method ?? '<missing @type>'} '
-      'is a cloud-mutating TDLib method; TG Media is read-only'
+      'TdReadOnlyViolation: ${method ?? '<missing @type>'} $reason'
       '${source == null ? '' : ' ($source)'}';
 }
 
@@ -106,12 +113,58 @@ class TdReadOnlyGuard {
   /// implied by omission.
   static const Set<String> localOnlyMethods = <String>{
     'deleteFile', // deletes the cached file from the local file database only
+    // Fetching or cancelling a byte transfer changes TDLib's local file store
+    // and nothing on the server: no message is touched, no chat is modified.
+    'downloadFile',
+    'cancelDownloadFile',
     'removeFileFromDownloads',
     'removeTopChat',
     'removeSavedAnimation',
     'removeFavoriteSticker',
     'removeRecentlyFoundChat',
   };
+
+  /// Every TDLib method this app is allowed to send.
+  ///
+  /// This is the positive list, not a denylist. A denylist can only block the
+  /// methods someone remembered to add; the first new TDLib write verb would
+  /// sail through a guard that only checks what it knows. Anything absent here
+  /// is refused, so adding a capability requires editing this set on purpose.
+  ///
+  /// Contents are reads plus the session/authentication calls that necessarily
+  /// precede them — none of those write to a chat, a message or an account.
+  static const Set<String> readOnlyMethods = <String>{
+    // session setup and login (no cloud data is written)
+    'setTdlibParameters',
+    'getAuthorizationState',
+    'setAuthenticationPhoneNumber',
+    'checkAuthenticationCode',
+    'checkAuthenticationPassword',
+    'logOut',
+    'close',
+    // reads
+    'getMe',
+    'getChats',
+    'getChat',
+    'getChatHistory',
+    'getMessage',
+    'getFile',
+    'getRemoteFile',
+    'getOption',
+    'getUser',
+    'getSupergroup',
+    'getBasicGroup',
+    'getStorageStatistics',
+    'getNetworkStatistics',
+    'loadChats',
+    'searchChats',
+    'searchChatMessages',
+  };
+
+  /// True for a method that is either an allowed read or an allowed local
+  /// operation.
+  static bool isAllowed(String type) =>
+      readOnlyMethods.contains(type) || localOnlyMethods.contains(type);
 
   static bool isCloudMutating(Object? type) =>
       type is String && cloudMutatingMethods.contains(type);
@@ -128,6 +181,12 @@ class TdReadOnlyGuard {
     }
     if (cloudMutatingMethods.contains(type)) {
       throw TdReadOnlyViolation(type, source: source);
+    }
+    if (!isAllowed(type)) {
+      // Reachable only with a method nobody classified. The message says so
+      // instead of calling a read "mutating", so the fix is obvious.
+      throw TdReadOnlyViolation(type,
+          source: source, reason: 'is not on the read-only allowlist');
     }
   }
 
