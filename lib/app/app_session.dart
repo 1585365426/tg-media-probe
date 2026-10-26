@@ -452,6 +452,45 @@ class AppSession extends ChangeNotifier {
     }
   }
 
+  /// One bounded slice of history for **every** channel, continuing from the
+  /// indexed watermark.
+  ///
+  /// Separate from [syncChannel] because the backfill walks the whole list: it
+  /// is the thing a scheduler may call repeatedly, and each call is bounded so
+  /// the UI stays responsive.
+  Future<SyncCycleReport?> syncHistorySlice({int pagesPerChannel = 6}) async {
+    final client = _client;
+    final index = _index;
+    if (client == null || index == null) return null;
+    final ids = _directory?.entries.map((e) => e.id).toList() ?? const <int>[];
+    if (ids.isEmpty) return null;
+    final engine = ChannelSyncEngine(
+      source: TdHistorySource(client),
+      store: index,
+    );
+    try {
+      final report = await engine.syncCycle(
+        chatIds: ids,
+        pagesPerChannel: pagesPerChannel,
+        resume: true,
+      );
+      _directory?.applyCounts(index.countByChat());
+      _notify();
+      return report;
+    } on Object catch (e) {
+      _error = redactText('$e');
+      _notify();
+      return SyncCycleReport(
+        pages: 0,
+        rawMessages: 0,
+        insertedRecords: 0,
+        errors: <String>[redactText('$e')],
+        cancelled: false,
+        lastError: redactText('$e'),
+      );
+    }
+  }
+
   /// Opens the feed's source for one channel (or everything when null).
   ///
   /// Returns null before login: the feed has nothing to page from and must show

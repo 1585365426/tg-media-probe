@@ -34,6 +34,8 @@ import '../ui/settings_page.dart';
 import '../ui/status_view.dart';
 import '../util/redact.dart';
 import 'app_preferences.dart';
+import '../storage/cache_budget.dart';
+import 'history_backfill.dart';
 import 'app_session.dart';
 
 /// Holds portrait for every route that is not the feed.
@@ -100,6 +102,9 @@ class _TgMediaAppState extends State<TgMediaApp> with WidgetsBindingObserver {
 
   AppSession? _session;
   TempZoneReport? _storage;
+  AutoCacheCleaner? _cleaner;
+  HistoryBackfill? _backfill;
+  DateTime? _lastMaintenance;
   bool _ready = false;
   String? _bootError;
 
@@ -135,6 +140,7 @@ class _TgMediaAppState extends State<TgMediaApp> with WidgetsBindingObserver {
       }
       // Opening TDLib takes a moment; the unlock screen is already up.
       unawaited(session.boot());
+      _runMaintenance();
     } on Object catch (e) {
       if (!mounted) return;
       setState(() {
@@ -149,6 +155,7 @@ class _TgMediaAppState extends State<TgMediaApp> with WidgetsBindingObserver {
     switch (state) {
       case AppLifecycleState.resumed:
         unawaited(_lock.onResumed());
+        _runMaintenance();
       case AppLifecycleState.inactive:
         // iOS reports inactive for the Face ID sheet, the app switcher and the
         // notification shade. Treating those as "left the app" made every
@@ -159,6 +166,36 @@ class _TgMediaAppState extends State<TgMediaApp> with WidgetsBindingObserver {
       case AppLifecycleState.detached:
         _lock.onPaused();
     }
+  }
+
+  /// Startup / foreground housekeeping: one cache check and one history slice.
+  ///
+  /// Throttled and de-duplicated: entering the app ten times in a minute must
+  /// not start ten cleaners, and both jobs return immediately when one is
+  /// already running. Nothing here runs on a timer — iOS would not honour it
+  /// and it would cost battery for no benefit.
+  void _runMaintenance() {
+    final session = _session;
+    final storage = _storage;
+    if (session == null || storage == null) return;
+    final now = DateTime.now();
+    if (_lastMaintenance != null &&
+        now.difference(_lastMaintenance!) < const Duration(seconds: 30)) {
+      return;
+    }
+    _lastMaintenance = now;
+
+    final cleaner = _cleaner ??= AutoCacheCleaner(
+      layout: storage.layout,
+      ops: const IoFileOps(),
+      activeFiles: _activeFiles,
+    );
+    unawaited(cleaner.check(limitBytes: _preferences.value.cacheLimitBytes));
+
+    final backfill = _backfill ??= HistoryBackfill(
+      fetch: (pages) => session.syncHistorySlice(pagesPerChannel: pages),
+    );
+    unawaited(backfill.kick());
   }
 
   @override

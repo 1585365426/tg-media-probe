@@ -18,6 +18,7 @@ import '../lock/lock_screens.dart';
 import '../lock/unlock_controller.dart';
 import '../security/biometric.dart';
 import '../security/lock_policy.dart';
+import '../storage/cache_budget.dart';
 import '../storage/cache_manager.dart';
 import '../storage/storage_layout.dart';
 import '../storage/temp_zone_report.dart';
@@ -53,6 +54,7 @@ class _SettingsPageState extends State<SettingsPage> {
   bool _scanning = false;
   bool _clearing = false;
   String? _storageError;
+  AutoCleanResult? _lastAutoClean;
 
   @override
   void initState() {
@@ -222,6 +224,7 @@ class _SettingsPageState extends State<SettingsPage> {
   // ---- 5.3 存储 -------------------------------------------------------
 
   Widget _storageSection() {
+    final prefs = widget.preferences.value;
     final inventory = _inventory;
     final clean = _cleanReport;
     final temp = inventory?[StorageZone.tempCache];
@@ -263,6 +266,22 @@ class _SettingsPageState extends State<SettingsPage> {
         ),
         const SettingsDivider(),
         SettingsRow(
+          title: '缓存上限',
+          subtitle: '当前上限 ${CacheBudget.format(prefs.cacheLimitBytes)}；'
+              '超过后自动清理到约 ${CacheBudget.format(CacheBudget.targetBytesFor(prefs.cacheLimitBytes))}',
+          leading: const Icon(Icons.data_usage_outlined),
+          showChevron: true,
+          onTap: () => _chooseCacheLimit(prefs.cacheLimitBytes),
+        ),
+        const SettingsDivider(),
+        SettingsRow(
+          title: '本次运行的上次自动清理',
+          subtitle: _lastAutoClean?.summary() ??
+              '尚未触发（启动或回到前台时检查，去重后单次清理）',
+          leading: const Icon(Icons.auto_delete_outlined),
+        ),
+        const SettingsDivider(),
+        SettingsRow(
           title: '清除缓存',
           subtitle: _clearing ? '正在清理…' : '只清理已登记的缓存目录',
           leading: const Icon(Icons.delete_sweep_outlined),
@@ -292,6 +311,101 @@ class _SettingsPageState extends State<SettingsPage> {
         ],
       ],
     );
+  }
+
+  /// Cache ceiling picker: four presets plus a validated custom value.
+  Future<void> _chooseCacheLimit(int current) async {
+    final choice = await showModalBottomSheet<int>(
+      context: context,
+      builder: (context) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: <Widget>[
+            const Padding(
+              padding: EdgeInsets.all(16),
+              child: Text('缓存上限', style: TextStyle(fontWeight: FontWeight.w600)),
+            ),
+            for (final preset in CacheBudget.presets)
+              ListTile(
+                title: Text(CacheBudget.format(preset)),
+                trailing: preset == current ? const Icon(Icons.check) : null,
+                onTap: () => Navigator.of(context).pop(preset),
+              ),
+            ListTile(
+              title: const Text('自定义…'),
+              subtitle: Text(
+                  '${CacheBudget.format(CacheBudget.minLimit)} – '
+                  '${CacheBudget.format(CacheBudget.maxLimit)}'),
+              onTap: () => Navigator.of(context).pop(-1),
+            ),
+            const Divider(height: 1),
+            ListTile(
+              title: const Text('恢复默认 1 GB'),
+              onTap: () => Navigator.of(context).pop(CacheBudget.defaultLimit),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (!mounted || choice == null) return;
+    if (choice == -1) {
+      await _customCacheLimit(current);
+      return;
+    }
+    await _applyCacheLimit(choice);
+  }
+
+  Future<void> _customCacheLimit(int current) async {
+    final field = TextEditingController(
+        text: (current / CacheBudget.mb).round().toString());
+    final input = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('自定义缓存上限（MB）'),
+        content: TextField(
+          controller: field,
+          autofocus: true,
+          keyboardType: TextInputType.number,
+          decoration: InputDecoration(
+            helperText: '${CacheBudget.minLimit ~/ CacheBudget.mb} – '
+                '${CacheBudget.maxLimit ~/ CacheBudget.mb} MB',
+          ),
+          onSubmitted: (value) => Navigator.of(context).pop(value),
+        ),
+        actions: <Widget>[
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(field.text),
+            child: const Text('保存'),
+          ),
+        ],
+      ),
+    );
+    field.dispose();
+    if (!mounted || input == null) return;
+    final mb = int.tryParse(input.trim());
+    if (mb == null) {
+      _showMessage('请输入数字（MB）');
+      return;
+    }
+    final bytes = mb * CacheBudget.mb;
+    if (!CacheBudget.isAllowed(bytes)) {
+      _showMessage('上限需在 ${CacheBudget.format(CacheBudget.minLimit)} – '
+          '${CacheBudget.format(CacheBudget.maxLimit)} 之间，未保存');
+      return;
+    }
+    await _applyCacheLimit(bytes);
+  }
+
+  Future<void> _applyCacheLimit(int bytes) async {
+    final ok = await widget.preferences.setCacheLimit(bytes);
+    if (!mounted) return;
+    _showMessage(ok
+        ? '缓存上限已设为 ${CacheBudget.format(bytes)}'
+        : '数值超出允许范围，未保存');
   }
 
   // ---- 5.4 外观与播放 -------------------------------------------------

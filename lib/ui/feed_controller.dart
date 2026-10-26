@@ -87,6 +87,12 @@ class IndexFeedSource implements FeedPageSource {
   @override
   bool get hasMore => _pager.hasMore;
 
+  /// Videos indexed for this filter — the number the UI may call "total".
+  /// It comes from the index, never from how many rows happen to be loaded.
+  int get syncedVideos => chatId == null
+      ? store.countByChat().values.fold(0, (sum, value) => sum + value)
+      : (store.countByChat()[chatId] ?? 0);
+
   @override
   Future<List<MediaRecord>> nextPage() async {
     final page = await _pager.next();
@@ -187,7 +193,27 @@ class FeedController extends ChangeNotifier {
 
   /// "3 / 40" for the info line; "0 / 0" is never shown because the empty state
   /// replaces the page.
-  String get positionLabel => '${_index + 1} / ${_items.length}';
+  /// "3 / 38 · 已同步 725" — loaded window vs. indexed total, never mixed.
+  String get positionLabel {
+    final total = syncedVideos;
+    final loaded = '${_index + 1} / ${_items.length}';
+    if (total <= _items.length) return loaded;
+    return '$loaded · 已同步 $total';
+  }
+
+  /// Videos in the index for this filter. The list only holds what has been
+  /// paged in; this is what the channel actually has recorded.
+  int get syncedVideos {
+    final source = this.source;
+    if (source is IndexFeedSource) return source.syncedVideos;
+    return _items.length;
+  }
+
+  /// True when the loaded window covers everything the index holds.
+  bool get loadedAll => _items.length >= syncedVideos;
+
+  /// True when the index itself has no more pages to give.
+  bool get historyComplete => atEnd;
 
   String titleOf(MediaRecord record) {
     final channel = chatTitles[record.chatId];

@@ -18,6 +18,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart' show ThemeMode;
 
 import '../security/tdlib_key.dart';
+import '../storage/cache_budget.dart';
 
 /// Light / dark / follow-system. Maps 1:1 onto [ThemeMode].
 enum ThemePreference { system, light, dark }
@@ -76,6 +77,7 @@ class AppPreferences {
     this.defaultMuted = false,
     this.preloadAdjacent = true,
     this.preloadCount = defaultPreloadCount,
+    this.cacheLimitBytes = CacheBudget.defaultLimit,
   });
 
   /// How many videos **after** the current one may be prepared in advance.
@@ -104,12 +106,16 @@ class AppPreferences {
   /// Videos after the current one that may be prepared ahead. 0 disables it.
   final int preloadCount;
 
+  /// Ceiling for the cleanable cache. Bytes on disk, formatted for the UI.
+  final int cacheLimitBytes;
+
   AppPreferences copyWith({
     ThemePreference? theme,
     FeedDirection? feedDirection,
     bool? defaultMuted,
     bool? preloadAdjacent,
     int? preloadCount,
+    int? cacheLimitBytes,
   }) {
     final count = preloadCount ?? this.preloadCount;
     return AppPreferences(
@@ -118,6 +124,7 @@ class AppPreferences {
       defaultMuted: defaultMuted ?? this.defaultMuted,
       preloadAdjacent: preloadAdjacent ?? (count > 0),
       preloadCount: count,
+      cacheLimitBytes: cacheLimitBytes ?? this.cacheLimitBytes,
     );
   }
 
@@ -127,6 +134,7 @@ class AppPreferences {
         'defaultMuted': defaultMuted,
         'preloadAdjacent': preloadAdjacent,
         'preloadCount': preloadCount,
+        'cacheLimitBytes': cacheLimitBytes,
       };
 
   /// Tolerant decode: an unknown enum name falls back to the default for that
@@ -139,6 +147,7 @@ class AppPreferences {
       defaultMuted: json['defaultMuted'] == true,
       preloadAdjacent: json['preloadAdjacent'] != false,
       preloadCount: _countFromJson(json),
+      cacheLimitBytes: _limitFromJson(json),
     );
   }
 
@@ -153,6 +162,15 @@ class AppPreferences {
     return defaultPreloadCount;
   }
 
+  /// Reads the cache ceiling; a missing or nonsensical value falls back to
+  /// 1 GB rather than disabling the cleaner.
+  static int _limitFromJson(Map<String, Object?> json) {
+    final raw = json['cacheLimitBytes'];
+    if (raw is int && CacheBudget.isAllowed(raw)) return raw;
+    if (raw is num && CacheBudget.isAllowed(raw.toInt())) return raw.toInt();
+    return CacheBudget.defaultLimit;
+  }
+
   @override
   bool operator ==(Object other) =>
       other is AppPreferences &&
@@ -160,12 +178,13 @@ class AppPreferences {
       other.feedDirection == feedDirection &&
       other.defaultMuted == defaultMuted &&
       other.preloadAdjacent == preloadAdjacent &&
-      other.preloadCount == preloadCount;
+      other.preloadCount == preloadCount &&
+      other.cacheLimitBytes == cacheLimitBytes;
 
   @override
   int get hashCode =>
       Object.hash(theme, feedDirection, defaultMuted, preloadAdjacent,
-          preloadCount);
+          preloadCount, cacheLimitBytes);
 
   @override
   String toString() =>
@@ -261,6 +280,14 @@ class PreferencesController extends ChangeNotifier {
 
   /// Sets the preload window. Returns false when [count] is out of range, so
   /// the settings row can show an error instead of silently writing a clamp.
+  /// Sets the cache ceiling. Returns false when the value is outside
+  /// [CacheBudget.minLimit]..[CacheBudget.maxLimit]; the caller shows why.
+  Future<bool> setCacheLimit(int bytes) async {
+    if (!CacheBudget.isAllowed(bytes)) return false;
+    await update(_value.copyWith(cacheLimitBytes: bytes));
+    return true;
+  }
+
   Future<bool> setPreloadCount(int count) async {
     if (count < 0 || count > AppPreferences.maxPreloadCount) return false;
     await update(_value.copyWith(preloadCount: count));
