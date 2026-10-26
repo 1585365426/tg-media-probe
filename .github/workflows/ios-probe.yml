@@ -33,8 +33,18 @@ jobs:
       - name: Assert toolchain is Xcode 26 or newer
         run: |
           set -o pipefail
-          major="$(xcodebuild -version | head -1 | awk '{print $2}' | cut -d. -f1)"
+          # Do not pipe xcodebuild into `head`: head closes the pipe after one
+          # line, xcodebuild takes SIGPIPE while writing its banner and aborts
+          # with NSFileHandleOperationException, which surfaces as exit 134.
+          # Capture the whole banner first, then parse it.
+          xcode_banner="$(xcodebuild -version 2>/dev/null || true)"
+          printf '%s\n' "${xcode_banner}"
+          major="$(printf '%s\n' "${xcode_banner}" | sed -n '1s/^Xcode //p' | cut -d. -f1)"
           echo "detected Xcode major: ${major}"
+          if ! [[ "${major}" =~ ^[0-9]+$ ]]; then
+            echo "ERROR: could not read the Xcode version from: ${xcode_banner}" >&2
+            exit 1
+          fi
           if [[ "${major}" -lt 26 ]]; then
             newest="$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1 || true)"
             if [[ -n "${newest}" ]]; then
