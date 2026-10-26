@@ -28,10 +28,12 @@ void main() {
   });
 
   group('inventory', () {
-    test('finds files in directories no cache kind knows about', () async {
+    test('counts unknown files but excludes them from reclaimable space',
+        () async {
       await box.writeBytes(box.tempFile('a.jpg'), 100);
       // This is the shape of the bug that made the counter read 0 B while the
-      // disk filled up: a writer used a directory nobody had classified.
+      // disk filled up: a writer used a directory nobody had classified. It is
+      // counted (it occupies space) and refused (nobody claims it).
       await box.writeBytes(
           p.join(box.layout.tempRoot, 'tdlib_files', 'videos', 'x.mp4'), 4096);
       await box.writeBytes(
@@ -43,6 +45,10 @@ void main() {
       expect(temp.error, isNull);
       expect(temp.fileCount, 3);
       expect(temp.bytes, 100 + 4096 + 512);
+      expect(temp.unknownCount, 1);
+      expect(temp.unknownBytes, 512);
+      expect(temp.reclaimableBytes, 100 + 4096);
+      expect(temp.entries.any((e) => !e.known), isTrue);
     });
 
     test('reports the largest files first and caps the list', () async {
@@ -125,15 +131,56 @@ void main() {
       expect(await box.exists(box.authFile('token')), isTrue);
     });
 
-    test('reaches a nested directory that no cache kind knows about', () async {
+    test('leaves a directory no cache writer claims alone, and names it',
+        () async {
       final deep = p.join(box.layout.tempRoot, 'brand_new', 'deep', 'z.bin');
       await box.writeBytes(deep, 777);
 
       final result = await report.cleanTempZone(userConfirmed: true);
 
-      expect(result.deletedFiles, 1);
-      expect(result.freedBytes, 777);
-      expect(await box.exists(deep), isFalse);
+      // Asking "is this path inside the temp zone" and deleting on yes is how a
+      // cleaner removes a file whose purpose nobody knows. The whitelist is the
+      // other half of the guard.
+      expect(result.deletedFiles, 0);
+      expect(result.freedBytes, 0);
+      expect(result.skippedUnknown.length, 1);
+      expect(
+        result.skippedUnknown.single.key,
+        p.join('brand_new', 'deep', 'z.bin'),
+      );
+      expect(result.unknownBytes, 777);
+      // Skipping is the designed outcome, not a failure: the report succeeds
+      // and separately states that something was left behind.
+      expect(result.succeeded, isTrue);
+      expect(result.hasUnknownLeftovers, isTrue);
+      expect(result.summary, contains('跳过未识别 1 个'));
+      expect(await box.exists(deep), isTrue);
+    });
+
+    test('a stray file at the temp root is skipped too', () async {
+      final stray = p.join(box.layout.tempRoot, 'loose.bin');
+      await box.writeBytes(stray, 64);
+
+      final result = await report.cleanTempZone(userConfirmed: true);
+
+      expect(result.deletedFiles, 0);
+      expect(result.skippedUnknown.single.key, 'loose.bin');
+      expect(await box.exists(stray), isTrue);
+    });
+
+    test('registered writers are still cleared', () async {
+      await box.writeBytes(box.tempFile('a.jpg', kind: CacheKindName.thumb), 10);
+      await box.writeBytes(box.tempFile('b.mp4', kind: CacheKindName.player), 20);
+      await box.writeBytes(box.tempFile('c.part', kind: CacheKindName.partial), 30);
+      await box.writeBytes(
+          p.join(box.layout.tdlibFilesDir, 'videos', 'd.mp4'), 40);
+
+      final result = await report.cleanTempZone(userConfirmed: true);
+
+      expect(result.deletedFiles, 4);
+      expect(result.freedBytes, 100);
+      expect(result.skippedUnknown, isEmpty);
+      expect(result.hasUnknownLeftovers, isFalse);
     });
 
     test('counts bytes only for files that are really gone', () async {

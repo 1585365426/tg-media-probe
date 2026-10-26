@@ -1,5 +1,6 @@
 import AVFoundation
 import Flutter
+import LocalAuthentication
 import UIKit
 
 @main
@@ -20,6 +21,7 @@ import UIKit
     let messenger = engineBridge.applicationRegistrar.messenger()
     OrientationChannel.register(messenger: messenger)
     VideoMetaChannel.register(messenger: messenger)
+    BiometricChannel.register(messenger: messenger)
   }
 
   /// UIKit consults the app delegate before any view controller. Flutter's
@@ -173,6 +175,170 @@ enum VideoMetaChannel {
           result(nil)
         }
       }
+    }
+  }
+}
+
+// MARK: - Biometric gate (Face ID / Touch ID)
+
+/// Bridges `LocalAuthentication` to `lib/security/biometric.dart`.
+///
+/// Boundaries this file keeps:
+///
+/// * The template never leaves the Secure Enclave. `evaluatePolicy` hands back a
+///   boolean and an error; there is no API here that could return an image even
+///   if something asked for one.
+/// * Only `.deviceOwnerAuthenticationWithBiometrics` is used. It cannot fall
+///   back to the device passcode on its own, so a stolen phone whose passcode
+///   the attacker knows still does not unlock the app — the app passcode is the
+///   fallback, and that is a separate verifier.
+/// * Outcome names are strings, not `LAError` numbers. A numeric code that shifts
+///   between iOS releases would turn "recognition failed" into "sensor missing"
+///   and quietly disable the feature.
+enum BiometricChannel {
+  static let channelName = "com.tgmedia/biometric"
+
+  static func register(messenger: FlutterBinaryMessenger) {
+    let channel = FlutterMethodChannel(name: channelName, binaryMessenger: messenger)
+    channel.setMethodCallHandler { call, result in
+      switch call.method {
+      case "probe":
+        result(probe())
+      case "authenticate":
+        let reason = (call.arguments as? [String: Any])?["reason"] as? String
+        authenticate(reason: reason ?? "解锁 TG Media", result: result)
+      default:
+        result(FlutterMethodNotImplemented)
+      }
+    }
+  }
+
+  /// Sensor name. Never assume Face ID: an iPhone SE has Touch ID and an
+  /// iPhone 8 has no Face ID at all.
+  private static func kindName(_ context: LAContext) -> String {
+    if #available(iOS 17.0, *), context.biometryType == .opticID {
+      return "optic"
+    }
+    switch context.biometryType {
+    case .faceID:
+      return "face"
+    case .touchID:
+      return "touch"
+    case .none:
+      return "none"
+    @unknown default:
+      return "unknown"
+    }
+  }
+
+  /// One snapshot for the settings row: what the device has, whether it can be
+  /// used right now, and whether it is temporarily locked out.
+  private static func probe() -> [String: Any] {
+    let context = LAContext()
+    var error: NSError?
+    let canEvaluate = context.canEvaluatePolicy(
+      .deviceOwnerAuthenticationWithBiometrics,
+      error: &error
+    )
+    let kind = kindName(context)
+
+    // A sensor that exists but cannot be evaluated is still "available" — the
+    // distinction matters because the settings toggle should say "先录入面容"
+    // rather than "此设备不支持".
+    var available = kind != "none"
+    var enrolled = canEvaluate
+    var lockedOut = false
+
+    if let laError = error as? LAError {
+      switch laError.code {
+      case .biometryNotEnrolled:
+        enrolled = false
+      case .biometryLockout:
+        // Still enrolled; only a device-passcode unlock clears this.
+        enrolled = true
+        lockedOut = true
+      case .biometryNotAvailable:
+        available = false
+        enrolled = false
+      case .passcodeNotSet:
+        // iOS refuses biometrics without a device passcode. The hardware is
+        // there, so this is reported as "not enrolled" to the caller.
+        enrolled = false
+      default:
+        break
+      }
+    }
+
+    return [
+      "kind": kind,
+      "available": available,
+      "enrolled": enrolled,
+      "lockedOut": lockedOut,
+    ]
+  }
+
+  private static func authenticate(reason: String, result: @escaping FlutterResult) {
+    let context = LAContext()
+    context.localizedCancelTitle = "取消"
+    // Shown as the fallback button inside the system sheet. It leads to the app
+    // passcode screen, not to the device passcode.
+    context.localizedFallbackTitle = "使用应用密码"
+
+    var error: NSError?
+    guard context.canEvaluatePolicy(
+      .deviceOwnerAuthenticationWithBiometrics,
+      error: &error
+    ) else {
+      // No prompt is shown in this branch, so the caller must fall back. The
+      // same error mapping is used as for a failed evaluation.
+      result(outcomeName(error))
+      return
+    }
+
+    context.evaluatePolicy(
+      .deviceOwnerAuthenticationWithBiometrics,
+      localizedReason: reason
+    ) { success, evaluationError in
+      // The reply must arrive on the main thread: the Dart side resumes a
+      // Future that rebuilds the unlock screen.
+      DispatchQueue.main.async {
+        result(success ? "success" : outcomeName(evaluationError))
+      }
+    }
+  }
+
+  /// Maps `LAError.Code` to the names `BiometricOutcome` parses.
+  private static func outcomeName(_ error: Error?) -> String {
+    guard let laError = error as? LAError else {
+      // A cancelled or interrupted prompt can arrive as a generic error; the
+      // safe default is `error`, which makes the caller demand the passcode.
+      return "error"
+    }
+    switch laError.code {
+    case .userCancel:
+      return "userCancel"
+    case .systemCancel:
+      return "systemCancel"
+    case .userFallback:
+      return "userFallback"
+    case .biometryLockout:
+      return "lockout"
+    case .biometryNotEnrolled:
+      return "notEnrolled"
+    case .biometryNotAvailable:
+      return "notAvailable"
+    case .passcodeNotSet:
+      return "passcodeNotSet"
+    case .appCancel:
+      return "appCancel"
+    case .authenticationFailed:
+      // One failed face scan. Reported as `error` on purpose: the UI must not
+      // tell the user "wrong password" before they have typed anything.
+      return "error"
+    case .invalidContext, .notInteractive:
+      return "error"
+    @unknown default:
+      return "error"
     }
   }
 }

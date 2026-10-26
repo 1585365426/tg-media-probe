@@ -2,6 +2,7 @@ import 'package:path/path.dart' as p;
 
 import '../util/byte_format.dart';
 import 'active_files.dart';
+import 'cache_ownership.dart';
 import 'file_ops.dart';
 import 'storage_layout.dart';
 
@@ -12,6 +13,8 @@ class InventoryEntry {
     required this.relativePath,
     required this.bytes,
     required this.inUse,
+    this.known = false,
+    this.writerLabel,
   });
 
   final String path;
@@ -22,9 +25,17 @@ class InventoryEntry {
   final int bytes;
   final bool inUse;
 
+  /// True when a registered [CacheWriter] claims this file, i.e. when "clear
+  /// cache" would actually delete it.
+  final bool known;
+
+  /// Human name of the owning writer, for the storage screen.
+  final String? writerLabel;
+
   @override
   String toString() =>
-      'InventoryEntry($relativePath, ${formatBytes(bytes)}${inUse ? ', in use' : ''})';
+      'InventoryEntry($relativePath, ${formatBytes(bytes)}'
+      '${inUse ? ', in use' : ''}${known ? '' : ', unknown'})';
 }
 
 /// What one zone actually contains right now.
@@ -42,6 +53,8 @@ class ZoneInventory {
     required this.bytes,
     required this.entries,
     this.error,
+    this.unknownCount = 0,
+    this.unknownBytes = 0,
   });
 
   final StorageZone zone;
@@ -55,9 +68,18 @@ class ZoneInventory {
   final List<InventoryEntry> entries;
   final String? error;
 
+  /// Files that no registered writer claims. Counted in [fileCount] and
+  /// [bytes] — they occupy space — but excluded from every "can be freed"
+  /// number, because a clear will skip them.
+  final int unknownCount;
+  final int unknownBytes;
+
   static const int keepLargest = 8;
 
   bool get readable => error == null;
+
+  /// Space the storage screen may promise to reclaim.
+  int get reclaimableBytes => bytes - unknownBytes;
 
   String get line => exists
       ? '$fileCount 个文件 · ${formatBytes(bytes)}'
@@ -75,6 +97,8 @@ class TempCleanReport {
     required this.failures,
     required this.protectedZonesBefore,
     required this.protectedZonesAfter,
+    this.skippedUnknown = const <MapEntry<String, String>>[],
+    this.unknownBytes = 0,
   });
 
   final int scannedFiles;
@@ -88,10 +112,19 @@ class TempCleanReport {
   final List<String> refusedByGuard;
   final List<MapEntry<String, String>> failures;
 
+  /// `relative path -> reason` for files no registered writer claims. Left on
+  /// disk on purpose: an unrecognised file is not a delete candidate.
+  final List<MapEntry<String, String>> skippedUnknown;
+  final int unknownBytes;
+
   final Map<StorageZone, bool> protectedZonesBefore;
   final Map<StorageZone, bool> protectedZonesAfter;
 
   bool get nothingToDo => scannedFiles == 0;
+
+  /// True when the clear ran but left unknown files behind. Not a failure —
+  /// the UI should say so instead of implying the disk is now clean.
+  bool get hasUnknownLeftovers => skippedUnknown.isNotEmpty;
 
   /// Protected zones must still be there afterwards. A clear that removes the
   /// login or the index is a failure no matter how many bytes it freed.
@@ -102,6 +135,8 @@ class TempCleanReport {
     return true;
   }
 
+  /// Unknown files are skipped by design and are not a failure. They are
+  /// reported, which is the opposite of silently guessing.
   bool get succeeded =>
       failures.isEmpty && refusedByGuard.isEmpty && protectedZonesIntact;
 
@@ -111,6 +146,8 @@ class TempCleanReport {
       '删除 $deletedFiles 个',
       '释放 ${formatBytes(freedBytes)}',
       if (skippedInUse.isNotEmpty) '跳过占用中 ${skippedInUse.length} 个',
+      if (skippedUnknown.isNotEmpty)
+        '跳过未识别 ${skippedUnknown.length} 个（${formatBytes(unknownBytes)}）',
       if (refusedByGuard.isNotEmpty) '越界拒绝 ${refusedByGuard.length} 个',
       if (failures.isNotEmpty) '失败 ${failures.length} 个',
       if (!protectedZonesIntact) '受保护目录发生变化',
@@ -128,12 +165,16 @@ class TempCleanNotConfirmed implements Exception {
 
 /// Inventory + cleanup for the four storage zones.
 ///
-/// Deliberately *not* built on `CacheKind`. That classification answers "which
-/// of the three directories I know about is this file in", and every time a
-/// writer used a fourth directory the byte count silently dropped to zero while
-/// the disk filled up. This class walks the whole zone and reports what is
-/// physically there; the only categorisation it does is the zone itself, which
-/// is enforced by path containment.
+/// Two independent rules decide what may be deleted:
+///
+/// 1. **Zone** — the file must resolve inside [StorageZone.tempCache]. Enforced
+///    per file by [StorageLayout.assertDeletableByCacheClear], immediately
+///    before the delete, so a symlink that appeared after the scan is caught.
+/// 2. **Ownership** — a registered [CacheWriter] must claim the file. See
+///    [CacheOwnership]: anything else is reported and left alone.
+///
+/// The inventory still walks the whole zone, because "how much space is this
+/// app using" and "how much of it can I reclaim" are different questions.
 class TempZoneReport {
   TempZoneReport({
     required this.layout,
@@ -161,6 +202,8 @@ class TempZoneReport {
       }
       final files = await ops.listFilesRecursive(root);
       var bytes = 0;
+      var unknownBytes = 0;
+      var unknownCount = 0;
       final all = <InventoryEntry>[];
       for (final path in files) {
         var size = 0;
@@ -172,11 +215,18 @@ class TempZoneReport {
           continue;
         }
         bytes += size;
+        final classification = CacheOwnership.classify(layout, path);
+        if (!classification.known) {
+          unknownCount++;
+          unknownBytes += size;
+        }
         all.add(InventoryEntry(
           path: path,
           relativePath: p.isWithin(root, path) ? p.relative(path, from: root) : path,
           bytes: size,
           inUse: activeFiles.isInUse(path),
+          known: classification.known,
+          writerLabel: classification.writer?.label,
         ));
       }
       all.sort((a, b) => b.bytes.compareTo(a.bytes));
@@ -187,6 +237,8 @@ class TempZoneReport {
         fileCount: all.length,
         bytes: bytes,
         entries: all.take(ZoneInventory.keepLargest).toList(),
+        unknownCount: unknownCount,
+        unknownBytes: unknownBytes,
       );
     } catch (e) {
       return ZoneInventory(
@@ -209,13 +261,11 @@ class TempZoneReport {
     return map;
   }
 
-  /// Deletes everything under the temp zone that the guard allows.
+  /// Deletes every temp-zone file that both guards allow.
   ///
-  /// Walks `tempRoot` as a whole rather than a list of known sub-directories,
-  /// so a new writer adding `tempRoot/tiles/` is covered without touching this
-  /// file. The safety property does not come from the directory list — it comes
-  /// from [StorageLayout.assertDeletableByCacheClear], which runs per file
-  /// immediately before the delete and re-resolves symlinks at that moment.
+  /// Walks `tempRoot` as a whole rather than a list of known sub-directories, so
+  /// the report can name what it skipped. Walking only known directories would
+  /// hide exactly the files the user needs to know about.
   Future<TempCleanReport> cleanTempZone({
     required bool userConfirmed,
     void Function(int done, int total, String current)? onProgress,
@@ -238,7 +288,9 @@ class TempZoneReport {
 
     var deleted = 0;
     var freed = 0;
+    var unknownBytes = 0;
     final skippedInUse = <String>[];
+    final skippedUnknown = <MapEntry<String, String>>[];
     final refused = <String>[];
     final failures = <MapEntry<String, String>>[];
     var done = 0;
@@ -246,7 +298,23 @@ class TempZoneReport {
 
     for (final path in candidates) {
       final name = p.basename(path);
-      if (activeFiles.isInUse(path)) {
+      final relative = p.isWithin(layout.tempRoot, path)
+          ? p.relative(path, from: layout.tempRoot)
+          : path;
+      final classification = CacheOwnership.classify(layout, path);
+
+      if (!classification.known) {
+        // Ownership is checked before the zone guard: an unclaimed file is
+        // never a delete candidate, so there is nothing for the guard to do.
+        skippedUnknown.add(
+          MapEntry(relative, classification.reason ?? '未识别的文件'),
+        );
+        try {
+          unknownBytes += await ops.sizeOf(path);
+        } catch (_) {
+          // Already counted in scannedBytes; nothing to add.
+        }
+      } else if (activeFiles.isInUse(path)) {
         skippedInUse.add(path);
       } else {
         try {
@@ -285,6 +353,8 @@ class TempZoneReport {
       failures: failures,
       protectedZonesBefore: protectedBefore,
       protectedZonesAfter: protectedAfter,
+      skippedUnknown: skippedUnknown,
+      unknownBytes: unknownBytes,
     );
   }
 
@@ -305,4 +375,22 @@ class TempZoneReport {
     }
     return map;
   }
+}
+
+/// Human-readable detail lines for the storage screen.
+///
+/// Returns at most [limit] lines per category: a pool with thousands of unknown
+/// blobs must not turn the dialog into a wall of text.
+List<String> describeUnknownFiles(TempCleanReport report, {int limit = 10}) {
+  if (report.skippedUnknown.isEmpty) return const <String>[];
+  final lines = <String>[
+    '以下 ${report.skippedUnknown.length} 个文件未登记归属，已跳过未删除：',
+  ];
+  for (final entry in report.skippedUnknown.take(limit)) {
+    lines.add('  ${entry.key} — ${entry.value}');
+  }
+  if (report.skippedUnknown.length > limit) {
+    lines.add('  …另有 ${report.skippedUnknown.length - limit} 个');
+  }
+  return lines;
 }

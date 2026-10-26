@@ -26,6 +26,8 @@
 	<string>$(FLUTTER_BUILD_NUMBER)</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<key>NSFaceIDUsageDescription</key>
+	<string>TG Media 使用面容 ID 解锁应用本身。人脸数据由 iOS 在设备内完成比对，应用不会读取、保存或上传任何生物特征，也不会用面容 ID 代替 Telegram 登录。</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>
