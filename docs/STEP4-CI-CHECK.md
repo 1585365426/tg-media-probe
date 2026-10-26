@@ -204,9 +204,11 @@ static void assertAllowed(Object? type, {String? source}) {
 |---|---|---|---|---|
 | `cloudMutatingMethods` | 41 | 64 | `Set<String>.contains`，精确匹配 | 第 3 步按 TDLib 文档手工分类 |
 | `localOnlyMethods` | 114 | 8 | 同上 | 名字含删除但只动本地数据：`deleteFile`、`removeFileFromDownloads`、`removeTopChat`、`removeSavedAnimation`、`removeFavoriteSticker`、`removeRecentlyFoundChat`、`downloadFile`、`cancelDownloadFile` |
-| `readOnlyMethods` | 136 | 23 | 同上 | 本轮新增：读类 + 会话/鉴权类 + 本地文件传输 |
+| `readOnlyMethods` | 136 | 23 | 同上 | 本轮新增。分三组：读类 16（`getMe` `getChats` `getChat` `getChatHistory` `getMessage` `getFile` `getRemoteFile` `getOption` `getUser` `getSupergroup` `getBasicGroup` `getStorageStatistics` `getNetworkStatistics` `loadChats` `searchChats` `searchChatMessages`）、会话/鉴权 7（`setTdlibParameters` `getAuthorizationState` `setAuthenticationPhoneNumber` `checkAuthenticationCode` `checkAuthenticationPassword` `logOut` `close`） |
 
 `isAllowed()` = `readOnlyMethods ∪ localOnlyMethods`。三张清单互不重叠，由用例 `no method is both allowed and cloud-mutating` 守护（行 513）。
+
+**关于「只读」与 `logOut` / 登录类方法**：这 7 个方法确实会改服务端状态（建会话、结束会话），严格按字面不属于「读」。列进白名单是**有意的例外**：没有它们就无法登录、无法退出登录，而两者都是用户在设置页显式触发的动作，且不在任何自动流程里重试调用。审查时若认为「只读」应排除登录登出，需要先改产品定义，而不是只删这几行——删掉会直接把登录页废掉。这一点按事实写在报告里，不隐藏。
 
 `downloadFile` / `cancelDownloadFile` 补进 `localOnlyMethods`：修复前它们不在黑名单里，因此**本来就被放行**；写进白名单是把既有行为显式化，不是放宽。
 
