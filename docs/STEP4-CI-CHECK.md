@@ -336,6 +336,16 @@ inspect: TDLib 静态链接进 Runner，四个 tdjson 符号全部导出
 
 本次 run 的结论只证明「文档提交没破坏构建」，不产生新的功能证据。功能证据仍以 `40311608168` 为准。
 
+### 三个 run 的产物体积漂移
+
+| run | 提交 | 结论 | 耗时 | IPA 字节 | sha256 前 8 位 |
+|---|---|---|---|---|---|
+| 40311608168 | `efe48f4` | success | 6m35s | 19,760,196 | `61c415cd` |
+| 40323987034 | `02dbea5` | success | 5m01s | 19,760,188 | `a24b84f4` |
+| 40325142273 | `dd96a98` | success | 5m37s | 19,760,170 | `ee441473` |
+
+三个提交的 `lib/` 完全相同（`02dbea5`、`dd96a98` 只改 `docs/`），IPA 体积却相差 26 B，哈希全不相同。结论：**sha256 不是代码指纹**，只能用来核对「手里这个包是不是那一次跑出来的」；比对代码版本一律看提交 SHA。每次文档提交都会再触发一个 run，上表只收录已有结论的 run。
+
 ---
 
 ## 7. 未验证项与后续建议
@@ -366,6 +376,7 @@ flutter test test/readonly_guard_test.dart test/security_negative_test.dart
 git log  3cb262e → efe48f4 → 02dbea5 → 本文件所在文档提交
 CI       40311608168  success  6m35s   efe48f4   19,760,196 B  sha256 61c415cd…
          40323987034  success  5m01s   02dbea5   19,760,188 B  sha256 a24b84f4…
+         40325142273  success  5m37s   dd96a98   19,760,170 B  sha256 ee441473…
 ```
 
 本机：Windows 11 / Flutter 3.47.8（`/c/flutter-sdk`）/ Dart 3.13.7。
