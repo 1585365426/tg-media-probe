@@ -1,6 +1,6 @@
 # TG Media 第 2 步：技术可行性验证状态
 
-最后更新：2026-10-26 15:10（Windows 开发机）
+最后更新：2026-10-26 16:25（Windows 开发机）
 仓库：https://github.com/1585365426/tg-media-probe （public，`main`，源码与脚本已推送）
 
 ## 1. 已验证（真实执行过，可复现）
@@ -10,7 +10,7 @@
 | Flutter 工具链 | `flutter --version` | Flutter 3.47.8 stable / Dart 3.13.7 / engine dfd2e6cb7d |
 | 依赖解析 | `flutter pub get` | 成功，45 个依赖 |
 | 静态检查 | `flutter analyze` | `No issues found!` |
-| 自动化测试 | `flutter test` | 当前 **337 passed, 1 skipped**（native 加载用 skip）；第 2 步当时为 37 |
+| 自动化测试 | `flutter test` | 当前 **365 passed, 1 skipped**（native 加载用 skip）；第 2 步当时为 37 |
 | TDLib 请求与官方 schema 一致性 | `test/schema_conformance_test.dart` | 16 个请求字段名/必填项全部对得上 `td_api.tl`（3365 行，上游 master） |
 | 只读约束 | `test/readonly_guard_test.dart` | `lib/` 下无任何云端写入/删除方法名 |
 | 日志脱敏 | `test/redact_test.dart` | api_hash / 手机号 / 验证码 / 密码全部脱敏 |
@@ -152,6 +152,7 @@ run [40198573231](https://github.com/1585365426/tg-media-probe/actions/runs/4019
 | [40252236401](https://github.com/1585365426/tg-media-probe/actions/runs/40252236401) | `0a728e6` | `0daed69c…0f4c62` | H/I/J 修复，274 passed |
 | [40257900132](https://github.com/1585365426/tg-media-probe/actions/runs/40257900132) | `9d11c26` | `238367ac…fcd0f4` | 抖音 Tab / 全屏 / 缓存统计 / 时长 6 档，288 passed |
 | [40283014577](https://github.com/1585365426/tg-media-probe/actions/runs/40283014577) | `634cb6c` | `b4c72328…767bed2` | 边下边播（回环 Range 服务）+ 清理缓存修复，337 passed |
+| [40290837814](https://github.com/1585365426/tg-media-probe/actions/runs/40290837814) | `f159330` | `bcd3d232…972f11` | 保持登录 + 缓存扫描基准修正 + 首帧看门狗，365 passed |
 
 真机首轮复测（截图）暴露三个问题并已修：H 探针页抢 TDLib 数据库锁（error 400）、
 I 视频页首屏只取一页且切 Tab 不刷新导致空态、J 时长 chip 被裁。详见
