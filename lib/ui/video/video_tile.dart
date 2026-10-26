@@ -65,7 +65,7 @@ class VideoTile extends StatelessWidget {
       child: Stack(
         fit: StackFit.expand,
         children: <Widget>[
-          Center(child: _surface(value, ready, theme)),
+          _surface(value, ready, theme),
           if (error == null)
             Positioned(
               left: 0,
@@ -103,50 +103,76 @@ class VideoTile extends StatelessWidget {
 
   Widget _surface(VideoPlayerValue? value, bool ready, ThemeData theme) {
     if (error != null) {
-      return Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 32),
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 32),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: <Widget>[
+              const Icon(Icons.error_outline, color: Colors.white70, size: 40),
+              const SizedBox(height: 10),
+              Text(
+                error!,
+                textAlign: TextAlign.center,
+                style: const TextStyle(color: Colors.white70, fontSize: 13),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+    if (!ready) {
+      return Center(
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: <Widget>[
-            const Icon(Icons.error_outline, color: Colors.white70, size: 40),
-            const SizedBox(height: 10),
+            const CircularProgressIndicator(color: Colors.white70),
+            const SizedBox(height: 12),
             Text(
-              error!,
-              textAlign: TextAlign.center,
+              progress == null
+                  ? '准备中…'
+                  : '加载中 ${(progress! * 100).toStringAsFixed(0)}%',
               style: const TextStyle(color: Colors.white70, fontSize: 13),
             ),
           ],
         ),
       );
     }
-    if (!ready) {
-      return Column(
-        mainAxisSize: MainAxisSize.min,
-        children: <Widget>[
-          const CircularProgressIndicator(color: Colors.white70),
-          const SizedBox(height: 12),
-          Text(
-            progress == null ? '准备中…' : '正在下载 ${(progress! * 100).toStringAsFixed(0)}%',
-            style: const TextStyle(color: Colors.white70, fontSize: 13),
-          ),
-        ],
-      );
-    }
 
-    // Aspect ratio comes from AVFoundation, adjusted for the track transform:
-    // a phone-shot 1920x1080 with a 90° transform occupies 1080x1920 on screen.
+    // Display size comes from AVFoundation's track transform: a phone-shot
+    // 1920x1080 with a 90° transform occupies 1080x1920 on screen. Guessing 0°
+    // here would letterbox a portrait video inside a landscape frame.
     final size = VideoRotationReader.displaySize(
       width: record.width,
       height: record.height,
       rotationDegrees: rotationDegrees,
     );
-    final ratio = (size.width != null && size.height != null && size.height! > 0)
-        ? size.width! / size.height!
-        : value!.aspectRatio;
+    final width = (size.width ?? value!.size.width).toDouble();
+    final height = (size.height ?? value!.size.height).toDouble();
+    if (width <= 0 || height <= 0) {
+      return const Center(
+        child: Text('无法读取视频尺寸',
+            style: TextStyle(color: Colors.white70, fontSize: 13)),
+      );
+    }
 
-    return AspectRatio(
-      aspectRatio: ratio,
-      child: VideoPlayer(controller!),
+    // BoxFit.cover, not contain: the previous build wrapped the player in an
+    // AspectRatio inside a Center, so rotating to landscape produced a
+    // centred 16:9 box with black bars on two sides — the screen turned but
+    // nothing got bigger, which is exactly what "cannot go full screen" looked
+    // like on device. Cover fills the frame and clips the overflow; a 16:9
+    // clip on a 19.5:9 phone loses about 10% off each side, which is the same
+    // trade every short-video feed makes.
+    return SizedBox.expand(
+      child: FittedBox(
+        fit: BoxFit.cover,
+        clipBehavior: Clip.hardEdge,
+        child: SizedBox(
+          width: width,
+          height: height,
+          child: VideoPlayer(controller!),
+        ),
+      ),
     );
   }
 

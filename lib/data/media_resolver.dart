@@ -57,6 +57,45 @@ class ResolveResult {
 ///   cache clear cannot delete a video the user is watching.
 /// * A file only counts as present when its size matches what TDLib reported.
 ///   A truncated leftover is re-fetched instead of played as a 3-second clip.
+/// Why [MediaResolver.prefetch] does or does not talk to TDLib.
+///
+/// Pulled out as a plain function so the skip rules can be asserted without a
+/// live client: a wrong answer here either wastes the user's data (fetching a
+/// file that is already on disk) or hammers TDLib with duplicate requests.
+enum PrefetchDecision {
+  /// Start a low-priority background fetch.
+  enqueue,
+
+  /// Nothing to fetch: protected media is never pulled to the local zone.
+  noFileId,
+  protectedContent,
+
+  /// Already handed to TDLib in this session.
+  alreadyQueued,
+
+  /// The promoted copy in the user zone is already complete.
+  alreadyLocal,
+}
+
+PrefetchDecision decidePrefetch({
+  required int fileId,
+  required bool hasProtectedContent,
+  required int expectedBytes,
+  required bool alreadyQueued,
+  required bool targetExists,
+  required int targetBytes,
+}) {
+  if (fileId == 0) return PrefetchDecision.noFileId;
+  if (hasProtectedContent) return PrefetchDecision.protectedContent;
+  if (alreadyQueued) return PrefetchDecision.alreadyQueued;
+  // A size mismatch means a previous promotion died mid-copy; the file is not
+  // playable, so it is worth fetching again.
+  if (targetExists && (expectedBytes <= 0 || targetBytes == expectedBytes)) {
+    return PrefetchDecision.alreadyLocal;
+  }
+  return PrefetchDecision.enqueue;
+}
+
 class MediaResolver {
   MediaResolver({
     required this.client,
@@ -74,6 +113,59 @@ class MediaResolver {
   /// for the same video share one download instead of racing each other.
   final Map<String, Future<ResolveResult>> _inFlight =
       <String, Future<ResolveResult>>{};
+
+  /// Keys already handed to TDLib as a background fetch.
+  final Set<String> _prefetched = <String>{};
+
+  /// Starts a low-priority background fetch for a clip the user has not
+  /// swiped to yet.
+  ///
+  /// Priority 1 is the lowest TDLib accepts and the on-screen clip asks for 32,
+  /// so this cannot starve playback. Nothing is awaited and no completion is
+  /// tracked: if it fails or is cancelled, [ensureLocal] simply fetches the
+  /// file again when the user actually arrives. This is the only lever that
+  /// makes a swipe feel instant without giving up the whole-file download that
+  /// the size check and the zone promotion are built on.
+  Future<void> prefetch(MediaRecord record) async {
+    if (record.fileId == 0 || record.hasProtectedContent) return;
+    if (_prefetched.contains(record.key)) return;
+
+    var targetExists = false;
+    var targetBytes = 0;
+    try {
+      final target = targetPathOf(record);
+      if (await ops.exists(target)) {
+        targetExists = true;
+        targetBytes = await ops.sizeOf(target);
+      }
+    } catch (_) {
+      // A stat failure must not cancel the fetch; treat it as "not local".
+    }
+
+    final decision = decidePrefetch(
+      fileId: record.fileId,
+      hasProtectedContent: record.hasProtectedContent,
+      expectedBytes: record.sizeBytes,
+      alreadyQueued: false,
+      targetExists: targetExists,
+      targetBytes: targetBytes,
+    );
+    if (decision != PrefetchDecision.enqueue) return;
+    // Reserve before the await: two tiles asking for the same neighbour in the
+    // same frame must produce one request, not two.
+    if (!_prefetched.add(record.key)) return;
+
+    try {
+      await client.request(
+        downloadFile(fileId: record.fileId, priority: 1, synchronous: false),
+        timeout: const Duration(seconds: 20),
+      );
+    } catch (_) {
+      // Best effort. A failed prefetch must never surface to the user; the
+      // activation path owns the real error reporting.
+      _prefetched.remove(record.key);
+    }
+  }
 
   Future<ResolveResult> ensureLocal(
     MediaRecord record, {

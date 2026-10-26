@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math';
 
 import 'package:flutter/material.dart';
 import 'package:video_player/video_player.dart';
@@ -33,6 +34,8 @@ class VideoFeedPage extends StatefulWidget {
     super.key,
     required this.active,
     this.onExit,
+    this.randomOrder = false,
+    this.immersive = false,
   });
 
   /// False while another tab is in front. Playback is released when it flips.
@@ -40,6 +43,19 @@ class VideoFeedPage extends StatefulWidget {
 
   /// Called when the back button is pressed with nothing left to clear.
   final VoidCallback? onExit;
+
+  /// Shuffles each loaded page before appending it, so the 抖音 tab does not
+  /// simply replay the feed in reverse-chronological order.
+  ///
+  /// Only the appended slice is shuffled: reshuffling the whole queue when a
+  /// new page arrives would move the item the user is currently watching.
+  /// Duplicates are dropped through a seen-set, which is what "不重复播放"
+  /// means once paging makes a truly global shuffle impossible.
+  final bool randomOrder;
+
+  /// Hides the search bar and both filter rows, and puts the back button in
+  /// charge of leaving the tab. Used by the full-screen 抖音 tab.
+  final bool immersive;
 
   @override
   State<VideoFeedPage> createState() => _VideoFeedPageState();
@@ -68,6 +84,11 @@ class _VideoFeedPageState extends State<VideoFeedPage> {
   /// `IndexStore.revision` when this page last read the mirror. Compared on
   /// resume to detect a sync that happened while the tab was hidden.
   int _indexRevision = -1;
+
+  /// Keys already queued in random mode, so paging cannot hand back a video the
+  /// user has just watched. Cleared whenever the queue is rebuilt.
+  final Set<String> _seen = <String>{};
+  final Random _random = Random();
 
   final PageController _pageController = PageController();
   final TextEditingController _searchController = TextEditingController();
@@ -122,6 +143,15 @@ class _VideoFeedPageState extends State<VideoFeedPage> {
       // Tab switched away: free the decoder immediately rather than waiting for
       // the shell's lifecycle binder (both paths are idempotent).
       _releasePlayer();
+      // The shell holds this page in an IndexedStack, so `dispose` never runs
+      // on a tab switch. Without an explicit reset the native side stays locked
+      // to forcedLandscape and every page reached next — favourites, settings —
+      // inherits a sideways screen, which is what "my favourites force
+      // landscape" looked like on device.
+      if (_landscape) {
+        setState(() => _landscape = false);
+        _orientation.resetToSystem();
+      }
     } else if (!oldWidget.active && widget.active) {
       if (!_initialized) return;
       // The mirror can change while this tab is hidden — a sync runs from 频道.
@@ -152,6 +182,7 @@ class _VideoFeedPageState extends State<VideoFeedPage> {
   Future<void> _loadFirstPage() async {
     _pager = MediaPager(store: _services.index, pageSize: pageSize);
     _all.clear();
+    _seen.clear();
     _indexRevision = _services.index.revision;
 
     // The index holds every media kind, so one 40-row page can be all photos
@@ -192,12 +223,19 @@ class _VideoFeedPageState extends State<VideoFeedPage> {
     try {
       final page = await pager.next();
       if (!mounted) return;
+      final batch = <MediaRecord>[];
       for (final record in page.items) {
-        if (record.kind == MediaKind.video ||
-            record.kind == MediaKind.animation) {
-          _all.add(record);
+        if (record.kind != MediaKind.video &&
+            record.kind != MediaKind.animation) {
+          continue;
         }
+        if (widget.randomOrder && !_seen.add(record.key)) continue;
+        batch.add(record);
       }
+      // Shuffle only the incoming slice. Reshuffling the whole queue when a new
+      // page lands would move the video the user is currently on.
+      if (widget.randomOrder && batch.length > 1) batch.shuffle(_random);
+      _all.addAll(batch);
     } catch (e) {
       if (!mounted) return;
       _loadError = e.toString();
@@ -253,6 +291,9 @@ class _VideoFeedPageState extends State<VideoFeedPage> {
 
     var path = _paths[key];
     if (path == null) {
+      // Kick the lookahead before the current item blocks on the network, so
+      // the two downloads overlap instead of running end to end.
+      _prefetchAhead();
       if (mounted) setState(() => _progress[key] = 0);
       try {
         final result = await _services.resolver.ensureLocal(
@@ -304,6 +345,31 @@ class _VideoFeedPageState extends State<VideoFeedPage> {
         _rotation = rotation;
         _progress.remove(key);
       });
+    }
+  }
+
+  /// Warm the next couple of items so a swipe does not start from zero bytes.
+  ///
+  /// TDLib's `downloadFile` is idempotent per file id and this call uses the
+  /// lowest priority, so a prefetch cannot starve the item that is actually
+  /// playing. Fire-and-forget on purpose: a failure only puts the key back into
+  /// the resolver's dedupe set and the real `ensureLocal` still runs later.
+  void _prefetchAhead() {
+    const lookahead = 2;
+    final limit = _filtered.length;
+    for (var step = 1; step <= lookahead; step++) {
+      final index = _current + step;
+      if (index >= limit) break;
+      final record = _filtered[index];
+      if (_paths.containsKey(record.key)) continue;
+      if (_errors.containsKey(record.key)) continue;
+      try {
+        unawaited(_services.resolver.prefetch(record));
+      } on StateError {
+        // No TDLib client yet (fresh launch, not signed in). Warming nothing is
+        // correct here; the activation path reports that state to the user.
+        return;
+      }
     }
   }
 
@@ -379,6 +445,10 @@ class _VideoFeedPageState extends State<VideoFeedPage> {
   }
 
   void _onBack() {
+    if (widget.immersive) {
+      widget.onExit?.call();
+      return;
+    }
     if (_model.searchOpen) {
       _model.closeSearch();
       return;
@@ -441,8 +511,8 @@ class _VideoFeedPageState extends State<VideoFeedPage> {
 
     return Column(
       children: <Widget>[
-        if (model.searchOpen) _searchBar(theme),
-        _filterBar(theme),
+        if (!widget.immersive && model.searchOpen) _searchBar(theme),
+        if (!widget.immersive) _filterBar(theme),
         if (_loadError != null)
           Container(
             width: double.infinity,
@@ -545,29 +615,28 @@ class _VideoFeedPageState extends State<VideoFeedPage> {
       padding: const EdgeInsets.only(top: 8),
       child: Column(
         children: <Widget>[
-          SizedBox(
-            height: 38,
-            child: ListView(
-              scrollDirection: Axis.horizontal,
-              padding: const EdgeInsets.symmetric(horizontal: 12),
+          // Six duration buckets cannot fit one 375 pt line, so this row wraps
+          // instead of scrolling horizontally: a clipped "5 分钟以" is worse
+          // than a second line, because the user cannot tell an option is cut
+          // off and never learns it exists.
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12),
+            child: Wrap(
+              spacing: 6,
+              runSpacing: 2,
               children: <Widget>[
                 for (final filter in DurationFilter.values)
-                  Padding(
-                    padding: const EdgeInsets.only(right: 8),
-                    child: ChoiceChip(
-                      label: Text(filter.label,
-                          style: const TextStyle(fontSize: 11)),
-                      // Four duration chips have to fit one 375 pt line. At the
-                      // default density and 12 pt label the row overflows by a
-                      // few points and clips the last option to "5 分钟以".
-                      labelPadding: const EdgeInsets.symmetric(horizontal: 2),
-                      visualDensity: VisualDensity.compact,
-                      materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                      selected: _query.duration == filter,
-                      onSelected: (_) {
-                        _model.setDurationFilter(filter);
-                      },
-                    ),
+                  ChoiceChip(
+                    label: Text(filter.chipLabel,
+                        style: const TextStyle(fontSize: 11)),
+                    labelPadding: const EdgeInsets.symmetric(horizontal: 2),
+                    visualDensity: VisualDensity.compact,
+                    materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    selected: _query.duration == filter,
+                    tooltip: filter.label,
+                    onSelected: (_) {
+                      _model.setDurationFilter(filter);
+                    },
                   ),
               ],
             ),

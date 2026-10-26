@@ -117,14 +117,51 @@ void main() {
     return harness;
   }
 
-  testWidgets('shell shows the three top tabs', (tester) async {
+  testWidgets('shell shows the four top tabs', (tester) async {
     final harness = await boot(tester);
     await tester.pumpWidget(wrap(harness.services, harness.model));
     await tester.pump();
 
     expect(find.text('频道'), findsWidgets);
     expect(find.text('视频'), findsWidgets);
+    expect(find.text('抖音'), findsWidgets);
     expect(find.text('功能'), findsWidgets);
+  });
+
+  testWidgets('抖音 hides the app bar and the tab strip entirely',
+      (tester) async {
+    final harness = await boot(tester);
+    await tester.pumpWidget(wrap(harness.services, harness.model));
+    await tester.pump();
+
+    // Before: the strip is there and the app bar carries the title.
+    expect(find.byType(TabBar), findsOneWidget);
+    expect(find.byType(AppBar), findsOneWidget);
+
+    await tester.tap(find.text('抖音').last);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    expect(find.byType(TabBar), findsNothing);
+    expect(find.byType(AppBar), findsNothing);
+  });
+
+  testWidgets('抖音 drops the filter bar that 视频 keeps', (tester) async {
+    final harness = await boot(tester);
+    harness.model.markSignedIn(true);
+    await tester.pumpWidget(wrap(harness.services, harness.model));
+    await tester.pump();
+
+    await tester.tap(find.text('视频').last);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    // Seven duration chips (全部 + six buckets) and nothing else on screen.
+    expect(find.byType(ChoiceChip), findsNWidgets(7));
+
+    await tester.tap(find.text('抖音').last);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(find.byType(ChoiceChip), findsNothing);
   });
 
   testWidgets('channel tab asks the user to sign in first', (tester) async {

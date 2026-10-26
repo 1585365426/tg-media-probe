@@ -77,28 +77,61 @@ void main() {
 
   group('duration buckets', () {
     test('boundaries are inclusive at the bottom, exclusive at the top', () {
+      // Six buckets, five internal cuts at 60 / 180 / 300 / 600 / 1200.
       const under = DurationFilter.underMinute;
       expect(under.accepts(0), isTrue);
       expect(under.accepts(59), isTrue);
       expect(under.accepts(60), isFalse);
 
-      const mid = DurationFilter.oneToFiveMinutes;
-      expect(mid.accepts(59), isFalse);
-      expect(mid.accepts(60), isTrue);
-      expect(mid.accepts(299), isTrue);
-      expect(mid.accepts(300), isFalse);
+      const oneThree = DurationFilter.oneToThreeMinutes;
+      expect(oneThree.accepts(59), isFalse);
+      expect(oneThree.accepts(60), isTrue);
+      expect(oneThree.accepts(179), isTrue);
+      expect(oneThree.accepts(180), isFalse);
 
-      const over = DurationFilter.overFiveMinutes;
-      expect(over.accepts(299), isFalse);
-      expect(over.accepts(300), isTrue);
+      const threeFive = DurationFilter.threeToFiveMinutes;
+      expect(threeFive.accepts(179), isFalse);
+      expect(threeFive.accepts(180), isTrue);
+      expect(threeFive.accepts(299), isTrue);
+      expect(threeFive.accepts(300), isFalse);
+
+      const fiveTen = DurationFilter.fiveToTenMinutes;
+      expect(fiveTen.accepts(299), isFalse);
+      expect(fiveTen.accepts(300), isTrue);
+      expect(fiveTen.accepts(599), isTrue);
+      expect(fiveTen.accepts(600), isFalse);
+
+      const tenTwenty = DurationFilter.tenToTwentyMinutes;
+      expect(tenTwenty.accepts(599), isFalse);
+      expect(tenTwenty.accepts(600), isTrue);
+      expect(tenTwenty.accepts(1199), isTrue);
+      expect(tenTwenty.accepts(1200), isFalse);
+
+      const over = DurationFilter.overTwentyMinutes;
+      expect(over.accepts(1199), isFalse);
+      expect(over.accepts(1200), isTrue);
       expect(over.accepts(9999), isTrue);
+    });
+
+    test('chip labels stay short enough for the wrapped row', () {
+      for (final filter in DurationFilter.values) {
+        expect(filter.chipLabel, isNotEmpty);
+        expect(
+          filter.chipLabel.length,
+          lessThanOrEqualTo(7),
+          reason: '${filter.name} chip label is too wide',
+        );
+      }
+      expect(DurationFilter.all.chipLabel, '全部');
+      expect(DurationFilter.overTwentyMinutes.chipLabel, '>20 分');
     });
 
     test('an unknown duration only passes the "all" bucket', () {
       expect(DurationFilter.all.accepts(null), isTrue);
-      expect(DurationFilter.underMinute.accepts(null), isFalse);
-      expect(DurationFilter.oneToFiveMinutes.accepts(null), isFalse);
-      expect(DurationFilter.overFiveMinutes.accepts(null), isFalse);
+      for (final filter in DurationFilter.values) {
+        if (filter == DurationFilter.all) continue;
+        expect(filter.accepts(null), isFalse, reason: filter.name);
+      }
     });
 
     test('every record lands in exactly one bucket', () {
@@ -193,18 +226,20 @@ void main() {
         const VideoQuery(
           text: '18号',
           categoryChatId: 1,
-          duration: DurationFilter.oneToFiveMinutes,
+          duration: DurationFilter.oneToThreeMinutes,
         ),
         titleOf: titleOf,
       );
-      // Only message 2: chat 1, 120 s, and its channel title contains 18号.
+      // Only message 2: chat 1, 120 s (1-3 min bucket), and its channel title
+      // contains 18号.
       expect(hits.map((r) => r.messageId), <int>[2]);
     });
 
     test('a duration filter excludes rows with unknown length', () {
       final hits = VideoQueryEngine.apply(
         records,
-        const VideoQuery(categoryChatId: 2, duration: DurationFilter.overFiveMinutes),
+        const VideoQuery(
+            categoryChatId: 2, duration: DurationFilter.fiveToTenMinutes),
         titleOf: titleOf,
       );
       expect(hits.map((r) => r.messageId), <int>[3]);

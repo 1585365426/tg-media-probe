@@ -6,13 +6,27 @@ import 'storage_layout.dart';
 
 /// What a temp file is, derived from the sub-directory it lives in. Nothing is
 /// guessed from the file name.
-enum CacheKind { thumbnail, playbackTemp, partialDownload, unknownFromDirectory }
+///
+/// [tdlibBlobPool] is the one that actually holds bytes. The other three are
+/// directories this app creates and then never writes to — thumbnails are not
+/// implemented, the player opens files in the download zone rather than copies,
+/// and partial downloads are written next to their target by [DownloadMover].
+/// Scanning only those three is why the settings screen reported 0 B forever
+/// while the sandbox held every video that had ever been played.
+enum CacheKind {
+  thumbnail,
+  playbackTemp,
+  partialDownload,
+  tdlibBlobPool,
+  unknownFromDirectory,
+}
 
 extension CacheKindLabel on CacheKind {
   String get label => switch (this) {
         CacheKind.thumbnail => '缩略图缓存',
         CacheKind.playbackTemp => '临时播放文件',
         CacheKind.partialDownload => '未完成的分片',
+        CacheKind.tdlibBlobPool => 'TDLib 文件池',
         CacheKind.unknownFromDirectory => '无法归类',
       };
 }
@@ -170,6 +184,7 @@ class CacheManager {
       CacheKind.thumbnail,
       CacheKind.playbackTemp,
       CacheKind.partialDownload,
+      CacheKind.tdlibBlobPool,
     ]) {
       final dir = _dirFor(kind);
       final files = await ops.listFilesRecursive(dir);
@@ -243,6 +258,7 @@ class CacheManager {
     await ops.createDirectory(layout.thumbnailDir);
     await ops.createDirectory(layout.playbackTempDir);
     await ops.createDirectory(layout.partialDownloadDir);
+    await ops.createDirectory(layout.tdlibFilesDir);
 
     final protectedAfter = await _protectedSnapshot();
     final integrityAfter = await integrityProbe?.call();
@@ -302,6 +318,10 @@ class CacheManager {
         CacheKind.thumbnail => layout.thumbnailDir,
         CacheKind.playbackTemp => layout.playbackTempDir,
         CacheKind.partialDownload => layout.partialDownloadDir,
+        // Inside the temp zone, so assertDeletableByCacheClear still gates every
+        // individual delete. The TDLib *database* lives in the auth zone and is
+        // never reachable from here.
+        CacheKind.tdlibBlobPool => layout.tdlibFilesDir,
         CacheKind.unknownFromDirectory => layout.tempRoot,
       };
 

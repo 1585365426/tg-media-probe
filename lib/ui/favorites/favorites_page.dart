@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../../app/app_model.dart';
 import '../../app/app_services.dart';
 import '../../data/media_record.dart';
+import '../../platform/orientation_controller.dart';
 import '../video/single_video_page.dart';
 
 /// Favourites list.
@@ -27,10 +28,23 @@ class FavoritesPage extends StatefulWidget {
 class _FavoritesPageState extends State<FavoritesPage> {
   List<MediaRecord> _items = const <MediaRecord>[];
 
+  /// This is a portrait list. Locking it explicitly means it stays upright even
+  /// if some earlier page left the native side in landscape — and, unlike
+  /// relying on that page's own reset, it also covers the device being held
+  /// sideways when the list is opened.
+  final OrientationBridge _orientation = OrientationBridge();
+
   @override
   void initState() {
     super.initState();
+    _orientation.setMode(ScreenOrientationMode.lockedPortrait);
     _reload();
+  }
+
+  @override
+  void dispose() {
+    _orientation.resetToSystem();
+    super.dispose();
   }
 
   void _reload() {

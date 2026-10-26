@@ -97,6 +97,46 @@ void main() {
     });
   });
 
+  group('tdlib blob pool', () {
+    // The settings screen used to read 0 B forever: every video the app had
+    // ever played sat in `Library/Caches/tgmedia/tdlib_files`, which the scan
+    // did not walk. These two tests pin that directory down.
+    setUp(() async {
+      await sandbox.ops.createDirectory(sandbox.layout.tdlibFilesDir);
+      await sandbox.writeBytes(
+          p.join(sandbox.layout.tdlibFilesDir, 'aa', 'bb', 'blob_1'), 4096);
+      await sandbox.writeBytes(
+          p.join(sandbox.layout.tdlibFilesDir, 'blob_2'), 1024);
+    });
+
+    test('is scanned, so the total is not a permanent zero', () async {
+      final scan = await manager().scan();
+      expect(scan.bytesOf(CacheKind.tdlibBlobPool), 5120);
+      expect(scan.totalBytes, 350 + 5120);
+      expect(scan.fileCount, 5);
+    });
+
+    test('is cleared, and the TDLib database in the auth zone survives',
+        () async {
+      final dbFile = p.join(sandbox.layout.tdlibDatabaseDir, 'td.binlog');
+      await sandbox.ops.createDirectory(sandbox.layout.tdlibDatabaseDir);
+      await sandbox.write(dbFile, 'binlog');
+
+      final report = await manager().clear(userConfirmed: true);
+      expect(report.freedByKind[CacheKind.tdlibBlobPool], 5120);
+      expect(
+        await sandbox.exists(p.join(sandbox.layout.tdlibFilesDir, 'blob_2')),
+        isFalse,
+      );
+      // The log-in session and the message mirror must not be touched.
+      expect(await sandbox.exists(dbFile), isTrue);
+      expect(await sandbox.exists(sandbox.authFile('session.json')), isTrue);
+      expect(await sandbox.exists(sandbox.downloadFile('keep.mp4')), isTrue);
+      // The directory is recreated empty so the next run has the same layout.
+      expect(await sandbox.ops.exists(sandbox.layout.tdlibFilesDir), isTrue);
+    });
+  });
+
   group('clear', () {
     test('refuses to run without explicit confirmation', () async {
       await expectLater(

@@ -27,48 +27,86 @@ extension AppThemeModeWire on AppThemeMode {
       };
 }
 
-/// Duration buckets used by the video filter bar.
+/// Duration buckets offered by the video tab.
 ///
-/// Boundaries are inclusive on the lower edge and exclusive on the upper one
-/// (`1-5 分钟` = 60 s ≤ d < 300 s) so every duration lands in exactly one
-/// bucket and nothing is silently dropped by a rounding gap.
-enum DurationFilter { all, underMinute, oneToFiveMinutes, overFiveMinutes }
+/// Six real buckets plus [all]. Boundaries are half-open `[from, to)` so a
+/// 60-second clip belongs to exactly one bucket and nothing falls between two.
+enum DurationFilter {
+  all,
+  underMinute,
+  oneToThreeMinutes,
+  threeToFiveMinutes,
+  fiveToTenMinutes,
+  tenToTwentyMinutes,
+  overTwentyMinutes,
+}
 
 extension DurationFilterRule on DurationFilter {
   String get wire => switch (this) {
         DurationFilter.all => 'all',
         DurationFilter.underMinute => 'lt60',
-        DurationFilter.oneToFiveMinutes => '60to299',
-        DurationFilter.overFiveMinutes => 'gte300',
+        DurationFilter.oneToThreeMinutes => '60to179',
+        DurationFilter.threeToFiveMinutes => '180to299',
+        DurationFilter.fiveToTenMinutes => '300to599',
+        DurationFilter.tenToTwentyMinutes => '600to1199',
+        DurationFilter.overTwentyMinutes => 'gte1200',
       };
 
   String get label => switch (this) {
         DurationFilter.all => '全部时长',
         DurationFilter.underMinute => '1 分钟以内',
-        DurationFilter.oneToFiveMinutes => '1-5 分钟',
-        DurationFilter.overFiveMinutes => '5 分钟以上',
+        DurationFilter.oneToThreeMinutes => '1-3 分钟',
+        DurationFilter.threeToFiveMinutes => '3-5 分钟',
+        DurationFilter.fiveToTenMinutes => '5-10 分钟',
+        DurationFilter.tenToTwentyMinutes => '10-20 分钟',
+        DurationFilter.overTwentyMinutes => '20 分钟以上',
+      };
+
+  /// Shorter label for the chip row, where six buckets and the channel row have
+  /// to share 375 pt.
+  String get chipLabel => switch (this) {
+        DurationFilter.all => '全部',
+        DurationFilter.underMinute => '<1 分',
+        DurationFilter.oneToThreeMinutes => '1-3 分',
+        DurationFilter.threeToFiveMinutes => '3-5 分',
+        DurationFilter.fiveToTenMinutes => '5-10 分',
+        DurationFilter.tenToTwentyMinutes => '10-20 分',
+        DurationFilter.overTwentyMinutes => '>20 分',
       };
 
   /// Null duration (TDLib reported none) only passes [all]: an unknown length
   /// cannot be proven to be inside a bucket, and quietly including it would
   /// make the filter lie.
   bool accepts(int? seconds) {
-    switch (this) {
-      case DurationFilter.all:
-        return true;
-      case DurationFilter.underMinute:
-        return seconds != null && seconds < 60;
-      case DurationFilter.oneToFiveMinutes:
-        return seconds != null && seconds >= 60 && seconds < 300;
-      case DurationFilter.overFiveMinutes:
-        return seconds != null && seconds >= 300;
-    }
+    if (this == DurationFilter.all) return true;
+    if (seconds == null) return false;
+    final bounds = _bounds;
+    return seconds >= bounds.$1 && seconds < bounds.$2;
   }
+
+  /// `[from, to)` in seconds. [overTwentyMinutes] has no upper bound, expressed
+  /// as a very large int rather than infinity so the type stays comparable.
+  (int, int) get _bounds => switch (this) {
+        DurationFilter.all => (0, 1 << 31),
+        DurationFilter.underMinute => (0, 60),
+        DurationFilter.oneToThreeMinutes => (60, 180),
+        DurationFilter.threeToFiveMinutes => (180, 300),
+        DurationFilter.fiveToTenMinutes => (300, 600),
+        DurationFilter.tenToTwentyMinutes => (600, 1200),
+        DurationFilter.overTwentyMinutes => (1200, 1 << 31),
+      };
 
   static DurationFilter fromWire(String? value) => switch (value) {
         'lt60' => DurationFilter.underMinute,
-        '60to299' => DurationFilter.oneToFiveMinutes,
-        'gte300' => DurationFilter.overFiveMinutes,
+        '60to179' => DurationFilter.oneToThreeMinutes,
+        '180to299' => DurationFilter.threeToFiveMinutes,
+        '300to599' => DurationFilter.fiveToTenMinutes,
+        '600to1199' => DurationFilter.tenToTwentyMinutes,
+        'gte1200' => DurationFilter.overTwentyMinutes,
+        // An older build stored a single 1-5 minute bucket. It spans two of the
+        // new buckets, so picking either would silently hide half of what the
+        // user had selected; resetting to 全部 is the only honest mapping.
+        '60to299' => DurationFilter.all,
         _ => DurationFilter.all,
       };
 }

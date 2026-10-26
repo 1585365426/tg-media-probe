@@ -41,14 +41,14 @@ void main() {
       await store.load();
       await store.setTheme(AppThemeMode.dark);
       await store.setCategory(42);
-      await store.setDurationFilter(DurationFilter.overFiveMinutes);
+      await store.setDurationFilter(DurationFilter.tenToTwentyMinutes);
 
       final reopened =
           AppSettingsStore(directory: box.layout.settingsDir, ops: box.ops);
       final loaded = await reopened.load();
       expect(loaded.themeMode, AppThemeMode.dark);
       expect(loaded.categoryChatId, 42);
-      expect(loaded.durationFilter, DurationFilter.overFiveMinutes);
+      expect(loaded.durationFilter, DurationFilter.tenToTwentyMinutes);
     });
 
     test('clearing the category persists as null', () async {
