@@ -15,6 +15,7 @@
 library;
 
 import 'dart:async';
+import 'dart:io';
 
 import '../td/td_client.dart';
 import '../td/td_models.dart';
@@ -120,9 +121,22 @@ class VideoSourceResolver {
     required this.api,
     this.fetchTimeout = const Duration(seconds: 15),
     this.progressInterval = const Duration(milliseconds: 120),
-  });
+    Future<bool> Function(String path)? fileExists,
+  }) : _fileExists = fileExists ?? _defaultFileExists;
 
   final FileTransferApi api;
+
+  /// Checks that a path TDLib reports as "downloaded" still exists.
+  ///
+  /// TDLib's file database remembers a completed file even after the bytes are
+  /// gone — the OS purges Library/Caches under pressure, and anything holding
+  /// the pool (a cleaner, a jailbreak tool, a future TDLib LRU pass) can drop
+  /// the file while the record still says 100%. Without this check the app
+  /// hands AVPlayer a path that no longer exists and the user sees a decode
+  /// error instead of "已被清理".
+  final Future<bool> Function(String path) _fileExists;
+
+  static Future<bool> _defaultFileExists(String path) => File(path).exists();
 
   /// §4.5: after 15 s the page must show "加载超时" with a retry, not spin.
   final Duration fetchTimeout;
@@ -144,7 +158,10 @@ class VideoSourceResolver {
     onProgress?.call(const VideoSourceUpdate(stage: SourceStage.probing));
 
     final existing = await api.stat(fileId);
-    if (existing != null && existing.isCompleted && existing.path.isNotEmpty) {
+    if (existing != null &&
+        existing.isCompleted &&
+        existing.path.isNotEmpty &&
+        await _fileExists(existing.path)) {
       onProgress?.call(VideoSourceUpdate(
         stage: SourceStage.ready,
         downloadedBytes: existing.size,
@@ -160,7 +177,10 @@ class VideoSourceResolver {
 
     final subscription = api.updates().listen((state) {
       if (state.id != fileId) return;
-      if (state.isCompleted && state.path.isNotEmpty) {
+      if (state.isCompleted) {
+        // Complete even when the path is empty: TDLib can report a finished
+        // transfer with no local path, and waiting for a later update that
+        // never comes would turn a clear error into a 15-second spinner.
         if (!completion.isCompleted) completion.complete(state);
         return;
       }
@@ -184,6 +204,17 @@ class VideoSourceResolver {
       final state = await completion.future.timeout(fetchTimeout);
       if (_cancelled.contains(fileId)) {
         throw VideoSourceException('已取消');
+      }
+      if (state.path.isEmpty) {
+        // A "completed" file with no path means the player has nothing to
+        // open. Fail here with the real reason instead of handing an empty
+        // string to AVPlayer, which reports it as an unknown format error.
+        throw VideoSourceException('TDLib 报告下载完成但没有返回本地路径');
+      }
+      if (!await _fileExists(state.path)) {
+        // TDLib says done, the filesystem disagrees. Say so instead of handing
+        // a dead path to AVPlayer, which would report it as a format error.
+        throw VideoSourceException('本地文件已不存在（可能被系统或清理工具删除）');
       }
       onProgress?.call(VideoSourceUpdate(
         stage: SourceStage.ready,

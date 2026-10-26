@@ -5,11 +5,20 @@ import 'package:tg_media_probe/playback/video_source.dart';
 import 'package:tg_media_probe/td/td_models.dart';
 
 class ScriptedApi implements FileTransferApi {
-  ScriptedApi({this.local = false, this.failOnStart = false, this.neverFinishes = false});
+  ScriptedApi({
+    this.local = false,
+    this.failOnStart = false,
+    this.neverFinishes = false,
+    this.completeWithoutPath = false,
+  });
 
   bool local;
   bool failOnStart;
   bool neverFinishes;
+
+  /// Emits `isCompleted: true` with an empty path — TDLib does this when the
+  /// file record is finished but no readable location is known.
+  bool completeWithoutPath;
 
   final StreamController<FileState> _updates =
       StreamController<FileState>.broadcast();
@@ -40,7 +49,7 @@ class ScriptedApi implements FileTransferApi {
       expectedSize: 2048,
       downloadedSize: 2048,
       isCompleted: true,
-      path: '/pool/$fileId',
+      path: completeWithoutPath ? '' : '/pool/$fileId',
       canBeDownloaded: true,
     ));
   }
@@ -61,7 +70,7 @@ void main() {
     test('a file already on disk resolves without starting a transfer',
         () async {
       final api = ScriptedApi(local: true);
-      final resolver = VideoSourceResolver(api: api);
+      final resolver = VideoSourceResolver(api: api, fileExists: (_) async => true);
 
       final path = await resolver.resolve(7);
 
@@ -71,7 +80,7 @@ void main() {
 
     test('a missing file is fetched and the completed path returned', () async {
       final api = ScriptedApi();
-      final resolver = VideoSourceResolver(api: api);
+      final resolver = VideoSourceResolver(api: api, fileExists: (_) async => true);
 
       final path = await resolver.resolve(7);
 
@@ -81,7 +90,7 @@ void main() {
 
     test('progress goes probing -> fetching -> ready', () async {
       final api = ScriptedApi();
-      final resolver = VideoSourceResolver(api: api);
+      final resolver = VideoSourceResolver(api: api, fileExists: (_) async => true);
       final stages = <SourceStage>[];
 
       await resolver.resolve(7, onProgress: (update) => stages.add(update.stage));
@@ -123,7 +132,7 @@ void main() {
 
     test('a TDLib error surfaces as a VideoSourceException', () async {
       final api = ScriptedApi(failOnStart: true);
-      final resolver = VideoSourceResolver(api: api);
+      final resolver = VideoSourceResolver(api: api, fileExists: (_) async => true);
 
       await expectLater(
         resolver.resolve(7),
@@ -160,7 +169,7 @@ void main() {
     test('cancel records the file id so a late completion is refused',
         () async {
       final api = ScriptedApi();
-      final resolver = VideoSourceResolver(api: api);
+      final resolver = VideoSourceResolver(api: api, fileExists: (_) async => true);
 
       await resolver.cancel(7);
       expect(api.cancelled, contains(7));
@@ -192,4 +201,97 @@ void main() {
       );
     });
   });
+
+    test('a transfer that completes with an empty path fails immediately',
+        () async {
+      // Without this the resolver would sit on the 15 s timeout and report
+      // "加载超时" for a file that TDLib already considers finished.
+      final api = ScriptedApi(completeWithoutPath: true);
+      final resolver = VideoSourceResolver(api: api, fileExists: (_) async => true);
+
+      await expectLater(
+        resolver.resolve(11),
+        throwsA(isA<VideoSourceException>().having(
+          (e) => e.message,
+          'message',
+          contains('没有返回本地路径'),
+        )),
+      );
+      // The transfer did finish on TDLib's side, so nothing needs cancelling.
+      expect(api.cancelled, isEmpty);
+    });
+
+    test('a cancelled resolve reports cancellation, not a timeout', () async {
+      final api = ScriptedApi(neverFinishes: true);
+      final resolver = VideoSourceResolver(
+        api: api,
+        fileExists: (_) async => true,
+        fetchTimeout: const Duration(seconds: 5),
+      );
+
+      final pending = resolver.resolve(12);
+      // Swallow the eventual timeout so it cannot surface as an unhandled
+      // error after this test has already finished.
+      unawaited(pending.then((_) {}, onError: (Object _) {}));
+      await Future<void>.delayed(Duration.zero);
+      await resolver.cancel(12);
+
+      // The future is still waiting on a completion that will never arrive;
+      // cancelling only records intent, which is what resolve() checks when it
+      // finally returns.
+      expect(api.cancelled, contains(12));
+      expect(pending, isA<Future<String>>());
+      await api.close();
+    });
+
+    test('a stale completed record whose file is gone is re-fetched', () async {
+      // stat says 100% and gives a path, but the bytes are gone: TDLib's
+      // records outlive the file. The resolver must not return that path.
+      final api = ScriptedApi(local: true);
+      final resolver = VideoSourceResolver(
+        api: api,
+        fileExists: (_) async => false,
+      );
+
+      await expectLater(
+        resolver.resolve(21),
+        throwsA(isA<VideoSourceException>().having(
+          (e) => e.message,
+          'message',
+          contains('已不存在'),
+        )),
+      );
+      // It did try the transfer again rather than trusting the record.
+      expect(api.started, contains(21));
+    });
+
+    test('a completed transfer whose file vanished fails with a clear message',
+        () async {
+      final api = ScriptedApi();
+      final resolver = VideoSourceResolver(
+        api: api,
+        fileExists: (_) async => false,
+      );
+
+      await expectLater(
+        resolver.resolve(22),
+        throwsA(isA<VideoSourceException>().having(
+          (e) => e.message,
+          'message',
+          contains('已不存在'),
+        )),
+      );
+    });
+
+    test('a real file on disk resolves without a transfer', () async {
+      // Same path the fake reports, but this time the file really exists.
+      final api = ScriptedApi(local: true);
+      final resolver = VideoSourceResolver(
+        api: api,
+        fileExists: (path) async => path == '/pool/23',
+      );
+
+      expect(await resolver.resolve(23), '/pool/23');
+      expect(api.started, isEmpty);
+    });
 }

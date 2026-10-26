@@ -57,6 +57,15 @@ class TdClient {
     return client;
   }
 
+  /// Builds a client over fake bindings, without starting the receive pump.
+  ///
+  /// Exists so the read-only boundary can be tested behaviourally: a rejected
+  /// method must leave the fake with an empty send log, which is a stronger
+  /// claim than "the guard call appears earlier in the file".
+  @visibleForTesting
+  static TdClient withBindings(TdJsonBindings bindings, {int clientId = 1}) =>
+      TdClient._(bindings, clientId);
+
   void _start() {
     // 20 ms polling keeps the UI isolate responsive; td_receive(0.0) is
     // non-blocking, so the loop never stalls a frame for long.
@@ -102,15 +111,15 @@ class TdClient {
     if (_disposed) {
       throw StateError('TdClient already disposed');
     }
-    // Single choke point for the read-only contract: nothing reaches TDLib
-    // without passing this check, so a cloud write cannot be smuggled in by a
-    // new caller that forgets the rule.
+    // Checked here first so a rejected call has no side effects at all (no
+    // @extra consumed, no completer registered); _send re-checks as the last
+    // thing before the bytes leave the process.
     TdReadOnlyGuard.assertAllowed(payload['@type'], source: 'TdClient.request');
     final extra = _nextExtra++;
     final request = <String, Object?>{...payload, '@extra': extra};
     final completer = Completer<Map<String, Object?>>();
     _pending[extra] = completer;
-    _bindings.sendJson(_clientId, jsonEncode(request));
+    _send(request);
     return completer.future.timeout(timeout, onTimeout: () {
       _pending.remove(extra);
       throw TimeoutException(
@@ -119,12 +128,27 @@ class TdClient {
     });
   }
 
+  /// The one and only place that hands bytes to tdjson.
+  ///
+  /// The guard lives inside this function rather than at the call sites, so
+  /// even the `close` sent from [dispose] — which deliberately skips
+  /// [request] because the client is already marked disposed — cannot slip
+  /// past it. test/readonly_boundary_test.dart asserts this file contains
+  /// exactly one `sendJson` call.
+  void _send(Map<String, Object?> request) {
+    TdReadOnlyGuard.assertAllowed(request['@type'], source: 'TdClient._send');
+    _bindings.sendJson(_clientId, jsonEncode(request));
+  }
+
   Future<void> dispose() async {
     if (_disposed) return;
     _disposed = true;
     _pumpTimer?.cancel();
     try {
-      _bindings.sendJson(_clientId, jsonEncode(<String, Object?>{'@type': 'close'}));
+      // Routed through _send, so even shutdown passes the guard: `close` is on
+      // the allowlist, and a future edit that sends something else here would
+      // be rejected instead of silently escaping.
+      _send(<String, Object?>{'@type': 'close'});
     } catch (_) {
       // Closing a dead client is not an error worth surfacing.
     }

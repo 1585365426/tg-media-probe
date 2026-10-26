@@ -2,6 +2,7 @@ import 'dart:ffi';
 import 'dart:io';
 
 import 'package:ffi/ffi.dart';
+import 'package:flutter/foundation.dart' show visibleForTesting;
 
 /// Low level bindings to TDLib's JSON client interface (tdjson).
 ///
@@ -10,6 +11,13 @@ import 'package:ffi/ffi.dart';
 ///   void td_send(int client_id, const char *request)
 ///   const char *td_receive(double timeout)
 ///   const char *td_execute(const char *request)
+///
+/// [executeJson] is the one method here that does **not** pass TdClient's
+/// read-only guard: td_execute runs a method synchronously and skips every
+/// check the async path performs. It is kept for the load test that asks for
+/// `getOption` version, and test/readonly_boundary_test.dart asserts no
+/// production file outside td_client.dart may call it. Anything that needs it
+/// for a cloud-modifying method has to go through TdReadOnlyGuard first.
 class TdJsonBindings {
   TdJsonBindings._(this.libraryPath, this._createClientId, this._send,
       this._receive, this._execute);
@@ -111,6 +119,9 @@ class TdJsonBindings {
   }
 
   /// Synchronous request; only valid for methods marked callable synchronously.
+  ///
+  /// Unguarded by design — see the library comment above. Callers in `lib/`
+  /// are restricted to td_client.dart by a source scan test.
   String? executeJson(String json) {
     final native = json.toNativeUtf8();
     try {
@@ -121,4 +132,30 @@ class TdJsonBindings {
       malloc.free(native);
     }
   }
+}
+
+/// Builds a bindings object backed by Dart closures.
+///
+/// Only for tests: the read-only boundary has to be provable without a native
+/// TDLib binary, otherwise the single most important rule in this app is only
+/// checked by grepping source text.
+@visibleForTesting
+TdJsonBindings testingBindings({
+  int Function()? createClientId,
+  void Function(int clientId, String json)? onSend,
+  String? Function()? onReceive,
+}) {
+  return TdJsonBindings._(
+    '@testing',
+    createClientId ?? () => 1,
+    (clientId, request) => onSend?.call(clientId, request.toDartString()),
+    (timeout) {
+      final text = onReceive?.call();
+      if (text == null) return nullptr;
+      // Test-only allocation: the fake receive buffer is intentionally not
+      // freed, because TDLib's real buffer is also owned by the library.
+      return text.toNativeUtf8();
+    },
+    (request) => nullptr,
+  );
 }

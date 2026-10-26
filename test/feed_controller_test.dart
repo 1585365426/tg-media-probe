@@ -61,6 +61,11 @@ class PlayerLedger {
   int disposed = 0;
   int plays = 0;
   int pauses = 0;
+
+  /// Ordered trace of what happened, so a test can prove *ordering* and not
+  /// only the final counts. "created == disposed + 1" says nothing about
+  /// whether the old player was released before the new one started.
+  final List<String> events = <String>[];
   final List<String> loaded = <String>[];
   final List<double> volumes = <double>[];
   final List<Duration> seeks = <Duration>[];
@@ -96,6 +101,7 @@ class FakePlayer implements PlayerHandle, PlayerProgress, PlayerVolume, PlayerSe
     if (failOnLoad) throw StateError('decode failed');
     _loaded = true;
     ledger.loaded.add(path);
+    ledger.events.add('load $path');
   }
 
   @override
@@ -110,6 +116,7 @@ class FakePlayer implements PlayerHandle, PlayerProgress, PlayerVolume, PlayerSe
 
   @override
   Future<void> pause() async {
+    ledger.events.add('pause $path');
     if (_playing) {
       _playing = false;
       ledger.pauses++;
@@ -122,6 +129,7 @@ class FakePlayer implements PlayerHandle, PlayerProgress, PlayerVolume, PlayerSe
     await pause();
     _disposed = true;
     ledger.disposed++;
+    ledger.events.add('dispose $path');
   }
 
   @override
@@ -142,6 +150,7 @@ class FakeTracker {
 
   PlayerHandle create(String path) {
     ledger.created++;
+    ledger.events.add('create $path');
     return FakePlayer(path, ledger, failOnLoad: failOnLoad);
   }
 }
@@ -233,7 +242,13 @@ class Rig {
     controller = FeedController(
       source: source,
       player: SinglePlayerController(factory: _Factory(tracker)),
-      sources: VideoSourceResolver(api: api, fetchTimeout: timeout),
+      sources: VideoSourceResolver(
+        api: api,
+        fetchTimeout: timeout,
+        // The fake pool paths never exist on disk; the real resolver now
+        // verifies existence, so the rig answers for its own pool.
+        fileExists: (_) async => true,
+      ),
       chatTitles: const <int, String>{1: '测试频道'},
       defaultMuted: muted,
       preloadAdjacent: preload,
@@ -658,6 +673,87 @@ void main() {
       // user in landscape.
       expect(landscape.showControls, isTrue);
       expect(landscape.showTopBar, isTrue);
+    });
+  });
+
+  group('player lifecycle while pages change', () {
+    test('the old player is paused and disposed before the new one is created',
+        () async {
+      final rig = Rig(pages: <List<MediaRecord>>[
+        <MediaRecord>[video(1), video(2)],
+      ]);
+      await rig.controller.load();
+      await Future<void>.delayed(Duration.zero);
+      rig.ledger.events.clear();
+
+      await rig.controller.goNext();
+      await Future<void>.delayed(Duration.zero);
+
+      final events = rig.ledger.events;
+      final disposeIndex = events.indexWhere((e) => e.startsWith('dispose '));
+      final createIndex =
+          events.indexWhere((e) => e.startsWith('create '), disposeIndex);
+      expect(disposeIndex, greaterThanOrEqualTo(0),
+          reason: 'the old player must be released: $events');
+      expect(createIndex, greaterThan(disposeIndex),
+          reason: 'a new player must not exist while the old one is alive: '
+              '$events');
+      expect(rig.ledger.live, 1);
+
+      rig.controller.shutdown();
+      await rig.api.dispose();
+    });
+
+    test('a resolve superseded mid-flight leaves no orphan player', () async {
+      // The transfer for item 1 never completes; the user swipes to item 3
+      // while it is pending. The abandoned item must not keep a player.
+      final rig = Rig(
+        pages: <List<MediaRecord>>[
+          <MediaRecord>[video(1), video(2), video(3)],
+        ],
+        autoComplete: false,
+      );
+      rig.api.alreadyLocal.addAll(<int>[1001, 1002, 1003]);
+
+      await rig.controller.load();
+      await Future<void>.delayed(Duration.zero);
+      final afterFirst = rig.ledger.created;
+
+      await rig.controller.goNext();
+      await rig.controller.goNext();
+      await Future<void>.delayed(Duration.zero);
+
+      expect(rig.ledger.created, greaterThan(afterFirst));
+      expect(rig.ledger.live, 1,
+          reason: 'exactly one player may survive the two switches');
+
+      rig.controller.shutdown();
+      await rig.api.dispose();
+    });
+
+    test('five fast switches end with one live player and no double create',
+        () async {
+      final rig = Rig(pages: <List<MediaRecord>>[
+        <MediaRecord>[video(1), video(2), video(3), video(4), video(5)],
+      ]);
+      rig.api.alreadyLocal.addAll(<int>[1001, 1002, 1003, 1004, 1005]);
+      await rig.controller.load();
+      await Future<void>.delayed(Duration.zero);
+
+      for (var i = 0; i < 5; i++) {
+        await rig.controller.goNext();
+        await Future<void>.delayed(Duration.zero);
+      }
+
+      expect(rig.ledger.live, 1);
+      // Each create must be preceded by a dispose except for the very first.
+      final creates = rig.ledger.events.where((e) => e.startsWith('create ')).length;
+      final disposes =
+          rig.ledger.events.where((e) => e.startsWith('dispose ')).length;
+      expect(creates - disposes, 1);
+
+      rig.controller.shutdown();
+      await rig.api.dispose();
     });
   });
 }
