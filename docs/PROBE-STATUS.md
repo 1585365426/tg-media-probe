@@ -119,3 +119,23 @@ run [40198573231](https://github.com/1585365426/tg-media-probe/actions/runs/4019
 v1（第 1–8 步）保存在 `main` + 标签 `v1-step8-archive`，未删除。
 
 详见 `docs/STEP3-REBUILD.md`。
+
+---
+
+## 第 3 步重做：安全与稳定性（`0d236b1` + `6b53aa8`）
+
+| 项 | 值 |
+|---|---|
+| 测试 | 399 passed / 1 skipped（基线 204 → 新增 195） |
+| 静态分析 | No issues found |
+| CI | run 40304327510 success（第一次 40303635700 挂在 CocoaPods CDN 不可达，已加重试） |
+| IPA | `214addc309e387ac36e65993b73e569d8cb963c0350604c3da156473daf459b2`（19,591,201 B） |
+| 桌面 | `TGMediaProbe-step3-security.ipa` |
+| 核验 | arm64 / minos 15.2 / sdk 26.5 / 0 条 LC_CODE_SIGNATURE / `NSFaceIDUsageDescription` 在 / `LocalAuthentication` 已链接 |
+| 真机 | 未执行 |
+
+新增模块：`sha256.dart`、`passcode.dart`、`biometric.dart`、`lock_policy.dart`、`session_state.dart`、`cache_ownership.dart`、`latest_only.dart`。
+
+**注意**：应用锁与启动决策的代码在 `lib/` 内暂无调用方，release 构建会把它们摇掉。本次 IPA 看不出 Face ID，属预期。详见 `STEP3-SECURITY.md` §5.3。
+
+文档：`PRODUCT-SPEC.md`（产品规格 v2）、`DOWNLOAD-DEPENDENCY-MAP.md`（下载代码依赖与三步删除顺序）、`STEP3-SECURITY.md`（本轮报告）。

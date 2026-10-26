@@ -182,14 +182,56 @@ BiometricChannel (Swift)     LAContext.evaluatePolicy
 
 | 项 | 值 |
 |---|---|
-| 运行 | 40303635700 |
+| 运行 | 40304327510（成功） / 40303635700（失败，见下） |
 | 分支 | `rebuild-step3` |
-| 提交 | `0d236b1` |
-| 结果 | 见下方补充 |
+| 提交 | `6b53aa8` |
+| 结论 | success，步骤 1–21 全绿 |
+| CI 内测试 | `All tests passed!` `00:16 +399 ~1` |
+| IPA SHA256 | `214addc309e387ac36e65993b73e569d8cb963c0350604c3da156473daf459b2` |
+| IPA 大小 | 19,591,201 字节 |
+| 桌面路径 | `TGMediaProbe-step3-security.ipa` |
 
-构建包含：`analyze`、`unit tests`、TDLib xcframework 校验、`xcodebuild` 未签名构建、TDLib 符号检查、IPA 打包。
+### 5.1 第一次失败的原因（与代码无关）
 
-CI 结果与 IPA 指纹在本文件末尾补记（写入时运行尚未完成）。
+run 40303635700 在 `Pod install` 步骤失败：
+
+```
+[!] Couldn't determine repo type for URL: `https://cdn.cocoapods.org/`:
+    Failed to open TCP connection to cdn.cocoapods.org:443
+    (No route to host - connect(2) for "cdn.cocoapods.org" port 443)
+```
+
+`--repo-update` 要访问 CocoaPods CDN，runner 到该地址不通。`Analyze` 与 `Unit tests` 在它之前已经全部通过，说明失败与源码无关。
+
+修法：该步骤加三次重试（间隔 20 秒），三次都失败则退回 `pod install`（不带 `--repo-update`）。Podfile 锁定版本，索引过期不改变装什么；因为 CDN 抖动就让整条流水线失败，会把后面真正重要的步骤全部跳过。
+
+### 5.2 IPA 解包核验
+
+| 检查项 | 结果 |
+|---|---|
+| `CFBundleIdentifier` | `com.tgmedia.tgMediaProbe` |
+| `MinimumOSVersion` | `15.2` |
+| 架构 | thin `arm64` |
+| `LC_BUILD_VERSION` | platform 2 (iOS)，minos `15.2.0`，sdk `26.5.0` |
+| `LC_CODE_SIGNATURE` | 0 条 |
+| `_CodeSignature/` / `embedded.mobileprovision` | 均不存在 |
+| `NSFaceIDUsageDescription` | 存在，中文说明完整 |
+| `LocalAuthentication` / `LAContext` / `evaluatePolicy` | 均在 Runner 二进制内，Swift 侧编译进去了 |
+| TDLib 符号 | `td_create_client_id` / `td_send` / `td_receive` / `td_execute` 均在 |
+
+### 5.3 一个必须说明的事实：本轮新代码大部分被 release 构建摇掉了
+
+解包后发现，`cache_ownership` 与 `temp_zone_report` 的中文文案（`跳过未识别`、`未登记的缓存目录`、`临时缓存根目录下的散落文件`）都在 AOT 快照里，但 `面容 ID`、`应用解锁密码`、`等待两步验证密码` **不在**。
+
+原因不是构建出错，是 Flutter release 的 tree shaking：本轮新增的 `LockEvaluator`、`BiometricCapability`、`SessionBootPlanner`、`AppLockStore`、`LatestOnlySlot`，在 `lib/` 里**没有任何调用方**（`grep` 确认为 0 处）。没有被引用到的纯函数会被整段移除。缓存那部分之所以保留，是因为 `storage_panel.dart` 已经在用 `describeCacheReport`。
+
+这意味着：
+
+- **这个 IPA 装上后看不到 Face ID，也无法验证解锁流程。** 不是功能没写，是还没有 UI 入口。
+- 第 4 步接上设置页与解锁页之后，这些代码才会真正进入二进制。
+- 现在能验证的只有：编译通过、单元测试通过、原生通道链接进来了、缓存清理的新规则生效。
+
+把这条写在这里，是因为"构建成功"很容易被读成"功能可用"。它们不是一回事。
 
 ---
 
@@ -235,6 +277,8 @@ CI 结果与 IPA 指纹在本文件末尾补记（写入时运行尚未完成）
 | 下载功能代码移除 | 需先改播放路径，见 `DOWNLOAD-DEPENDENCY-MAP.md` |
 | 收藏功能移除 | **本分支无收藏代码**，无需移除 |
 | 时长筛选移除 | **本分支无筛选代码**，无需移除 |
+
+上表前三行不是"没做"，是"按范围不做"。它们的底层已经在 §6.1 里完成了，缺的是入口。装上本次 IPA 后看不到 Face ID 与解锁页，原因就是这一行 —— 详见 §5.3。
 
 ### 6.4 未验证（需要在 iPhone 11 Pro 上跑）
 
