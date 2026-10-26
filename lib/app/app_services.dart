@@ -5,6 +5,7 @@ import '../data/favorites_store.dart';
 import '../data/history_source.dart';
 import '../data/index_store.dart';
 import '../data/media_resolver.dart';
+import '../data/media_streamer.dart';
 import '../playback/playback_lifecycle.dart';
 import '../playback/player_slot.dart';
 import '../playback/video_player_handle.dart';
@@ -57,6 +58,7 @@ class AppServices {
   MediaResolver? _resolver;
   ChannelSyncEngine? _sync;
   HistorySource? _history;
+  MediaStreamer? _streamer;
 
   TdClient? get client => _client;
   bool get hasClient => _client != null;
@@ -66,6 +68,10 @@ class AppServices {
     if (value == null) throw StateError('TDLib 客户端尚未就绪');
     return value;
   }
+
+  /// Range-streaming bridge. Null until a client exists, which is exactly when
+  /// the video tab has nothing to play anyway.
+  MediaStreamer? get streamer => _streamer;
 
   ChannelSyncEngine get sync {
     final value = _sync;
@@ -79,11 +85,15 @@ class AppServices {
     _history = TdHistorySource(client);
     _resolver = MediaResolver(client: client, layout: layout, ops: ops);
     _sync = ChannelSyncEngine(source: _history!, store: index);
+    // The range server binds lazily on the first stream URL, so a logged-in
+    // session that never opens the video tab never opens a socket.
+    _streamer ??= MediaStreamer(client: client);
   }
 
   Future<void> dispose() async {
     binder.handlePageDispose();
     await player.releaseAll();
+    await _streamer?.dispose();
     await _client?.dispose();
     // Closing the store flushes nothing (journal appends are already on disk)
     // but stops late writes from a screen that is being torn down.

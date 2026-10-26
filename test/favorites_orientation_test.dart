@@ -27,7 +27,7 @@ class _NoopPlayerFactory implements PlayerFactory {
   const _NoopPlayerFactory();
 
   @override
-  PlayerHandle create(String path) =>
+  PlayerHandle create(String location, {bool network = false}) =>
       throw UnimplementedError('the favourites test never plays video');
 }
 

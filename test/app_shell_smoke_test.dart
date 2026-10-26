@@ -28,7 +28,8 @@ class _NoopPlayerFactory implements PlayerFactory {
   const _NoopPlayerFactory();
 
   @override
-  PlayerHandle create(String path) => throw UnimplementedError(
+  PlayerHandle create(String location, {bool network = false}) =>
+      throw UnimplementedError(
         'the shell test never activates a player',
       );
 }
@@ -197,10 +198,16 @@ void main() {
 
     expect(find.text('设置'), findsOneWidget);
     expect(find.text('我的收藏'), findsOneWidget);
-    expect(find.text('只读声明'), findsOneWidget);
     // The four-zone table renders before the async size probe resolves, so the
     // heading is the stable assertion here.
     expect(find.text('存储占用（四区隔离）'), findsOneWidget);
+
+    // Everything below the storage card is off-screen on a phone viewport and a
+    // ListView does not build it until it is scrolled near, so scroll first.
+    await tester.drag(find.byType(ListView), const Offset(0, -320));
+    await tester.pump();
+    expect(find.text('最近播放耗时'), findsOneWidget);
+    expect(find.text('只读声明'), findsOneWidget);
   });
 
   testWidgets('theme switch is applied without a restart', (tester) async {

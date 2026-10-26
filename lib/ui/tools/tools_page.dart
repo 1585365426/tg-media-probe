@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../../app/app_model.dart';
+import '../../playback/playback_timeline.dart';
 import '../../storage/storage_layout.dart';
 import '../favorites/favorites_page.dart';
 import '../probe_page.dart';
@@ -130,6 +131,43 @@ class _ToolsPageState extends State<ToolsPage> {
         const SizedBox(height: 12),
         Card(
           child: Padding(
+            padding: const EdgeInsets.fromLTRB(14, 12, 14, 14),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                Row(
+                  children: <Widget>[
+                    Icon(Icons.timer_outlined,
+                        size: 18, color: theme.colorScheme.primary),
+                    const SizedBox(width: 8),
+                    Text('最近播放耗时', style: theme.textTheme.titleSmall),
+                    const Spacer(),
+                    IconButton(
+                      onPressed: () {
+                        PlaybackTimelineLog.clear();
+                        setState(() {});
+                      },
+                      icon: const Icon(Icons.clear_all, size: 18),
+                      tooltip: '清空记录',
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 4),
+                ..._timelineRows(theme),
+                const SizedBox(height: 8),
+                Text(
+                  '每次点开视频记录一段：stream-url 是本地流地址发布耗时，'
+                  'player-load 是播放器就绪耗时，download 是整段下载耗时。'
+                  '走流式播放时没有 download 一段。',
+                  style: theme.textTheme.bodySmall,
+                ),
+              ],
+            ),
+          ),
+        ),
+        const SizedBox(height: 12),
+        Card(
+          child: Padding(
             padding: const EdgeInsets.all(14),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -147,6 +185,43 @@ class _ToolsPageState extends State<ToolsPage> {
         ),
       ],
     );
+  }
+
+  List<Widget> _timelineRows(ThemeData theme) {
+    final recent = PlaybackTimelineLog.recent;
+    if (recent.isEmpty) {
+      return <Widget>[
+        Padding(
+          padding: const EdgeInsets.symmetric(vertical: 10),
+          child: Text('还没有播放记录', style: theme.textTheme.bodySmall),
+        ),
+      ];
+    }
+    final outcomeLabel = <String, String>{
+      'stream': '流式播放',
+      'file': '本地文件',
+      'failed': '失败',
+      'pending': '未完成',
+    };
+    return <Widget>[
+      for (final timeline in recent.take(5))
+        Padding(
+          padding: const EdgeInsets.symmetric(vertical: 4),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: <Widget>[
+              Text(
+                '${timeline.recordKey} · ${outcomeLabel[timeline.outcome] ?? timeline.outcome}',
+                style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
+              ),
+              Text(
+                timeline.summary(),
+                style: theme.textTheme.bodySmall,
+              ),
+            ],
+          ),
+        ),
+    ];
   }
 
   List<Widget> _zoneRows(ThemeData theme) {

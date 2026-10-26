@@ -8,21 +8,32 @@ class VideoPlayerFactory implements PlayerFactory {
   const VideoPlayerFactory();
 
   @override
-  PlayerHandle create(String path) => VideoPlayerHandle(path: path);
+  PlayerHandle create(String location, {bool network = false}) =>
+      VideoPlayerHandle(path: location, network: network);
 }
 
 /// `video_player`-backed player.
+///
+/// Two sources are supported:
+/// * a local file, which is the promoted copy in the user download zone;
+/// * a network URL, which is the loopback range server fed by TDLib — that is
+///   what lets playback start on the first megabyte instead of the last.
 ///
 /// [disposePlayer] is the only place a controller is torn down, and it does all
 /// four things the task book asks for: pause, detach the listener, null out the
 /// Dart-held reference (so nothing can reach the AVPlayer afterwards) and call
 /// the plugin's dispose, which releases the underlying `AVPlayerItem`.
 class VideoPlayerHandle implements PlayerHandle {
-  VideoPlayerHandle({required this.path})
-      : _controller = VideoPlayerController.file(File(path));
+  VideoPlayerHandle({required this.path, this.network = false})
+      : _controller = network
+            ? VideoPlayerController.networkUrl(Uri.parse(path))
+            : VideoPlayerController.file(File(path));
 
   @override
   final String path;
+
+  /// True when [path] is a URL rather than a sandbox path.
+  final bool network;
 
   VideoPlayerController? _controller;
   bool _listenerAttached = false;

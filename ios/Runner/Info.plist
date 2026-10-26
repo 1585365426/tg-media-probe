@@ -49,6 +49,15 @@
 			</array>
 		</dict>
 	</dict>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<!-- The video feed plays through a loopback range server fed by TDLib,
+		     so AVPlayer needs to reach 127.0.0.1 over plain HTTP. This is the
+		     narrow exception for local networking only: arbitrary cleartext
+		     traffic stays blocked. -->
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
 	<key>UILaunchStoryboardName</key>

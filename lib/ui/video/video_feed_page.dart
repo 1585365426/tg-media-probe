@@ -12,6 +12,7 @@ import '../../data/media_record.dart';
 import '../../data/video_query.dart';
 import '../../platform/orientation_controller.dart';
 import '../../platform/video_rotation.dart';
+import '../../playback/playback_timeline.dart';
 import '../../playback/video_player_handle.dart';
 import 'video_tile.dart';
 
@@ -276,6 +277,15 @@ class _VideoFeedPageState extends State<VideoFeedPage> {
 
   // ---- playback ----------------------------------------------------------
 
+  /// How long a stream may take to reach ready-to-play before the page gives up
+  /// and falls back to the whole-file download.
+  ///
+  /// Six seconds is a deliberate compromise: a faststart mp4 answers in one to
+  /// two, while a non-faststart mp4 (moov at the end) cannot answer until
+  /// almost the whole file has arrived — waiting the full download there would
+  /// be slower than not trying at all.
+  static const Duration _streamStartTimeout = Duration(seconds: 6);
+
   Future<void> _activateCurrent() async {
     if (!widget.active || !_initialized) return;
     if (_filtered.isEmpty) return;
@@ -283,16 +293,46 @@ class _VideoFeedPageState extends State<VideoFeedPage> {
     final record = _filtered[_current];
     final key = record.key;
     final token = ++_activationToken;
+    final timeline = PlaybackTimeline.start(key);
+    timeline.mark('activate');
 
     if (_errors.containsKey(key)) {
       if (mounted) setState(() => _visible = null);
       return;
     }
 
-    var path = _paths[key];
+    // Already promoted into the user zone by an earlier run: local file, no
+    // network, nothing to decide.
+    final cached = _paths[key];
+    if (cached != null) {
+      await _playLocal(record, key, cached, token, timeline, tryStream: false);
+      return;
+    }
+
+    // Streaming first. This is the path that puts the first frame on screen a
+    // second after the tap instead of after the whole file.
+    final streamed = await _tryStream(record, key, token, timeline);
+    if (streamed) return;
+    if (!mounted || token != _activationToken) return;
+
+    // Fallback: whole-file download, promote into Documents, play the copy.
+    // Byte-for-byte the pre-streaming behaviour, so a stream that cannot work
+    // is never worse than before.
+    await _playLocal(record, key, null, token, timeline, tryStream: true);
+  }
+
+  /// Plays from the user zone, downloading and promoting first when [tryStream]
+  /// is true and no local path exists yet.
+  Future<void> _playLocal(
+    MediaRecord record,
+    String key,
+    String? existingPath,
+    int token,
+    PlaybackTimeline timeline, {
+    required bool tryStream,
+  }) async {
+    var path = existingPath;
     if (path == null) {
-      // Kick the lookahead before the current item blocks on the network, so
-      // the two downloads overlap instead of running end to end.
       _prefetchAhead();
       if (mounted) setState(() => _progress[key] = 0);
       try {
@@ -305,33 +345,102 @@ class _VideoFeedPageState extends State<VideoFeedPage> {
         );
         path = result.path;
         _paths[key] = path;
+        timeline.mark('download');
       } catch (e) {
         if (!mounted || token != _activationToken) return;
         setState(() {
           _progress.remove(key);
           _errors[key] = _humanError(e);
         });
+        timeline.finish('failed');
+        PlaybackTimelineLog.record(timeline);
         return;
       }
     }
     if (!mounted || token != _activationToken) return;
     if (_filtered.isEmpty || _filtered[_current].key != key) return;
 
-    final rotation = await const VideoRotationReader().readRotationDegrees(path);
+    final rotation = await _readRotation(path);
+    timeline.mark('rotation');
     if (!mounted || token != _activationToken) return;
 
     try {
       await _services.player.activate(path, autoplay: true);
+      timeline.mark('player-load');
     } catch (e) {
       if (!mounted || token != _activationToken) return;
       setState(() {
         _progress.remove(key);
         _errors[key] = '播放失败：$e';
       });
+      timeline.finish('failed');
+      PlaybackTimelineLog.record(timeline);
       return;
     }
-    if (!mounted || token != _activationToken) return;
+    await _afterActivated(key, rotation, token, timeline, 'file');
+  }
 
+  /// Publishes a loopback range URL and activates the player against it.
+  ///
+  /// Returns false whenever streaming is unavailable or too slow — the caller
+  /// then takes the whole-file path.
+  Future<bool> _tryStream(
+    MediaRecord record,
+    String key,
+    int token,
+    PlaybackTimeline timeline,
+  ) async {
+    final streamer = _services.streamer;
+    if (streamer == null) return false;
+
+    Uri? url;
+    try {
+      url = await streamer.urlFor(record);
+    } catch (_) {
+      url = null;
+    }
+    timeline.mark('stream-url');
+    if (url == null) return false;
+    if (!mounted || token != _activationToken) return false;
+
+    if (mounted) setState(() => _progress[key] = 0);
+    try {
+      await _services.player
+          .activate(url.toString(), autoplay: true, network: true)
+          .timeout(_streamStartTimeout);
+      timeline.mark('player-load');
+    } on TimeoutException {
+      // Player is wedged on a range TDLib cannot serve yet. Release it (the
+      // generation counter makes the late completion dispose itself) and use
+      // the download path instead.
+      if (token == _activationToken) await _services.player.release();
+      return false;
+    } catch (_) {
+      if (token == _activationToken) await _services.player.release();
+      return false;
+    }
+    if (!mounted || token != _activationToken) {
+      // The user already swiped away. Never touch the player slot here: the
+      // newer activation owns it, and releasing would kill the video that is
+      // now on screen. The stale handle is disposed by the generation counter.
+      return false;
+    }
+
+    await _afterActivated(key, null, token, timeline, 'stream');
+    // Durability: keep promoting a copy into the user zone while it plays, so
+    // clearing the cache later cannot remove a video the user watched.
+    unawaited(_promoteAfterStream(record, key, token));
+    return true;
+  }
+
+  /// Shared tail of both activation paths: volume, loop guard, first frame.
+  Future<void> _afterActivated(
+    String key,
+    int? rotation,
+    int token,
+    PlaybackTimeline timeline,
+    String outcome,
+  ) async {
     final handle = _services.player.active;
     if (handle is VideoPlayerHandle) {
       // Every new item: force the current mute state. AVPlayer resets volume
@@ -339,14 +448,57 @@ class _VideoFeedPageState extends State<VideoFeedPage> {
       // with audio after a swipe.
       await handle.setVolume(_muted ? 0 : 1);
       _attachLoopGuard(handle.controller);
-      if (!mounted) return;
+      if (!mounted || token != _activationToken) return;
       setState(() {
         _visible = handle.controller;
         _rotation = rotation;
         _progress.remove(key);
       });
     }
+    timeline.finish(outcome);
+    PlaybackTimelineLog.record(timeline);
   }
+
+  /// Rotates a still-open streamed item once its local copy exists.
+  ///
+  /// The transform lives in the file, so it cannot be read before the bytes are
+  /// there. A stream therefore starts with `rotation = null` (unknown, not 0) and
+  /// gets the real value a moment later; the tile re-lays out when it lands.
+  Future<void> _promoteAfterStream(
+    MediaRecord record,
+    String key,
+    int token,
+  ) async {
+    try {
+      final result = await _services.resolver.ensureLocal(record);
+      if (!mounted) return;
+      _paths[key] = result.path;
+      final rotation = await _readRotation(result.path);
+      if (!mounted || token != _activationToken) return;
+      if (_filtered.isEmpty || _filtered[_current].key != key) return;
+      if (rotation != null && rotation != _rotation) {
+        setState(() => _rotation = rotation);
+      }
+    } catch (_) {
+      // Promotion is about durability, not playback: the clip is already
+      // playing from the pool. A failure here is retried on the next activation.
+    }
+  }
+
+  /// Reads the track transform, cached per path.
+  ///
+  /// The native call builds an `AVAsset` just to look at a matrix; doing it on
+  /// every activation of the same file was pure overhead.
+  static final Map<String, int?> _rotationCache = <String, int?>{};
+
+  Future<int?> _readRotation(String path) async {
+    if (_rotationCache.containsKey(path)) return _rotationCache[path];
+    final value = await const VideoRotationReader().readRotationDegrees(path);
+    // Only cache a real answer; a null may mean "file not complete yet".
+    if (value != null) _rotationCache[path] = value;
+    return value;
+  }
+
 
   /// Warm the next couple of items so a swipe does not start from zero bytes.
   ///

@@ -204,6 +204,8 @@ class FileState {
     required this.isCompleted,
     required this.path,
     required this.canBeDownloaded,
+    this.downloadOffset = 0,
+    this.downloadedPrefixSize = 0,
   });
 
   final int id;
@@ -213,6 +215,22 @@ class FileState {
   final bool isCompleted;
   final String path;
   final bool canBeDownloaded;
+
+  /// `localFile.download_offset`: logical position of the first byte stored in
+  /// [path]. Zero for a normal whole-file download.
+  final int downloadOffset;
+
+  /// `localFile.downloaded_prefix_size`: length of the contiguous run that
+  /// starts at [downloadOffset]. This is the only number a range reader may
+  /// trust — [downloadedSize] counts bytes anywhere in the file, holes included.
+  final int downloadedPrefixSize;
+
+  /// Total size to advertise to a range client.
+  int get totalSize => expectedSize > 0 ? expectedSize : size;
+
+  /// True when the whole file can be read without waiting for TDLib.
+  bool get isFullyLocal =>
+      isCompleted && path.isNotEmpty && totalSize > 0;
 
   static FileState fromJson(Map<String, Object?> json) {
     final local = _asMap(json['local']);
@@ -224,6 +242,8 @@ class FileState {
       isCompleted: _asBool(local['is_downloading_completed']),
       path: _asString(local['path']) ?? '',
       canBeDownloaded: _asBool(local['can_be_downloaded']),
+      downloadOffset: _asInt(local['download_offset']) ?? 0,
+      downloadedPrefixSize: _asInt(local['downloaded_prefix_size']) ?? 0,
     );
   }
 }

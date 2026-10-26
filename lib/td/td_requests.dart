@@ -138,6 +138,21 @@ Map<String, Object?> downloadFile({
       'synchronous': synchronous,
     };
 
+/// How many contiguous bytes are available from [offset].
+///
+/// This is the streaming counterpart of [downloadFile]: the schema defines it
+/// as the size of the downloaded prefix starting at `offset`, which is exactly
+/// what a range server has to know before it reads the pool file.
+Map<String, Object?> getFileDownloadedPrefixSize({
+  required int fileId,
+  required int offset,
+}) =>
+    <String, Object?>{
+      '@type': 'getFileDownloadedPrefixSize',
+      'file_id': fileId,
+      'offset': offset,
+    };
+
 Map<String, Object?> cancelDownloadFile({
   required int fileId,
   bool onlyIfPending = false,

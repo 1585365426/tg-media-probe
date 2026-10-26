@@ -91,13 +91,13 @@ class FakeFactory implements PlayerFactory {
   final Set<String> slowPaths;
 
   @override
-  PlayerHandle create(String path) => FakePlayer(
-        path,
+  PlayerHandle create(String location, {bool network = false}) => FakePlayer(
+        location,
         tracker,
-        loadDelay: slowPaths.contains(path)
+        loadDelay: slowPaths.contains(location)
             ? const Duration(milliseconds: 50)
             : Duration.zero,
-        failLoad: path.contains('broken'),
+        failLoad: location.contains('broken'),
       );
 }
 

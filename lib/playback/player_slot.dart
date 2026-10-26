@@ -25,7 +25,8 @@ abstract class PlayerHandle {
 }
 
 abstract class PlayerFactory {
-  PlayerHandle create(String path);
+  /// [location] is an absolute file path, or an http URL when [network] is true.
+  PlayerHandle create(String location, {bool network = false});
 }
 
 class PlayerError implements Exception {
@@ -57,6 +58,13 @@ class SinglePlayerController {
 
   PlayerHandle? _active;
   String? _activePath;
+
+  /// Path registered as in-use for the active player.
+  ///
+  /// Differs from [_activePath] when playing through the range server: the
+  /// location is a URL, but the file that must not be deleted is the pool file
+  /// the server is reading from.
+  String? _activeGuardPath;
   int _generation = 0;
   int _created = 0;
   int _disposed = 0;
@@ -65,13 +73,21 @@ class SinglePlayerController {
   String? get activePath => _activePath;
   bool get hasActive => _active != null;
 
+  /// True when the current player reads from the loopback range server.
+  bool get isStreaming => _activePath?.startsWith('http') ?? false;
+
   /// Handles handed out by the factory that have not been disposed yet.
   /// Must stay at 0 or 1; anything higher is a leak.
   int get liveCount => _created - _disposed;
   int get createdCount => _created;
   int get disposedCount => _disposed;
 
-  Future<void> activate(String path, {bool autoplay = true}) async {
+  Future<void> activate(
+    String location, {
+    bool autoplay = true,
+    bool network = false,
+    String? guardPath,
+  }) async {
     final generation = ++_generation;
     await _disposeActive();
 
@@ -79,28 +95,30 @@ class SinglePlayerController {
     // down; that newer call owns the slot now.
     if (generation != _generation) return;
 
-    final handle = factory.create(path);
+    final handle = factory.create(location, network: network);
     _created++;
-    activeFiles?.markInUse(path, reason: 'player');
+    final guard = guardPath ?? location;
+    activeFiles?.markInUse(guard, reason: 'player');
 
     try {
       await handle.load();
       if (generation != _generation) {
-        await _releaseHandle(handle, path);
+        await _releaseHandle(handle, guard);
         return;
       }
       if (autoplay) {
         await handle.play();
       }
       if (generation != _generation) {
-        await _releaseHandle(handle, path);
+        await _releaseHandle(handle, guard);
         return;
       }
       _active = handle;
-      _activePath = path;
+      _activePath = location;
+      _activeGuardPath = guard;
     } catch (error) {
-      await _releaseHandle(handle, path);
-      throw PlayerError(path, error);
+      await _releaseHandle(handle, guard);
+      throw PlayerError(location, error);
     }
   }
 
@@ -121,14 +139,15 @@ class SinglePlayerController {
 
   Future<void> _disposeActive() async {
     final handle = _active;
-    final path = _activePath;
+    final guard = _activeGuardPath ?? _activePath;
     _active = null;
     _activePath = null;
+    _activeGuardPath = null;
     if (handle == null) {
-      if (path != null) activeFiles?.release(path);
+      if (guard != null) activeFiles?.release(guard);
       return;
     }
-    await _releaseHandle(handle, path ?? handle.path);
+    await _releaseHandle(handle, guard ?? handle.path);
   }
 
   Future<void> _releaseHandle(PlayerHandle handle, String path) async {
