@@ -139,7 +139,24 @@ jobs:
         run: |
           set -o pipefail
           cd ios
-          pod install --repo-update 2>&1 | tee ../ci-report/pod-install.txt
+          # `--repo-update` hits cdn.cocoapods.org, which is unreachable often
+          # enough that it already killed one run with "No route to host" before
+          # anything compiled. Retry it, then fall back to the local spec repo:
+          # the Podfile pins versions, so a stale index is not a correctness
+          # problem, and failing the build over a CDN hiccup hides real errors.
+          installed=0
+          for attempt in 1 2 3; do
+            if pod install --repo-update 2>&1 | tee ../ci-report/pod-install.txt; then
+              installed=1
+              break
+            fi
+            echo "pod install --repo-update failed (attempt ${attempt}/3), retrying in 20s" >&2
+            sleep 20
+          done
+          if [[ "${installed}" -ne 1 ]]; then
+            echo "--- falling back to pod install without --repo-update" >&2
+            pod install 2>&1 | tee -a ../ci-report/pod-install.txt
+          fi
           echo "--- pinned deployment targets"
           grep -n "IPHONEOS_DEPLOYMENT_TARGET" Runner.xcodeproj/project.pbxproj | tee ../ci-report/deployment-targets.txt
           echo "--- tdlib in Podfile.lock"
