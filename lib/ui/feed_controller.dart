@@ -558,6 +558,18 @@ class FeedController extends ChangeNotifier {
           // it to the player, otherwise the failure surfaces as a decode error.
           if (await sources.isUsable(cached)) {
             trace.mark(PlaybackStage.fileReady);
+            // The cache path is the only play that used to skip the
+            // diagnostics reset, so after a swipe the panel kept showing the
+            // *previous* video's numbers (the "1.38 GB" ghost). Every play
+            // must open its own evidence block: reset, then name the source
+            // — a local file — exactly like the other paths do.
+            _diagnostics.beginPlay(
+              fileId: record.fileId,
+              streaming: false,
+              chatId: record.chatId,
+              messageId: record.messageId,
+            );
+            _diagnostics.notePlayerSource(isStreaming: false, url: cached);
             return PlaySource.file(cached);
           }
         }
