@@ -26,6 +26,8 @@ import 'package:flutter/foundation.dart';
 import '../td/td_models.dart' show FileState;
 import '../util/byte_format.dart';
 import '../util/redact.dart';
+import 'mp4_probe.dart';
+import 'stream_proxy.dart' show ProxyExchange;
 
 /// What the recorded evidence says.
 enum StreamingVerdict {
@@ -171,6 +173,26 @@ class StreamingDiagnostics extends ChangeNotifier {
   int? _recordMessageId;
   int _recordSizeBytes = 0;
 
+  /// Every HTTP exchange the proxy really performed, oldest first, capped so a
+  /// long play cannot grow the report without bound.
+  final List<ProxyExchange> _exchanges = <ProxyExchange>[];
+  static const int _maxExchanges = 12;
+
+  /// Exchanges where the player asked for more bytes than it received.
+  int _truncatedCount = 0;
+
+  /// Requests that asked for bytes away from 0 — a moov probe or a seek.
+  int _forwardRangeRequests = 0;
+
+  /// Where the `moov` atom sits, scanned from the bytes on disk.
+  MoovPosition _moov = MoovPosition.unknown;
+
+  /// Player lifecycle, with the clock of this play.
+  int? _playerCreatedMillis;
+  int? _playerReadyMillis;
+  int? _playerFailedMillis;
+  String? _playerFailedText;
+
   int _totalBytes = 0;
   int _downloadedBytes = 0;
   int _headBytes = 0;
@@ -245,6 +267,15 @@ class StreamingDiagnostics extends ChangeNotifier {
       _recordSizeBytes > 0 &&
       _totalBytes > 0 &&
       _recordSizeBytes != _totalBytes;
+
+  List<ProxyExchange> get exchanges => List<ProxyExchange>.unmodifiable(_exchanges);
+  int get truncatedCount => _truncatedCount;
+  int get forwardRangeRequests => _forwardRangeRequests;
+  MoovPosition get moov => _moov;
+  int? get playerCreatedMillis => _playerCreatedMillis;
+  int? get playerReadyMillis => _playerReadyMillis;
+  int? get playerFailedMillis => _playerFailedMillis;
+  String? get playerFailedText => _playerFailedText;
 
   int get totalBytes => _totalBytes;
   int get downloadedBytes => _downloadedBytes;
@@ -464,6 +495,55 @@ class StreamingDiagnostics extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// The full HTTP exchange, as the proxy really wrote it.
+  ///
+  /// Counters stay with [noteRangeRequest] / [noteResponse] — this one keeps
+  /// the per-request detail the acceptance asks for: what was asked, what was
+  /// declared, how many bytes actually went into the socket.
+  void noteExchange(ProxyExchange exchange) {
+    if (_sealedResult) return;
+    _exchanges.add(exchange);
+    if (_exchanges.length > _maxExchanges) _exchanges.removeAt(0);
+    if (exchange.truncated) _truncatedCount++;
+    if (exchange.isForwardRange) _forwardRangeRequests++;
+    _note('http ${exchange.describe()}');
+    notifyListeners();
+  }
+
+  /// Where `moov` sits, scanned from the bytes on disk by the resolver.
+  void noteMoov(MoovPosition position) {
+    if (_sealedResult) return;
+    if (_moov == position) return;
+    _moov = position;
+    _note('moov=${position.name}');
+    notifyListeners();
+  }
+
+  /// The player object was constructed for this play.
+  void notePlayerCreated() {
+    if (_sealedResult) return;
+    _playerCreatedMillis ??= _elapsed();
+    _note('player created');
+    notifyListeners();
+  }
+
+  /// `initialize()` returned: AVPlayerItem reached readyToPlay.
+  void notePlayerReady() {
+    if (_sealedResult) return;
+    _playerReadyMillis ??= _elapsed();
+    _note('player ready');
+    notifyListeners();
+  }
+
+  /// `initialize()` failed or timed out. [reason] is the player's own message.
+  void notePlayerFailed(String reason) {
+    if (_sealedResult) return;
+    _playerFailedMillis ??= _elapsed();
+    _playerFailedText ??= _sanitize(reason);
+    _note('player failed: $_playerFailedText');
+    notifyListeners();
+  }
+
   /// Clears the previous run and starts recording a new one.
   ///
   /// [streaming] is the resolver's decision, recorded as such — it is *not*
@@ -517,6 +597,14 @@ class StreamingDiagnostics extends ChangeNotifier {
     _downloadCompletedMillis = null;
     _firstBytesMillis = null;
     _first206Millis = null;
+    _exchanges.clear();
+    _truncatedCount = 0;
+    _forwardRangeRequests = 0;
+    _moov = MoovPosition.unknown;
+    _playerCreatedMillis = null;
+    _playerReadyMillis = null;
+    _playerFailedMillis = null;
+    _playerFailedText = null;
     _decisionPreference = null;
     _decisionForce = null;
     _decisionCandidate = null;
@@ -793,6 +881,12 @@ class StreamingDiagnostics extends ChangeNotifier {
             'completed=${_isDownloadingCompleted ? 'true' : 'false'}',
         'range=${_lastRange ?? '-'} requests=$_rangeRequests '
             'status=${_lastStatus ?? '-'} 206x$_partialContentCount',
+        'range truncated=$_truncatedCount forward=$_forwardRangeRequests '
+            'moov=${_moov.name}',
+        // One line per exchange, newest last: what the player asked for, what
+        // the proxy declared, and how many bytes really went out.
+        for (final exchange in _exchanges.reversed.take(4))
+          'http ${exchange.describe()}',
         'player=${_playerTime.inSeconds}s/${_playerDuration.inSeconds}s '
             'status=$_timeControlStatus started=${_hasStartedPlaying ? 'true' : 'false'}',
         if (_playerError != null) 'playerError=${_sanitize(_playerError!)}',
@@ -901,8 +995,31 @@ class StreamingDiagnostics extends ChangeNotifier {
     if (_proxyUrl != null) lines.add('proxyUrl=${redactText(_proxyUrl!)}');
     lines.add('206x$_partialContentCount rangeRequests=$_rangeRequests '
         'windowMoves=$_windowMoves stalls=$_stalls');
+    // The HTTP evidence, one line per exchange. This is the part a device
+    // report needs to answer "why did the player not start" without guessing:
+    // the requested range, the range the proxy declared, and the bytes it
+    // actually pushed.
+    if (_exchanges.isNotEmpty) {
+      lines.add('RangeExchanges:');
+      for (final exchange in _exchanges) {
+        lines.add('  ${exchange.describe()}');
+      }
+    }
+    lines.add('RANGE_TRUNCATED=$_truncatedCount');
+    lines.add(_forwardRangeRequests == 0
+        ? 'tailRequests=0 NO_TAIL_REQUEST'
+        : 'tailRequests=$_forwardRangeRequests');
+    lines.add('moov=${_moov.name}');
+    lines.add('playerItemCreated=${_stamp(_playerCreatedMillis)} '
+        'ready=${_stamp(_playerReadyMillis)} '
+        'failed=${_stamp(_playerFailedMillis)}');
+    if (_playerFailedText != null) {
+      lines.add('playerFailure=$_playerFailedText');
+    }
     return lines;
   }
+
+  static String _stamp(int? millis) => millis == null ? '-' : _seconds(millis);
 
   static String _seconds(int millis) => '${(millis / 1000).toStringAsFixed(1)}s';
 
@@ -954,6 +1071,34 @@ class StreamingDiagnostics extends ChangeNotifier {
         'firstRangeMillis': _firstRangeMillis,
         'proxyStartedMillis': _proxyStartedMillis,
         'verdict': verdict.code,
+        'moov': _moov.name,
+        'truncatedRanges': _truncatedCount,
+        'forwardRangeRequests': _forwardRangeRequests,
+        'playerTimeline': <String, Object?>{
+          'createdMillis': _playerCreatedMillis,
+          'readyMillis': _playerReadyMillis,
+          'failedMillis': _playerFailedMillis,
+          'failure': _playerFailedText,
+        },
+        'exchanges': <Object?>[
+          for (final exchange in _exchanges)
+            <String, Object?>{
+              'index': exchange.index,
+              'method': exchange.method,
+              'range': exchange.rangeHeader,
+              'status': exchange.status,
+              'servedFrom': exchange.servedFrom,
+              'servedTo': exchange.servedTo,
+              'total': exchange.total,
+              'declaredLength': exchange.declaredLength,
+              'writtenBytes': exchange.writtenBytes,
+              'contentRange': exchange.contentRange,
+              'contentType': exchange.contentType,
+              'contentEncoding': exchange.contentEncoding,
+              'truncated': exchange.truncated,
+              'note': exchange.note,
+            },
+        ],
       };
 
   /// Human-readable block (settings screen + clipboard export).

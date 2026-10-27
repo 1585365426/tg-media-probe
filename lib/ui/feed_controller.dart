@@ -590,6 +590,9 @@ class FeedController extends ChangeNotifier {
           record.fileId,
           chatId: record.chatId,
           messageId: record.messageId,
+          // The served Content-Type comes from the message's own mime type;
+          // guessing mp4 for a webm is another way to make AVPlayer refuse.
+          mimeType: record.mimeType,
           trace: trace,
           // TDLib rejected the stored file id (or the message carried a file
           // name the mirror never had): keep the repaired record.
@@ -660,10 +663,13 @@ class FeedController extends ChangeNotifier {
         isStreaming: source.isStreaming,
         url: source.url,
       );
+      _diagnostics.notePlayerCreated();
       await player.activate(source.url);
+      _diagnostics.notePlayerReady();
       trace.mark(PlaybackStage.playerInitialized);
-    } on Object {
+    } on Object catch (e) {
       if (!source.isStreaming) {
+        _diagnostics.notePlayerFailed('$e');
         trace.errorCategory = 'player';
         PlaybackTraceLog.instance.add(trace);
         _fail('此视频无法解码');
@@ -674,6 +680,9 @@ class FeedController extends ChangeNotifier {
       // Fall back to the full download — silently, no error screen, and the
       // bytes already fetched keep the wait short.
       trace.mark(PlaybackStage.streamingFallback);
+      // The player's own message is the only thing that says *why* the item
+      // never became ready — keep it verbatim instead of a generic line.
+      _diagnostics.notePlayerFailed('$e');
       _diagnostics.noteFallback('播放器初始化失败');
       _diagnostics.noteDecision(
         proxyAvailable: true,

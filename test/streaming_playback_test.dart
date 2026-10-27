@@ -298,7 +298,9 @@ class FixtureWatch implements FileProgressWatch {
     // whatever the file physically holds from 0.
     final file = File(api.path);
     prefix = await file.exists() ? await file.length() : 0;
-    _changes.add(null);
+    // A proxy may ask for the resume right as the test tears the watch down;
+    // a closed broadcast controller would throw from a background task.
+    if (!_changes.isClosed) _changes.add(null);
   }
 
   Future<void> dispose() async {
@@ -326,7 +328,7 @@ void main() {
   });
 
   group('proxy over real HTTP', () {
-    test('serves the head progressively; the tail is window-steered',
+    test('an explicit range is served in full; the tail is window-steered',
         () async {
       final api = ScriptedFile(sandbox, expectedSize: 4 * 1024 * 1024);
       await api.advance(1024 * 1024); // head prefix: 1 MB of 4 MB
@@ -341,15 +343,18 @@ void main() {
 
       final client = _client();
 
-      // 1. open-ended head request → the current prefix, immediately.
+      // 1. an explicit range: the declared range is the *requested* range and
+      //    the body is exactly that many bytes. Truncating it at the download
+      //    head is what made AVPlayer drop the resource on device.
       var request = await client.getUrl(url);
-      request.headers.set(HttpHeaders.rangeHeader, 'bytes=0-');
+      request.headers.set(HttpHeaders.rangeHeader, 'bytes=0-1048575');
       var response = await request.close();
       expect(response.statusCode, HttpStatus.partialContent);
       expect(response.headers.value(HttpHeaders.contentRangeHeader),
-          'bytes 0-${1024 * 1024 - 1}/4194304',
-          reason: '无界 range 也要立即给出当前可读前缀，不等全量');
-      await _drain(response);
+          'bytes 0-1048575/4194304');
+      expect(response.headers.contentLength, 1048576);
+      var head = await _drain(response);
+      expect(head.length, 1048576, reason: '请求多少就必须给多少，不能截断');
 
       // 2. a tail probe (moov at the end) → the window moves to the tail.
       request = await client.getUrl(url);
@@ -423,7 +428,7 @@ void main() {
       await api.close();
     });
 
-    test('slow but steady growth survives the startup gate', () async {
+    test('slow but steady growth finishes the declared range', () async {
       final api = ScriptedFile(sandbox, expectedSize: 2 * 1024 * 1024);
       final watch = FixtureWatch(api, 1001, initial: await api.stat(1001));
       final proxy = StreamProxyServer(
@@ -448,8 +453,60 @@ void main() {
 
       final response = await responseFuture;
       expect(response.statusCode, HttpStatus.partialContent);
-      final body = await _drain(response);
-      expect(body.length, 512 * 1024, reason: '慢速增长不是失败');
+      final drain = _drain(response);
+      // Keep feeding: a slow origin must still deliver the whole range rather
+      // than leave the player with a short body.
+      for (var i = 0; i < 24; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 30));
+        await api.advance(64 * 1024);
+      }
+      final body = await drain;
+      expect(body.length, 2 * 1024 * 1024, reason: '慢速增长不是失败');
+      client.close(force: true);
+      await proxy.stop();
+      await watch.dispose();
+      await api.close();
+    });
+
+    test('bytes leave the proxy while the file is still downloading',
+        () async {
+      final api = ScriptedFile(sandbox, expectedSize: 4 * 1024 * 1024);
+      await api.advance(256 * 1024);
+      final watch = FixtureWatch(api, 1001, initial: await api.stat(1001));
+      final proxy = StreamProxyServer(
+        watch: watch,
+        startupBufferBytes: 64 * 1024,
+        stallTimeout: const Duration(milliseconds: 500),
+      );
+      final url = await proxy.start();
+
+      final client = _client();
+      final request = await client.getUrl(url);
+      // 3 MB of a 4 MB file: the response cannot be finished without waiting.
+      request.headers.set(HttpHeaders.rangeHeader, 'bytes=0-3145727');
+      final response = await request.close();
+      expect(response.statusCode, HttpStatus.partialContent);
+      expect(response.headers.value(HttpHeaders.contentRangeHeader),
+          'bytes 0-3145727/4194304');
+
+      var received = 0;
+      final done = Completer<void>();
+      response.listen((chunk) => received += chunk.length,
+          onDone: () => done.complete());
+
+      // Wait until the first bytes have crossed the socket, with the file
+      // still incomplete — that is the whole claim under test.
+      while (received == 0) {
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+      }
+      expect(api.completed, isFalse, reason: '播放时文件必须还没下完');
+      expect(received, lessThan(4 * 1024 * 1024));
+
+      // The rest of the file arrives; the same response completes.
+      await api.complete();
+      await done.future;
+      expect(received, 3145728, reason: '声明多少字节就要发多少字节');
+
       client.close(force: true);
       await proxy.stop();
       await watch.dispose();
@@ -651,6 +708,144 @@ void main() {
       expect(diag.decisionReason, 'streaming_disabled_by_preference',
           reason: '每个 LOCAL_FILE 都必须回答为什么不是流式');
       expect(diag.panelLines().join('\n'), contains('PREFERENCE STREAMING: OFF'));
+      await api.close();
+    });
+  });
+
+  /// The proxy has to be correct on its own, with no player in the loop: if it
+  /// cannot answer a byte range exactly, no amount of AVPlayer debugging will
+  /// help. Every case here asserts status, Content-Range, Content-Length and
+  /// the number of bytes that actually arrived.
+  group('range proxy self-test', () {
+    Future<void> expectRange(
+      Uri url, {
+      required String range,
+      required int expectedStatus,
+      required int expectedLength,
+      String? expectedContentRange,
+    }) async {
+      final client = _client();
+      final request = await client.getUrl(url);
+      request.headers.set(HttpHeaders.rangeHeader, range);
+      final response = await request.close();
+      expect(response.statusCode, expectedStatus, reason: range);
+      if (expectedContentRange != null) {
+        expect(response.headers.value(HttpHeaders.contentRangeHeader),
+            expectedContentRange,
+            reason: range);
+      }
+      final body = await _drain(response);
+      expect(body.length, expectedLength, reason: '$range 实际字节数');
+      client.close(force: true);
+    }
+
+    test('serves head, large head, mid-file and tail ranges exactly', () async {
+      final api = ScriptedFile(sandbox, expectedSize: 8 * 1024 * 1024);
+      await api.advance(8 * 1024 * 1024);
+      await api.complete();
+      final watch = FixtureWatch(api, 1001, initial: await api.stat(1001));
+      final proxy = StreamProxyServer(watch: watch, contentType: 'video/mp4');
+      final url = await proxy.start();
+
+      // 0-1023: the 1 KB probe AVPlayer opens with.
+      await expectRange(url,
+          range: 'bytes=0-1023',
+          expectedStatus: 206,
+          expectedLength: 1024,
+          expectedContentRange: 'bytes 0-1023/8388608');
+      // 0-2 MB: the moov-at-the-head window.
+      await expectRange(url,
+          range: 'bytes=0-2097151',
+          expectedStatus: 206,
+          expectedLength: 2097152,
+          expectedContentRange: 'bytes 0-2097151/8388608');
+      // an arbitrary mid-file seek.
+      await expectRange(url,
+          range: 'bytes=5000000-6000000',
+          expectedStatus: 206,
+          expectedLength: 1000001,
+          expectedContentRange: 'bytes 5000000-6000000/8388608');
+      // the last 1000 bytes — the moov-at-the-tail read.
+      await expectRange(url,
+          range: 'bytes=8387608-8388607',
+          expectedStatus: 206,
+          expectedLength: 1000,
+          expectedContentRange: 'bytes 8387608-8388607/8388608');
+      // a suffix range must be answered as the same tail window.
+      await expectRange(url,
+          range: 'bytes=-1000',
+          expectedStatus: 206,
+          expectedLength: 1000,
+          expectedContentRange: 'bytes 8387608-8388607/8388608');
+      // beyond EOF: 416 with the real size, not a silent 200.
+      await expectRange(url,
+          range: 'bytes=9000000-9000100',
+          expectedStatus: 416,
+          expectedLength: 0);
+
+      await proxy.stop();
+      await watch.dispose();
+      await api.close();
+    });
+
+    test('a tail range on an unfinished file is window-steered and exact',
+        () async {
+      final api = ScriptedFile(sandbox, expectedSize: 8 * 1024 * 1024);
+      await api.advance(256 * 1024); // only the head exists
+      final watch = FixtureWatch(api, 1001, initial: await api.stat(1001));
+      final proxy = StreamProxyServer(watch: watch);
+      final url = await proxy.start();
+
+      await expectRange(url,
+          range: 'bytes=8387608-8388607',
+          expectedStatus: 206,
+          expectedLength: 1000,
+          expectedContentRange: 'bytes 8387608-8388607/8388608');
+      expect(watch.windowRequests, 1, reason: '尾部必须切窗口，不能等顺序下载');
+
+      await proxy.stop();
+      await watch.dispose();
+      await api.close();
+    });
+
+    test('every exchange is recorded with request and response numbers',
+        () async {
+      final api = ScriptedFile(sandbox, expectedSize: 1024 * 1024);
+      await api.advance(1024 * 1024);
+      await api.complete();
+      final watch = FixtureWatch(api, 1001, initial: await api.stat(1001));
+      final exchanges = <ProxyExchange>[];
+      final proxy = StreamProxyServer(
+        watch: watch,
+        contentType: 'video/mp4',
+        onExchange: exchanges.add,
+      );
+      final url = await proxy.start();
+
+      await expectRange(url,
+          range: 'bytes=0-1023',
+          expectedStatus: 206,
+          expectedLength: 1024);
+
+      // The client sees its Content-Length satisfied before the server records
+      // the exchange; give the handler its turn.
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+
+      expect(exchanges, hasLength(1));
+      final exchange = exchanges.single;
+      expect(exchange.rangeHeader, 'bytes=0-1023');
+      expect(exchange.requestedFrom, 0);
+      expect(exchange.requestedTo, 1023);
+      expect(exchange.status, 206);
+      expect(exchange.declaredLength, 1024);
+      expect(exchange.writtenBytes, 1024);
+      expect(exchange.contentRange, 'bytes 0-1023/1048576');
+      expect(exchange.contentType, 'video/mp4');
+      expect(exchange.contentEncoding, 'identity');
+      expect(exchange.truncated, isFalse);
+
+      await proxy.stop();
+      await watch.dispose();
       await api.close();
     });
   });

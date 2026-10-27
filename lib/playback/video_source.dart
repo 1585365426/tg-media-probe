@@ -28,6 +28,7 @@ import '../td/td_client.dart';
 import '../td/td_models.dart';
 import '../td/td_requests.dart';
 import 'media_metadata.dart';
+import 'mp4_probe.dart';
 import 'playback_trace.dart';
 import 'stream_proxy.dart';
 import 'streaming_diagnostics.dart';
@@ -415,6 +416,7 @@ class VideoSourceResolver {
     int fileId, {
     int? chatId,
     int? messageId,
+    String? mimeType,
     void Function(VideoSourceUpdate update)? onProgress,
     PlaybackTrace? trace,
     void Function(MediaRecord fresh)? onRecordRefreshed,
@@ -452,6 +454,7 @@ class VideoSourceResolver {
       fileId,
       chatId: chatId,
       messageId: messageId,
+      mimeType: mimeType,
       onProgress: onProgress,
       trace: trace,
       onRecordRefreshed: onRecordRefreshed,
@@ -467,6 +470,7 @@ class VideoSourceResolver {
     int fileId, {
     int? chatId,
     int? messageId,
+    String? mimeType,
     void Function(VideoSourceUpdate update)? onProgress,
     PlaybackTrace? trace,
     void Function(MediaRecord fresh)? onRecordRefreshed,
@@ -481,6 +485,7 @@ class VideoSourceResolver {
           activeId,
           chatId: chatId,
           messageId: messageId,
+          mimeType: mimeType,
           onProgress: onProgress,
           trace: trace,
         );
@@ -528,6 +533,7 @@ class VideoSourceResolver {
     int fileId, {
     int? chatId,
     int? messageId,
+    String? mimeType,
     void Function(VideoSourceUpdate update)? onProgress,
     PlaybackTrace? trace,
   }) async {
@@ -661,7 +667,8 @@ class VideoSourceResolver {
         throw VideoSourceException('流式播放不可用（下载未产生本地文件）');
       }
 
-      proxy = (proxyFactory ?? ((w, p) => _defaultProxy(w, p, trace)))(watch, localPath);
+      proxy = (proxyFactory ??
+              ((w, p) => _defaultProxy(w, p, trace, mimeType)))(watch, localPath);
       final url = await proxy.start();
       trace?.mark(PlaybackStage.streamingProxyStarted);
       // The exact loopback URL the player will open — the acceptance report
@@ -697,6 +704,11 @@ class VideoSourceResolver {
         }
       }());
 
+      // Which moov layout the player is up against decides whether a head-only
+      // response can even work; the scan reads the bytes already on disk, so
+      // it costs nothing and never blocks the play.
+      unawaited(_probeMoov(localPath, watch));
+
       onProgress?.call(VideoSourceUpdate(
         stage: SourceStage.fetching,
         downloadedBytes: watch.headBytes,
@@ -729,12 +741,15 @@ class VideoSourceResolver {
   StreamProxyServer _defaultProxy(
     FileProgressWatch watch,
     String localPath,
-    PlaybackTrace? trace,
-  ) =>
+    PlaybackTrace? trace, [
+    String? mimeType,
+  ]) =>
       StreamProxyServer(
         watch: watch,
         startupBufferBytes: startupBufferBytes,
         stallTimeout: stallTimeout,
+        contentType:
+            (mimeType != null && mimeType.isNotEmpty) ? mimeType : 'video/mp4',
         onEvent: (event) {
           // The proxy log is the only way to answer "which Range failed and
           // why" after a device run — without it the answer is a guess.
@@ -765,8 +780,39 @@ class VideoSourceResolver {
         onWindowMove: ({required start, required end}) {
           _diagnostics.noteWindowMove(start, end);
         },
+        // The full exchange — request header, declared Content-Range/Length,
+        // bytes actually written. The acceptance report prints these one per
+        // line; without them "why didn't the player start" is unknowable.
+        onExchange: _diagnostics.noteExchange,
         onStall: _diagnostics.noteStall,
       );
+
+  /// Reads the first box headers of the file and records where `moov` sits.
+  ///
+  /// `afterMdat` is the case that makes a progressive HTTP response fail: the
+  /// player must read the end of the file before it can build its tracks. The
+  /// scan runs on whatever is already on disk and never delays the play.
+  Future<void> _probeMoov(String path, FileProgressWatch watch) async {
+    try {
+      final file = File(path);
+      if (!await file.exists()) return;
+      final onDisk = await file.length();
+      final available = watch.headBytes > 0
+          ? (watch.headBytes < onDisk ? watch.headBytes : onDisk)
+          : 0;
+      if (available < 16) return;
+      final take = available < Mp4Probe.scanBytes ? available : Mp4Probe.scanBytes;
+      final handle = await file.open();
+      try {
+        final bytes = await handle.read(take);
+        _diagnostics.noteMoov(Mp4Probe.locate(bytes));
+      } finally {
+        await handle.close();
+      }
+    } on Object {
+      // Diagnostics only: a probe that cannot read must not touch playback.
+    }
+  }
 
   /// Waits for the startup buffer with the same two rules as the transfer
   /// wait: every TDLib event resets the stall timer (slow is not failed);
