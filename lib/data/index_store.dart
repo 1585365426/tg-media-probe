@@ -331,6 +331,7 @@ class IndexStore {
     int limit = 50,
     String? cursor,
     bool favoritesOnly = false,
+    bool videosOnly = false,
     int? chatId,
   }) async {
     final size = limit.clamp(1, 500);
@@ -349,6 +350,10 @@ class IndexStore {
       i++;
       if (chatId != null && record.chatId != chatId) continue;
       if (favoritesOnly && !record.favorite) continue;
+      // The library is video-only. Rows of other kinds can still sit in an
+      // older mirror file; filtering here keeps every pager honest without a
+      // destructive migration.
+      if (videosOnly && record.kind != MediaKind.video) continue;
       if (items.length < size) {
         items.add(record);
         continue;

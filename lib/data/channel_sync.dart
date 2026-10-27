@@ -455,12 +455,18 @@ class MediaPager {
     required this.store,
     this.chatId,
     this.favoritesOnly = false,
+    this.videosOnly = false,
     int pageSize = 40,
   }) : pageSize = pageSize.clamp(1, 200);
 
   final IndexStore store;
   final int? chatId;
   final bool favoritesOnly;
+
+  /// Video-only listing. The channel detail page turns this on; the feed
+  /// filtered its rows anyway, but paging straight past non-video rows is
+  /// what keeps a photo-heavy channel from making every page nearly empty.
+  final bool videosOnly;
   final int pageSize;
 
   String? _cursor;
@@ -480,6 +486,7 @@ class MediaPager {
         limit: pageSize,
         cursor: _cursor,
         favoritesOnly: favoritesOnly,
+        videosOnly: videosOnly,
         chatId: chatId,
       );
       _cursor = page.nextCursor;

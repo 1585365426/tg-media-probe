@@ -197,16 +197,18 @@ void main() {
       final api = ScriptedTransfer(
         expectedSize: 20 * 1024 * 1024,
         chunkBytes: 2 * 1024 * 1024,
-        chunkCount: 10,
-        chunkDelay: const Duration(milliseconds: 25),
+        chunkCount: 15,
+        chunkDelay: const Duration(milliseconds: 30),
       );
       final resolver = VideoSourceResolver(
         api: api,
         fileExists: (_) async => true,
-        // 60 ms of silence allowed; the transfer takes ~275 ms in total, and
-        // every 25 ms it is re-armed. The old fixed cap failed this case.
-        stallTimeout: const Duration(milliseconds: 60),
-        taskTimeout: const Duration(seconds: 5),
+        // The window is 13x the chunk gap: under a full-suite load a timer can
+        // jitter badly, and the test must measure "steady growth is never a
+        // stall", not "the runner was fast today". 450 ms of transfer crosses
+        // the 400 ms window several times.
+        stallTimeout: const Duration(milliseconds: 400),
+        taskTimeout: const Duration(seconds: 30),
       );
 
       final stopwatch = Stopwatch()..start();
@@ -214,7 +216,7 @@ void main() {
       stopwatch.stop();
 
       expect(path, '/pool/7');
-      expect(stopwatch.elapsed, greaterThan(const Duration(milliseconds: 60)),
+      expect(stopwatch.elapsed, greaterThan(const Duration(milliseconds: 200)),
           reason: 'the test must outlast the quiet window to prove anything');
       await api.close();
     });

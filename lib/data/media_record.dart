@@ -19,10 +19,6 @@ bool _asBool(Object? v) => v is bool ? v : false;
 Map<String, Object?> _asMap(Object? v) =>
     v is Map ? v.cast<String, Object?>() : const <String, Object?>{};
 
-List<Map<String, Object?>> _asList(Object? v) => v is List
-    ? v.whereType<Map>().map((e) => e.cast<String, Object?>()).toList()
-    : const <Map<String, Object?>>[];
-
 enum MediaKind { video, photo, document, animation, unknown }
 
 extension MediaKindCodec on MediaKind {
@@ -185,7 +181,11 @@ class MediaRecord {
           kind: MediaKind.document,
         );
       case 'messagePhoto':
-        return _fromPhoto(base: base, photo: _asMap(content['photo']));
+        // This app is a video library: a photo is not a row, a download, a
+        // preload or a cache entry. Returning null here is the single choke
+        // point — the message still advances the sync cursor (channel_sync
+        // walks raw message ids), so a photo-heavy channel never stalls.
+        return null;
       default:
         return null;
     }
@@ -212,38 +212,6 @@ class MediaRecord {
       sizeBytes: _asInt(file['expected_size']) ?? 0,
       fileName: _asString(media['file_name']) ?? _asString(file['name']),
       mimeType: _asString(media['mime_type']),
-      messageDateUnix: base['date']! as int,
-      hasProtectedContent: base['protected']! as bool,
-    );
-  }
-
-  /// Photos come as a list of sizes; the largest one is the one worth indexing
-  /// (its file id is what a download has to target).
-  static MediaRecord? _fromPhoto({
-    required Map<String, Object?> base,
-    required Map<String, Object?> photo,
-  }) {
-    final sizes = _asList(photo['sizes']);
-    if (sizes.isEmpty) return null;
-    Map<String, Object?> best = sizes.first;
-    var bestArea = 0;
-    for (final size in sizes) {
-      final w = _asInt(size['width']) ?? 0;
-      final h = _asInt(size['height']) ?? 0;
-      if (w * h >= bestArea) {
-        bestArea = w * h;
-        best = size;
-      }
-    }
-    final file = _asMap(best['photo']);
-    return MediaRecord(
-      chatId: base['chatId']! as int,
-      messageId: base['messageId']! as int,
-      fileId: _asInt(file['id']) ?? 0,
-      kind: MediaKind.photo,
-      width: _asInt(best['width']),
-      height: _asInt(best['height']),
-      sizeBytes: _asInt(file['expected_size']) ?? 0,
       messageDateUnix: base['date']! as int,
       hasProtectedContent: base['protected']! as bool,
     );

@@ -319,7 +319,14 @@ class _ChannelDetailPageState extends State<ChannelDetailPage> {
       });
       return;
     }
-    _pager = MediaPager(store: store, chatId: widget.chatId, pageSize: 30);
+    _pager = MediaPager(
+      store: store,
+      chatId: widget.chatId,
+      pageSize: 30,
+      // Video-only listing: a photo is not a row here — no icon, no tap
+      // target, no wasted page. Telegram photos stay in Telegram.
+      videosOnly: true,
+    );
     await _loadMore();
     // Pull a bounded slice of history in the background; the list above is
     // already usable from the mirror, so this never blocks the first paint.
@@ -371,6 +378,8 @@ class _ChannelDetailPageState extends State<ChannelDetailPage> {
 
   @override
   Widget build(BuildContext context) {
+    // The listing is video-only now; the count equals the row count, but the
+    // filter is kept as the single place that defines "what this page shows".
     final videos = _items.where((r) => r.kind == MediaKind.video).length;
     return Scaffold(
       appBar: AppBar(
