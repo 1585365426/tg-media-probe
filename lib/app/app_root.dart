@@ -129,6 +129,11 @@ class _TgMediaAppState extends State<TgMediaApp> with WidgetsBindingObserver {
       StreamingDiagnostics.instance.setEnabled(
         _preferences.value.streamingDiagnostics,
       );
+      // FORCE_STREAMING_TEST is persisted for exactly one reason: an
+      // acceptance run must not die silently when the app restarts between
+      // arming and playing — that was the "STREAMING TEST: OFF" hole.
+      StreamingDiagnostics.instance
+          .setForceStreamingTest(_preferences.value.forceStreamingTest);
       // The lock is decided before anything else is drawn.
       await _lock.start();
 

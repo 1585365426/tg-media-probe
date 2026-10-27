@@ -79,6 +79,7 @@ class AppPreferences {
     this.preloadCount = defaultPreloadCount,
     this.cacheLimitBytes = CacheBudget.defaultLimit,
     this.streamingDiagnostics = false,
+    this.forceStreamingTest = false,
   });
 
   /// How many videos **after** the current one may be prepared in advance.
@@ -117,6 +118,11 @@ class AppPreferences {
   /// the already-collected numbers visible.
   final bool streamingDiagnostics;
 
+  /// FORCE_STREAMING_TEST, persisted so an acceptance run survives an app
+  /// restart or reinstall of the same build: the mode that silently vanished
+  /// between arming and playing was the "STREAMING TEST: OFF" hole.
+  final bool forceStreamingTest;
+
   AppPreferences copyWith({
     ThemePreference? theme,
     FeedDirection? feedDirection,
@@ -125,6 +131,7 @@ class AppPreferences {
     int? preloadCount,
     int? cacheLimitBytes,
     bool? streamingDiagnostics,
+    bool? forceStreamingTest,
   }) {
     final count = preloadCount ?? this.preloadCount;
     return AppPreferences(
@@ -136,6 +143,7 @@ class AppPreferences {
       cacheLimitBytes: cacheLimitBytes ?? this.cacheLimitBytes,
       streamingDiagnostics:
           streamingDiagnostics ?? this.streamingDiagnostics,
+      forceStreamingTest: forceStreamingTest ?? this.forceStreamingTest,
     );
   }
 
@@ -147,6 +155,7 @@ class AppPreferences {
       'preloadCount': preloadCount,
       'cacheLimitBytes': cacheLimitBytes,
       'streamingDiagnostics': streamingDiagnostics,
+      'forceStreamingTest': forceStreamingTest,
       };
 
   /// Tolerant decode: an unknown enum name falls back to the default for that
@@ -161,6 +170,7 @@ class AppPreferences {
       preloadCount: _countFromJson(json),
       cacheLimitBytes: _limitFromJson(json),
       streamingDiagnostics: json['streamingDiagnostics'] == true,
+      forceStreamingTest: json['forceStreamingTest'] == true,
     );
   }
 
@@ -193,12 +203,14 @@ class AppPreferences {
       other.preloadAdjacent == preloadAdjacent &&
       other.preloadCount == preloadCount &&
       other.cacheLimitBytes == cacheLimitBytes &&
-      other.streamingDiagnostics == streamingDiagnostics;
+      other.streamingDiagnostics == streamingDiagnostics &&
+      other.forceStreamingTest == forceStreamingTest;
 
   @override
   int get hashCode =>
       Object.hash(theme, feedDirection, defaultMuted, preloadAdjacent,
-          preloadCount, cacheLimitBytes, streamingDiagnostics);
+          preloadCount, cacheLimitBytes, streamingDiagnostics,
+          forceStreamingTest);
 
   @override
   String toString() =>
@@ -292,6 +304,9 @@ class PreferencesController extends ChangeNotifier {
 
   Future<void> setStreamingDiagnostics(bool enabled) =>
       update(_value.copyWith(streamingDiagnostics: enabled));
+
+  Future<void> setForceStreamingTest(bool enabled) =>
+      update(_value.copyWith(forceStreamingTest: enabled));
 
   Future<void> setPreloadAdjacent(bool enabled) =>
       update(_value.copyWith(preloadCount: enabled ? 1 : 0));

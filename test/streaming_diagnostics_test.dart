@@ -578,7 +578,10 @@ void main() {
       expect(panel, contains('EFFECTIVE STREAMING: ON'));
 
       diag.setForceStreamingTest(false);
-      expect(diag.panelLines().join('\n'), contains('STREAMING TEST: OFF'));
+      // The play was made while force was ON: turning the toggle off now must
+      // not rewrite history — the panel marks it "(ended)", never plain OFF.
+      expect(diag.panelLines().join('\n'),
+          contains('STREAMING TEST: ON (ended)'));
     });
 
     test('forced + full download before playback => STREAMING_TEST_FAILED',
@@ -647,9 +650,12 @@ void main() {
       );
 
       expect(diag.verdict, StreamingVerdict.streamingNotStarted);
-      // Outside the forced run the same run stays UNKNOWN, not a guess.
+      // Turning the toggle off *after* the play must not rewrite the run:
+      // the verdict is judged by the mode that was active during it.
       diag.setForceStreamingTest(false);
-      expect(diag.verdict, StreamingVerdict.unknown);
+      expect(diag.verdict, StreamingVerdict.streamingNotStarted);
+      expect(diag.panelLines().join('\n'),
+          contains('STREAMING TEST: ON (ended)'));
     });
 
     test('confirmed requires STREAM_HTTP + partial bytes + 206', () async {
@@ -714,6 +720,87 @@ void main() {
       expect(diag.proxyUrl, isNull);
       expect(diag.verdict, StreamingVerdict.unknown,
           reason: '没人播放过，不能下结论');
+    });
+
+    test('a play made under force keeps its verdict after the toggle goes off',
+        () async {
+      // The exact hole from the device report: the run was made with the
+      // forced mode on, but 结束验收 flipped the flag before the report was
+      // read, and the STREAMING_TEST_FAILED marker vanished.
+      final diag = StreamingDiagnostics();
+      diag.setForceStreamingTest(true);
+      diag.beginPlay(fileId: 1001, streaming: false, totalBytes: 1000);
+      await _playAndAdvance(
+        diag,
+        downloadedAtPlayback: 1000,
+        totalBytes: 1000,
+        completed: true,
+      );
+      // Toggle off *after* the play — the recorded run must not change.
+      diag.setForceStreamingTest(false);
+
+      expect(diag.verdict, StreamingVerdict.fullDownloadBeforePlayback);
+      expect(diag.acceptanceLines().join('\n'),
+          contains('STREAMING_TEST_FAILED: '
+              'FULL_DOWNLOAD_OCCURRED_BEFORE_PLAYBACK'));
+    });
+
+    test('evidence is sealed after 结束验收 — later plays cannot wipe it',
+        () async {
+      final diag = StreamingDiagnostics();
+      diag.setForceStreamingTest(true);
+      diag.startAcceptance();
+      diag.beginPlay(fileId: 1001, streaming: true, totalBytes: 1000);
+      diag.notePlayerSource(
+        isStreaming: true,
+        url: 'http://127.0.0.1:8099/t/abc',
+      );
+      diag.noteRangeRequest(from: 0, to: 1048575);
+      await _playAndAdvance(
+        diag,
+        downloadedAtPlayback: 300,
+        totalBytes: 1000,
+        completed: false,
+      );
+      final sealedVerdict = diag.verdict;
+      final sealedReport = diag.acceptanceLines().join('\n');
+
+      // The acceptance is read (结束验收), then the user keeps browsing and
+      // the feed plays a cached LOCAL_FILE video: none of that may touch the
+      // recorded run.
+      diag.stopAcceptance();
+      diag.setForceStreamingTest(false);
+      diag.beginPlay(fileId: 2002, streaming: false, totalBytes: 5000);
+      diag.notePlayerSource(isStreaming: false, url: '/pool/next.mp4');
+      await _playAndAdvance(
+        diag,
+        downloadedAtPlayback: 5000,
+        totalBytes: 5000,
+        completed: true,
+      );
+
+      expect(diag.verdict, sealedVerdict);
+      expect(diag.acceptanceLines().join('\n'), sealedReport);
+      expect(diag.fileId, 1001, reason: '封存后 beginPlay 不得覆盖任何字段');
+    });
+
+    test('starting a new acceptance unseals and wipes the old run',
+        () async {
+      final diag = StreamingDiagnostics();
+      diag.startAcceptance();
+      diag.beginPlay(fileId: 1001, streaming: false, totalBytes: 1000);
+      await _playAndAdvance(
+        diag,
+        downloadedAtPlayback: 1000,
+        totalBytes: 1000,
+        completed: true,
+      );
+      diag.stopAcceptance();
+      expect(diag.verdict, StreamingVerdict.fullDownloadBeforePlayback);
+
+      diag.startAcceptance();
+      expect(diag.fileId, 0, reason: '新一轮验收从清零开始');
+      expect(diag.verdict, StreamingVerdict.unknown);
     });
   });
 

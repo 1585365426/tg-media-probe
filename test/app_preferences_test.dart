@@ -62,12 +62,15 @@ void main() {
         feedDirection: FeedDirection.allowLandscape,
         defaultMuted: true,
         preloadAdjacent: false,
+        forceStreamingTest: true,
       );
 
       await store.save(next);
       final loaded = await PreferencesStore(store: secrets).load();
 
       expect(loaded, next);
+      expect(loaded.forceStreamingTest, isTrue,
+          reason: '强制验收标志必须跨重启存活');
     });
 
     test('an empty store yields the documented defaults', () async {

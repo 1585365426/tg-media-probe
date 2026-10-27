@@ -663,6 +663,9 @@ class _SettingsPageState extends State<SettingsPage> {
   Future<void> _startAcceptance() async {
     StreamingDiagnostics.instance.setForceStreamingTest(true);
     StreamingDiagnostics.instance.startAcceptance();
+    // Persist the flag too: a restart between arming and playing must not
+    // drop the forced mode without a trace.
+    await widget.preferences.setForceStreamingTest(true);
     _showMessage('强制 Streaming 已开启，证据已清零。请打开一个大视频'
         '（500MB–1GB）开始播放；播放后回到本页查看结论。');
   }
@@ -673,6 +676,7 @@ class _SettingsPageState extends State<SettingsPage> {
   Future<void> _stopAcceptance() async {
     StreamingDiagnostics.instance.setForceStreamingTest(false);
     StreamingDiagnostics.instance.stopAcceptance();
+    await widget.preferences.setForceStreamingTest(false);
     final verdict = StreamingDiagnostics.instance.verdict;
     _showMessage(verdict == StreamingVerdict.unknown
         ? '验收已结束：本次没有产生足够数据，结论仍为无法判定'

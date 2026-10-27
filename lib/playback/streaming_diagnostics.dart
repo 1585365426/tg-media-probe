@@ -97,6 +97,16 @@ class StreamingDiagnostics extends ChangeNotifier {
   /// True when the resolver took the streaming branch for this play.
   bool _streamingEnabled = false;
 
+  /// Snapshot of [_forceTest] taken when the current play began. The panel and
+  /// the verdict must reflect the mode that was active **during the play**,
+  /// not whatever the toggle says right now — otherwise pressing 结束验收
+  /// before reading the report rewrites history to OFF.
+  bool _forceTestAtPlay = false;
+
+  /// Set when an acceptance run is ended: from then on no later play may
+  /// wipe the recorded evidence. Only [startAcceptance] unseals it.
+  bool _sealedResult = false;
+
   /// FORCE_STREAMING_TEST: the developer/acceptance switch. While on, the
   /// feed controller must not serve the play from the prefetch cache and must
   /// not run background prefetches — every play goes through the streaming
@@ -177,6 +187,9 @@ class StreamingDiagnostics extends ChangeNotifier {
   bool get enabled => _enabled;
   bool get streamingEnabled => _streamingEnabled;
   bool get forceStreamingTest => _forceTest;
+
+  /// Whether FORCE_STREAMING_TEST was on when the recorded play started.
+  bool get forceTestAtPlay => _forceTestAtPlay;
   String? get playerSourceType => _playerSourceType;
   String? get proxyUrl => _proxyUrl;
   int? get chatId => _chatId;
@@ -287,7 +300,7 @@ class StreamingDiagnostics extends ChangeNotifier {
     // partial file, whatever the source URL looked like. In the forced test
     // that is a definite failure, not an open question.
     if (!sawPartialContent || _rangeRequests == 0) {
-      return _forceTest
+      return _forceTestAtPlay
           ? StreamingVerdict.streamingNotStarted
           : StreamingVerdict.unknown;
     }
@@ -320,6 +333,7 @@ class StreamingDiagnostics extends ChangeNotifier {
   /// address AVPlayer streamed from; `LOCAL_FILE` is a full-download play and
   /// forces the verdict off `STREAMING_CONFIRMED`.
   void notePlayerSource({required bool isStreaming, required String url}) {
+    if (_sealedResult) return;
     _playerSourceType = isStreaming ? 'STREAM_HTTP' : 'LOCAL_FILE';
     _proxyUrl = isStreaming ? url : null;
     _note('playerSource=$_playerSourceType');
@@ -337,6 +351,11 @@ class StreamingDiagnostics extends ChangeNotifier {
     int? messageId,
     int? totalBytes,
   }) {
+    // A settled acceptance result is frozen: browsing afterwards must not
+    // replace the verdict the run produced (this was the "ghost panel" hole
+    // in reverse — a later LOCAL_FILE play overwriting a real run).
+    if (_sealedResult) return;
+    _forceTestAtPlay = _forceTest;
     _streamingEnabled = streaming;
     _fileId = fileId;
     _chatId = chatId;
@@ -387,20 +406,27 @@ class StreamingDiagnostics extends ChangeNotifier {
   /// next play is served from a complete cache, the honest answer is
   /// [StreamingVerdict.fullDownloadBeforePlayback].
   void startAcceptance() {
+    // Unseal first: a previous run's frozen evidence must be wiped here,
+    // exactly once per accepted start.
+    _sealedResult = false;
     beginPlay(fileId: 0, streaming: false);
     _acceptanceRunning = true;
     notifyListeners();
   }
 
-  /// Ends the armed run; the recorded evidence stays on screen.
+  /// Ends the armed run; the recorded evidence stays on screen — and stays
+  /// sealed until the next [startAcceptance], no matter how many ordinary
+  /// plays happen in between.
   void stopAcceptance() {
     _acceptanceRunning = false;
+    _sealedResult = true;
     notifyListeners();
   }
 
   /// The resolver picked the streaming branch. **Recorded, not trusted**: it
   /// only says which path was taken. [verdict] still waits for the data.
   void noteStreamingSelected() {
+    if (_sealedResult) return;
     _streamingEnabled = true;
     notifyListeners();
   }
@@ -408,6 +434,7 @@ class StreamingDiagnostics extends ChangeNotifier {
   /// The range proxy bound its port and the player URL exists. `url` is the
   /// exact `http://127.0.0.1:port/<token>` the player will be handed.
   void noteProxyStarted(String url) {
+    if (_sealedResult) return;
     _proxyStartedMillis ??= _elapsed();
     _proxyUrl = url;
     _note('proxy started');
@@ -422,6 +449,7 @@ class StreamingDiagnostics extends ChangeNotifier {
     required bool completed,
     bool isDownloading = true,
   }) {
+    if (_sealedResult) return;
     _downloadedBytes = downloadedBytes;
     if (totalBytes > 0) _totalBytes = totalBytes;
     _downloadOffset = downloadOffset;
@@ -454,6 +482,7 @@ class StreamingDiagnostics extends ChangeNotifier {
 
   /// The player asked for a byte range. Straight from the proxy's request.
   void noteRangeRequest({required int from, int? to}) {
+    if (_sealedResult) return;
     _rangeRequests++;
     _firstRangeMillis ??= _elapsed();
     _lastRange = '$from-${to ?? 'end'}';
@@ -471,6 +500,7 @@ class StreamingDiagnostics extends ChangeNotifier {
     required int total,
     required int length,
   }) {
+    if (_sealedResult) return;
     _lastStatus = status;
     if (status == 206) {
       _partialContentCount++;
@@ -482,6 +512,7 @@ class StreamingDiagnostics extends ChangeNotifier {
 
   /// The proxy moved the TDLib download window to serve a distant range.
   void noteWindowMove(int start, int end) {
+    if (_sealedResult) return;
     _windowMoves++;
     _windowStart = start;
     _windowEnd = end;
@@ -490,6 +521,7 @@ class StreamingDiagnostics extends ChangeNotifier {
 
   /// No TDLib progress for a whole quiet window: a real stall, not slowness.
   void noteStall(String reason) {
+    if (_sealedResult) return;
     _stalls++;
     _lastStallReason = reason;
     _note('stall $reason');
@@ -500,6 +532,7 @@ class StreamingDiagnostics extends ChangeNotifier {
   /// The reason is redacted here: it can carry a TDLib message with a container
   /// path, and this text is what reaches the diagnostics export.
   void noteFallback(String reason) {
+    if (_sealedResult) return;
     _fallback = true;
     _fallbackReason = redactText(reason);
     _streamingEnabled = false;
@@ -508,6 +541,7 @@ class StreamingDiagnostics extends ChangeNotifier {
 
   /// TDLib reported the whole file on disk.
   void noteCompleted({int? totalBytes}) {
+    if (_sealedResult) return;
     if (!_isDownloadingCompleted) {
       _isDownloadingCompleted = true;
       _downloadCompletedMillis = _elapsed();
@@ -531,6 +565,7 @@ class StreamingDiagnostics extends ChangeNotifier {
     required bool isBuffering,
     String? error,
   }) {
+    if (_sealedResult) return;
     _playerTime = position;
     _playerDuration = duration;
     _playerError = error;
@@ -554,6 +589,7 @@ class StreamingDiagnostics extends ChangeNotifier {
   bool recordFirstPlayback() => _markFirstPlayback();
 
   bool _markFirstPlayback() {
+    if (_sealedResult) return false;
     if (_firstPlaybackDownloadedBytes != null) return false;
     _hasStartedPlaying = true;
     _firstPlaybackDownloadedBytes = _downloadedBytes;
@@ -594,7 +630,10 @@ class StreamingDiagnostics extends ChangeNotifier {
         // The three lines that make "the test mode was actually on"
         // verifiable on the screen itself — the gap that let a full download
         // run pass itself off as a streaming run before.
-        'STREAMING TEST: ${_forceTest ? 'ON' : 'OFF'}',
+        // ON if the mode is live now (armed, waiting for the play) or if it
+        // was on when the recorded play started; "(ended)" marks the latter.
+        'STREAMING TEST: ${(_forceTest || _forceTestAtPlay) ? 'ON' : 'OFF'}'
+        '${(!_forceTest && _forceTestAtPlay) ? ' (ended)' : ''}',
         'PREFERENCE STREAMING: ${userStreamingPreference ? 'ON' : 'OFF'}',
         'EFFECTIVE STREAMING: ${_streamingEnabled ? 'ON' : 'OFF'}',
         'playerSourceType=${_playerSourceType ?? '-'}',
@@ -641,7 +680,8 @@ class StreamingDiagnostics extends ChangeNotifier {
     final lines = <String>[verdict.code];
     // Forced-test failure marker: the acceptance must not read a full download
     // as a pass, whatever else the run produced.
-    if (_forceTest && verdict == StreamingVerdict.fullDownloadBeforePlayback) {
+    if (_forceTestAtPlay &&
+        verdict == StreamingVerdict.fullDownloadBeforePlayback) {
       lines.add('STREAMING_TEST_FAILED: '
           'FULL_DOWNLOAD_OCCURRED_BEFORE_PLAYBACK');
     }
