@@ -30,6 +30,7 @@ import '../util/byte_format.dart';
 import 'app_theme.dart';
 import 'feed_controller.dart';
 import 'status_view.dart';
+import 'streaming_overlay.dart';
 
 class FeedPage extends StatefulWidget {
   const FeedPage({
@@ -139,7 +140,12 @@ class _FeedPageState extends State<FeedPage> with WidgetsBindingObserver {
     final controller = FeedController(
       source: IndexFeedSource(store: store, chatId: _chatFilter),
       player: SinglePlayerController(
-        factory: const VideoPlayerFactory(),
+        // The player reports its own state (playhead, buffering, decoder
+        // error) into the shared diagnostics, so the streaming verdict is
+        // built from what AVPlayer did, not from which branch ran.
+        factory: const VideoPlayerFactory(
+          onValueChanged: VideoPlayerHandle.reportValue,
+        ),
         activeFiles: _activeFiles,
       ),
       sources: VideoSourceResolver(
@@ -293,6 +299,9 @@ class _FeedPageState extends State<FeedPage> with WidgetsBindingObserver {
             if (overlays.showControls && overlaysVisible)
               _buildControls(controller),
             if (_rotationHint != null) _buildRotationHint(),
+            // Diagnostics badge. Renders nothing unless diagnostics mode is
+            // on, so the normal feed is untouched.
+            const StreamingOverlay(),
           ],
         ),
       ),

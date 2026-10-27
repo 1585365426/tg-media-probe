@@ -26,6 +26,7 @@ import '../data/channel_sync.dart';
 import '../data/history_source.dart';
 import '../data/index_store.dart';
 import '../playback/playback_trace.dart';
+import '../playback/streaming_diagnostics.dart';
 import '../security/tdlib_key.dart';
 import '../storage/file_ops.dart';
 import '../storage/storage_layout.dart';
@@ -610,6 +611,9 @@ class AppSession extends ChangeNotifier {
       // Stage timings for the last few plays: the only way to tell "waiting for
       // a full download" apart from "waiting for the player" without a debugger.
       'playback': PlaybackTraceLog.instance.diagnosticLines(),
+      // Live streaming evidence for the current/last play: TDLib counters,
+      // proxy Range responses and the player's own state.
+      'streaming': StreamingDiagnostics.instance.toJson(),
     });
   }
 

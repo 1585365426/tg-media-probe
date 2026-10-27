@@ -78,6 +78,7 @@ class AppPreferences {
     this.preloadAdjacent = true,
     this.preloadCount = defaultPreloadCount,
     this.cacheLimitBytes = CacheBudget.defaultLimit,
+    this.streamingDiagnostics = false,
   });
 
   /// How many videos **after** the current one may be prepared in advance.
@@ -109,6 +110,13 @@ class AppPreferences {
   /// Ceiling for the cleanable cache. Bytes on disk, formatted for the UI.
   final int cacheLimitBytes;
 
+  /// Shows the on-device streaming badge and the playback diagnostics section.
+  ///
+  /// Off by default: it is a verification aid, not a feature. Nothing about
+  /// playback, sync, caching or the UI changes when it is on — it only makes
+  /// the already-collected numbers visible.
+  final bool streamingDiagnostics;
+
   AppPreferences copyWith({
     ThemePreference? theme,
     FeedDirection? feedDirection,
@@ -116,6 +124,7 @@ class AppPreferences {
     bool? preloadAdjacent,
     int? preloadCount,
     int? cacheLimitBytes,
+    bool? streamingDiagnostics,
   }) {
     final count = preloadCount ?? this.preloadCount;
     return AppPreferences(
@@ -125,6 +134,8 @@ class AppPreferences {
       preloadAdjacent: preloadAdjacent ?? (count > 0),
       preloadCount: count,
       cacheLimitBytes: cacheLimitBytes ?? this.cacheLimitBytes,
+      streamingDiagnostics:
+          streamingDiagnostics ?? this.streamingDiagnostics,
     );
   }
 
@@ -133,8 +144,9 @@ class AppPreferences {
         'feedDirection': feedDirection.name,
         'defaultMuted': defaultMuted,
         'preloadAdjacent': preloadAdjacent,
-        'preloadCount': preloadCount,
-        'cacheLimitBytes': cacheLimitBytes,
+      'preloadCount': preloadCount,
+      'cacheLimitBytes': cacheLimitBytes,
+      'streamingDiagnostics': streamingDiagnostics,
       };
 
   /// Tolerant decode: an unknown enum name falls back to the default for that
@@ -148,6 +160,7 @@ class AppPreferences {
       preloadAdjacent: json['preloadAdjacent'] != false,
       preloadCount: _countFromJson(json),
       cacheLimitBytes: _limitFromJson(json),
+      streamingDiagnostics: json['streamingDiagnostics'] == true,
     );
   }
 
@@ -179,17 +192,19 @@ class AppPreferences {
       other.defaultMuted == defaultMuted &&
       other.preloadAdjacent == preloadAdjacent &&
       other.preloadCount == preloadCount &&
-      other.cacheLimitBytes == cacheLimitBytes;
+      other.cacheLimitBytes == cacheLimitBytes &&
+      other.streamingDiagnostics == streamingDiagnostics;
 
   @override
   int get hashCode =>
       Object.hash(theme, feedDirection, defaultMuted, preloadAdjacent,
-          preloadCount, cacheLimitBytes);
+          preloadCount, cacheLimitBytes, streamingDiagnostics);
 
   @override
   String toString() =>
       'AppPreferences(theme=${theme.name}, dir=${feedDirection.name}, '
-      'muted=$defaultMuted, preload=$preloadCount)';
+      'muted=$defaultMuted, preload=$preloadCount, '
+      'diag=$streamingDiagnostics)';
 }
 
 /// Persistence for [AppPreferences].
@@ -274,6 +289,9 @@ class PreferencesController extends ChangeNotifier {
 
   Future<void> setDefaultMuted(bool muted) =>
       update(_value.copyWith(defaultMuted: muted));
+
+  Future<void> setStreamingDiagnostics(bool enabled) =>
+      update(_value.copyWith(streamingDiagnostics: enabled));
 
   Future<void> setPreloadAdjacent(bool enabled) =>
       update(_value.copyWith(preloadCount: enabled ? 1 : 0));

@@ -4,9 +4,18 @@ import 'dart:io';
 import 'package:video_player/video_player.dart';
 
 import 'player_slot.dart';
+import 'streaming_diagnostics.dart';
 
 class VideoPlayerFactory implements PlayerFactory {
-  const VideoPlayerFactory({this.streamingInitTimeout = const Duration(seconds: 12)});
+  const VideoPlayerFactory({
+    this.streamingInitTimeout = const Duration(seconds: 12),
+    this.onValueChanged,
+  });
+
+  /// Forwards every player value change to the diagnostics panel, so the
+  /// playhead / status / decoder error shown there are the player's own
+  /// numbers and not a second, separate observation.
+  final void Function(VideoPlayerValue value)? onValueChanged;
 
   /// Bound only for stream sources: an MP4 whose moov sits at the end makes
   /// AVPlayer request ranges far ahead of the download, and without a bound
@@ -21,6 +30,7 @@ class VideoPlayerFactory implements PlayerFactory {
         // lives here so the handle itself stays a dumb lifecycle wrapper.
         initializeTimeout:
             path.startsWith('http') ? streamingInitTimeout : null,
+        onValueChanged: onValueChanged,
       );
 }
 
@@ -36,8 +46,11 @@ class VideoPlayerHandle
   /// `http://127.0.0.1/...` URL (streaming through the local range proxy).
   /// Same player, same lifecycle — only the source the AVURLAsset opens
   /// differs, so no third-party player and no factory split is needed.
-  VideoPlayerHandle({required this.path, this.initializeTimeout})
-      : _controller = path.startsWith('http')
+  VideoPlayerHandle({
+    required this.path,
+    this.initializeTimeout,
+    this.onValueChanged,
+  }) : _controller = path.startsWith('http')
             ? VideoPlayerController.networkUrl(Uri.parse(path))
             : VideoPlayerController.file(File(path));
 
@@ -48,6 +61,9 @@ class VideoPlayerHandle
   /// (AVAsset does not read the whole file), so they keep the no-timeout
   /// behaviour the current fast path relies on.
   final Duration? initializeTimeout;
+
+  /// Set by the factory; publishes each value change to the diagnostics panel.
+  final void Function(VideoPlayerValue value)? onValueChanged;
 
   @override
   final String path;
@@ -109,6 +125,22 @@ class VideoPlayerHandle
     }
     controller.addListener(_onValueChanged);
     _listenerAttached = true;
+    _onValueChanged(); // publish the initial state, not just later changes
+  }
+
+  /// Feeds one player value into the shared streaming diagnostics.
+  ///
+  /// Every field is the player's own view of itself — rate, buffering,
+  /// playhead and decoder error — so the verdict in the diagnostics panel is
+  /// built from what AVPlayer actually did.
+  static void reportValue(VideoPlayerValue value) {
+    StreamingDiagnostics.instance.updatePlayer(
+      position: value.position,
+      duration: value.duration,
+      isPlaying: value.isPlaying,
+      isBuffering: value.isBuffering,
+      error: value.hasError ? value.errorDescription : null,
+    );
   }
 
   @override
@@ -157,5 +189,8 @@ class VideoPlayerHandle
     _position = value.position;
     _duration = value.duration;
     if (value.hasError) _error = value.errorDescription;
+    // Straight to the diagnostics panel: what AVPlayer just reported.
+    final sink = onValueChanged;
+    if (sink != null) sink(value);
   }
 }

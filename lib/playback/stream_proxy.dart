@@ -78,6 +78,10 @@ class StreamProxyServer {
     this.maxWait = const Duration(seconds: 90),
     this.stallTimeout = const Duration(seconds: 20),
     this.onEvent,
+    this.onRangeRequest,
+    this.onResponse,
+    this.onWindowMove,
+    this.onStall,
     HttpServer? injectedServer,
     Random? random,
   })  : _server = injectedServer,
@@ -103,6 +107,25 @@ class StreamProxyServer {
   /// Diagnostics feed, already free of paths and secrets: method, range,
   /// status, byte counts. Wired into [PlaybackTrace] by the resolver.
   final void Function(String event)? onEvent;
+
+  /// A Range request arrived. Carries what the player actually asked for —
+  /// the input to the streaming verdict.
+  final void Function({required int from, required int? to})? onRangeRequest;
+
+  /// A response was written, with the status code the client really got.
+  final void Function({
+    required int status,
+    required int from,
+    required int end,
+    required int total,
+    required int length,
+  })? onResponse;
+
+  /// The TDLib download window was moved to serve [start]..[end].
+  final void Function({required int start, required int end})? onWindowMove;
+
+  /// A wait ended because TDLib went silent for a whole [stallTimeout].
+  final void Function(String reason)? onStall;
 
   final FileProgressWatch watch;
 
@@ -182,6 +205,13 @@ class StreamProxyServer {
     // a 404 body is still a response to something that should never have asked.
     if (request.uri.path != '/v/$_token') {
       onEvent?.call('req forbidden path');
+      onResponse?.call(
+        status: HttpStatus.forbidden,
+        from: 0,
+        end: 0,
+        total: 0,
+        length: 0,
+      );
       await _reject(request, HttpStatus.forbidden);
       return;
     }
@@ -189,7 +219,9 @@ class StreamProxyServer {
       await _serveRange(request);
     } on Object catch (e) {
       _stalls++;
-      onEvent?.call('req fail: ${_brief(e)}');
+      final reason = 'req fail: ${_brief(e)}';
+      onEvent?.call(reason);
+      onStall?.call(reason);
       // The client socket is dead (user skipped the video mid-transfer) or
       // the wait died. Nothing useful can be written; end the response.
       try {
@@ -229,6 +261,13 @@ class StreamProxyServer {
         request.response.headers.contentLength = total;
       }
       onEvent?.call('head total=$total');
+      onResponse?.call(
+        status: HttpStatus.ok,
+        from: 0,
+        end: total > 0 ? total - 1 : 0,
+        total: total,
+        length: 0,
+      );
       await request.response.close();
       return;
     }
@@ -247,7 +286,11 @@ class StreamProxyServer {
         to = parsed.$2;
       }
     }
-    onEvent?.call('req range=$from-${to ?? 'end'} head=${watch.headBytes}');
+    final hasRange = rangeHeader != null;
+    onEvent?.call(
+        'req ${request.method} range=${hasRange ? '$from-${to ?? 'end'}' : '-'} '
+        'head=${watch.headBytes}');
+    if (hasRange) onRangeRequest?.call(from: from, to: to);
 
     // Prepare: startup gate for the first bytes, window steering for a range
     // the sequential download has not reached yet.
@@ -288,6 +331,13 @@ class StreamProxyServer {
     }
     _served++;
     onEvent?.call('serve 206 $from-$end/$total ${length}B');
+    onResponse?.call(
+      status: HttpStatus.partialContent,
+      from: from,
+      end: end,
+      total: total,
+      length: length,
+    );
     await response.addStream(file.openRead(from, end + 1));
     await response.close();
 
@@ -327,6 +377,7 @@ class StreamProxyServer {
     final end = min(needEnd, max(0, total - 1));
     _windowSwitches++;
     onEvent?.call('window→$from-$end (head=${watch.headBytes})');
+    onWindowMove?.call(start: from, end: end);
     await watch.requestWindow(from, end);
     await _waitFor(
       () => watch.covers(from, min(end, _readableCeiling(total))) ||
@@ -372,6 +423,7 @@ class StreamProxyServer {
     }
     if (!ready()) {
       onEvent?.call('wait fail $label');
+      onStall?.call('wait fail $label');
       throw StreamProxyException(
           '等待播放数据超时（$label，可读 ${watch.headBytes}B）');
     }

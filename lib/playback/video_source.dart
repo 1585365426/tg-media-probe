@@ -25,11 +25,12 @@ import 'dart:io';
 
 import '../data/media_record.dart';
 import '../td/td_client.dart';
+import '../td/td_models.dart';
+import '../td/td_requests.dart';
 import 'media_metadata.dart';
 import 'playback_trace.dart';
 import 'stream_proxy.dart';
-import '../td/td_models.dart';
-import '../td/td_requests.dart';
+import 'streaming_diagnostics.dart';
 
 /// The only TDLib surface this file needs. Abstracted so the resolution logic
 /// can be tested without a native library.
@@ -269,9 +270,16 @@ class VideoSourceResolver {
     this.startupBufferBytes = StreamProxyServer.defaultStartupBufferBytes,
     this.proxyFactory,
     Future<bool> Function(String path)? fileExists,
-  }) : _fileExists = fileExists ?? _defaultFileExists;
+    StreamingDiagnostics? diagnostics,
+  })  : _fileExists = fileExists ?? _defaultFileExists,
+        _diagnostics = diagnostics ?? StreamingDiagnostics.instance;
 
   final FileTransferApi api;
+
+  /// Where the streaming evidence for the current play is recorded. Defaults to
+  /// the process-wide instance so the overlay and the settings panel see the
+  /// same numbers the resolver produced; tests inject their own.
+  final StreamingDiagnostics _diagnostics;
 
   /// Used to repair stale metadata: a rejected `file_id` is re-read from the
   /// message, and a missing file name is filled in the same way.
@@ -339,9 +347,22 @@ class VideoSourceResolver {
     void Function(VideoSourceUpdate update)? onProgress,
     PlaybackTrace? trace,
     void Function(MediaRecord fresh)? onRecordRefreshed,
+
+    /// True when this resolve *is* the play the user is watching. A prefetch
+    /// must not move the diagnostics panel: the number there has to describe
+    /// the video on screen, not a neighbour warming up in the background.
+    bool forPlayback = false,
   }) {
     final running = _inflight[fileId];
     if (running != null) return running.then((source) => source.path);
+    if (forPlayback) {
+      _diagnostics.beginPlay(
+        fileId: fileId,
+        streaming: false,
+        chatId: chatId,
+        messageId: messageId,
+      );
+    }
     final future = _resolveWithRepair(
       fileId,
       chatId: chatId,
@@ -349,6 +370,7 @@ class VideoSourceResolver {
       onProgress: onProgress,
       trace: trace,
       onRecordRefreshed: onRecordRefreshed,
+      report: forPlayback,
     ).then((path) => PlaySource.file(path));
     _inflight[fileId] = future;
     return future
@@ -424,6 +446,8 @@ class VideoSourceResolver {
       try {
         return await _streamOnce(
           activeId,
+          chatId: chatId,
+          messageId: messageId,
           onProgress: onProgress,
           trace: trace,
         );
@@ -469,6 +493,8 @@ class VideoSourceResolver {
   /// the download and open the proxy once the startup buffer is on disk.
   Future<PlaySource> _streamOnce(
     int fileId, {
+    int? chatId,
+    int? messageId,
     void Function(VideoSourceUpdate update)? onProgress,
     PlaybackTrace? trace,
   }) async {
@@ -481,6 +507,25 @@ class VideoSourceResolver {
       trace?.mark(PlaybackStage.fileRecordKnown,
           bytes: existing.downloadedSize);
       if (existing.expectedSize > 0) trace?.expectedBytes = existing.expectedSize;
+    }
+    // Start of a new play's evidence: ids and total come from TDLib's own file
+    // record, never from a UI assumption. `streamingEnabled` flips to true
+    // later, only if the resolver really takes the streaming branch.
+    _diagnostics.beginPlay(
+      fileId: fileId,
+      streaming: false,
+      chatId: chatId,
+      messageId: messageId,
+      totalBytes: existing?.expectedSize ?? 0,
+    );
+    if (existing != null) {
+      _diagnostics.updateTransfer(
+        downloadedBytes: existing.downloadedSize,
+        totalBytes: existing.expectedSize,
+        downloadOffset: existing.downloadOffset,
+        completed: existing.isCompleted,
+        isDownloading: !existing.isCompleted,
+      );
     }
     // Cache hit check is byte-identical to the full-download path: a complete
     // record with wrong size or a vanished file is NOT a hit — those videos
@@ -512,7 +557,13 @@ class VideoSourceResolver {
     }
 
     trace?.mark(PlaybackStage.streamingModeSelected);
-    final watch = _LiveFileWatch(api, fileId, initial: existing);
+    _diagnostics.noteStreamingSelected();
+    final watch = _LiveFileWatch(
+      api,
+      fileId,
+      initial: existing,
+      onState: _diagnostics.updateTransferFromState,
+    );
 
     StreamProxyServer? proxy;
     try {
@@ -564,6 +615,7 @@ class VideoSourceResolver {
           if (watch.isComplete) {
             trace?.mark(PlaybackStage.fileCompleted,
                 bytes: watch.expectedBytes);
+            _diagnostics.noteCompleted(totalBytes: watch.expectedBytes);
           }
         } on Object {
           // The completion marker is diagnostics, not playback: a closed
@@ -608,6 +660,32 @@ class VideoSourceResolver {
           // why" after a device run — without it the answer is a guess.
           trace?.noteProxy(event);
         },
+        // Structured mirrors of the same events: the diagnostics panel and the
+        // streaming verdict read these, so they cannot be shaped by a string.
+        onRangeRequest: ({required from, required to}) {
+          _diagnostics.noteRangeRequest(from: from, to: to);
+          trace?.mark(PlaybackStage.firstRangeRequest);
+        },
+        onResponse: ({
+          required status,
+          required from,
+          required end,
+          required total,
+          required length,
+        }) {
+          _diagnostics.noteResponse(
+            status: status,
+            from: from,
+            end: end,
+            total: total,
+            length: length,
+          );
+          if (status == 206) trace?.mark(PlaybackStage.first206Response);
+        },
+        onWindowMove: ({required start, required end}) {
+          _diagnostics.noteWindowMove(start, end);
+        },
+        onStall: _diagnostics.noteStall,
       );
 
   /// Waits for the startup buffer with the same two rules as the transfer
@@ -665,6 +743,7 @@ class VideoSourceResolver {
     void Function(VideoSourceUpdate update)? onProgress,
     PlaybackTrace? trace,
     void Function(MediaRecord fresh)? onRecordRefreshed,
+    bool report = false,
   }) async {
     var activeId = fileId;
     var retries = 0;
@@ -676,6 +755,7 @@ class VideoSourceResolver {
           activeId,
           onProgress: onProgress,
           trace: trace,
+          report: report,
         );
       } on _MissingFile catch (e) {
         // The id is stale. Re-read the message once and try the id it carries.
@@ -743,6 +823,7 @@ class VideoSourceResolver {
     int fileId, {
     void Function(VideoSourceUpdate update)? onProgress,
     PlaybackTrace? trace,
+    bool report = false,
   }) async {
     _cancelled.remove(fileId);
     trace?.mark(PlaybackStage.resolveStarted);
@@ -753,6 +834,15 @@ class VideoSourceResolver {
       trace?.mark(PlaybackStage.fileRecordKnown,
           bytes: existing.downloadedSize);
       if (existing.expectedSize > 0) trace?.expectedBytes = existing.expectedSize;
+      if (report) {
+        _diagnostics.updateTransfer(
+          downloadedBytes: existing.downloadedSize,
+          totalBytes: existing.expectedSize,
+          downloadOffset: existing.downloadOffset,
+          completed: existing.isCompleted,
+          isDownloading: !existing.isCompleted,
+        );
+      }
     }
     // A "completed" record is only a cache hit if the bytes are actually there
     // and the size agrees. TDLib occasionally reports completion for a record
@@ -801,11 +891,20 @@ class VideoSourceResolver {
 
     final subscription = api.updates().listen((state) {
       if (state.id != fileId) return;
+      if (report) {
+        _diagnostics.updateTransfer(
+          downloadedBytes: state.downloadedSize,
+          totalBytes: state.expectedSize,
+          downloadOffset: state.downloadOffset,
+          completed: state.isCompleted,
+        );
+      }
       if (state.isCompleted) {
         // Complete even when the path is empty: TDLib can report a finished
         // transfer with no local path, and waiting for a later update that
         // never comes would turn a clear error into a long spinner.
         if (!completion.isCompleted) completion.complete(state);
+        if (report) _diagnostics.noteCompleted(totalBytes: expected);
         return;
       }
       if (state.expectedSize > 0) expected = state.expectedSize;
@@ -972,6 +1071,7 @@ class _LiveFileWatch implements FileProgressWatch {
     this._api,
     this._fileId, {
     required FileState? initial,
+    this.onState,
   }) {
     if (initial != null && initial.path.isNotEmpty) {
       _path = initial.path;
@@ -997,6 +1097,10 @@ class _LiveFileWatch implements FileProgressWatch {
   final FileTransferApi _api;
   final int _fileId;
 
+  /// Mirrors every parsed `updateFile` to the diagnostics panel. The same
+  /// stream that drives the wait loop, so the numbers cannot drift apart.
+  final void Function(FileState state)? onState;
+
   String _path = '';
   int _windowOffset = 0;
   int _prefix = 0;
@@ -1013,6 +1117,7 @@ class _LiveFileWatch implements FileProgressWatch {
 
   void _onState(FileState state) {
     if (state.id != _fileId) return;
+    onState?.call(state);
     if (state.path.isNotEmpty) _path = state.path;
     if (state.expectedSize > _expected) _expected = state.expectedSize;
     _canDownload = state.canBeDownloaded;

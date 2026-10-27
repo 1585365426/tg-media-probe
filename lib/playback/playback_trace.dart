@@ -70,6 +70,72 @@ enum PlaybackStage {
   /// Together with [startupBufferReached] this yields the two numbers the
   /// product wants to see: "开始播放：X 秒 / 完整下载：Y 秒".
   fileCompleted,
+
+  // ---- streaming evidence (device acceptance). Events, not stages: they sit
+  // after [fileCompleted] so adding them cannot reorder the happy path above.
+
+  /// AVPlayer's first Range request reached the proxy.
+  firstRangeRequest,
+
+  /// The proxy answered with `206 Partial Content` for the first time.
+  first206Response,
+
+  /// The playhead moved: the player is running, not buffering.
+  /// Its `bytes` is the TDLib byte count at that moment — the number the
+  /// streaming verdict rests on.
+  firstPlayback,
+}
+
+/// The label a stage carries in the diagnostics timeline.
+///
+/// The enum names are internal; the labels are the ones the task book asks for
+/// (`proxyStarted`, `tdlibDownloadStarted`, `firstBytesAvailable`, ...).
+String stageLabel(PlaybackStage stage) => switch (stage) {
+      PlaybackStage.selected => 'selected',
+      PlaybackStage.resolveStarted => 'resolveStarted',
+      PlaybackStage.fileRecordKnown => 'fileRecordKnown',
+      PlaybackStage.streamingModeSelected => 'streamingModeSelected',
+      PlaybackStage.streamingProxyStarted => 'proxyStarted',
+      PlaybackStage.firstRangeRequest => 'firstRangeRequest',
+      PlaybackStage.first206Response => 'first206Response',
+      PlaybackStage.downloadRequested => 'tdlibDownloadStarted',
+      PlaybackStage.firstBytes => 'firstBytesAvailable',
+      PlaybackStage.startupBufferReached => 'startupBufferReached',
+      PlaybackStage.fileReady => 'fileReady',
+      PlaybackStage.playerCreated => 'playerCreated',
+      PlaybackStage.playerInitialized => 'playerInitialized',
+      PlaybackStage.firstPlayback => 'firstPlayback',
+      PlaybackStage.firstFrame => 'firstFrame',
+      PlaybackStage.fileCompleted => 'downloadCompleted',
+      PlaybackStage.streamingFallback => 'streamingFallback',
+      PlaybackStage.fileIdRefreshed => 'fileIdRefreshed',
+      PlaybackStage.metadataFetched => 'metadataFetched',
+    };
+
+/// One row of the playback timeline.
+class PlaybackTimelineEntry {
+  const PlaybackTimelineEntry({
+    required this.stage,
+    required this.at,
+    this.millisFromStart,
+    this.bytes,
+  });
+
+  final PlaybackStage stage;
+  final DateTime at;
+
+  /// Milliseconds since [PlaybackStage.selected]; null before the first mark.
+  final int? millisFromStart;
+
+  /// TDLib byte count recorded with the mark, when it had one.
+  final int? bytes;
+
+  String get label => stageLabel(stage);
+
+  @override
+  String toString() => bytes == null
+      ? '$label=${millisFromStart ?? '-'}ms'
+      : '$label=${millisFromStart ?? '-'}ms ${bytes}B';
 }
 
 class PlaybackTrace {
@@ -150,6 +216,30 @@ class PlaybackTrace {
     return lines;
   }
 
+  /// The whole timeline, **ordered by the recorded clock**, not by enum
+  /// position — an event that was marked later must never appear earlier just
+  /// because it sits lower in the enum.
+  List<PlaybackTimelineEntry> timeline() {
+    final entries = _marks.entries.toList()
+      ..sort((a, b) => a.value.compareTo(b.value));
+    final origin = entries.isEmpty ? null : entries.first.value;
+    return <PlaybackTimelineEntry>[
+      for (final entry in entries)
+        PlaybackTimelineEntry(
+          stage: entry.key,
+          at: entry.value,
+          millisFromStart:
+              origin == null ? null : entry.value.difference(origin).inMilliseconds,
+          bytes: _bytes[entry.key],
+        ),
+    ];
+  }
+
+  /// The timeline as exportable lines: `label=+123ms (1048576B)`.
+  List<String> timelineLines() => <String>[
+        for (final entry in timeline()) entry.toString(),
+      ];
+
   DateTime? _previousMarked(PlaybackStage stage) {
     DateTime? best;
     PlaybackStage? bestStage;
@@ -197,6 +287,9 @@ class PlaybackTraceLog {
   final List<PlaybackTrace> _entries = <PlaybackTrace>[];
 
   List<PlaybackTrace> get entries => List<PlaybackTrace>.unmodifiable(_entries);
+
+  /// The most recent trace, or null when nothing has played yet.
+  PlaybackTrace? get last => _entries.isEmpty ? null : _entries.last;
 
   void add(PlaybackTrace trace) {
     _entries.add(trace);

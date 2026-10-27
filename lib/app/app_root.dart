@@ -22,6 +22,7 @@ import '../lock/unlock_controller.dart';
 import '../security/biometric.dart';
 import '../security/lock_policy.dart';
 import '../security/tdlib_key.dart';
+import '../playback/streaming_diagnostics.dart';
 import '../storage/active_files.dart';
 import '../storage/app_paths.dart';
 import '../storage/file_ops.dart';
@@ -123,6 +124,11 @@ class _TgMediaAppState extends State<TgMediaApp> with WidgetsBindingObserver {
   Future<void> _bootstrap() async {
     try {
       await _preferences.load();
+      // Diagnostics mode is a persisted choice, so it has to be applied to
+      // the shared diagnostics object before any play can record into it.
+      StreamingDiagnostics.instance.setEnabled(
+        _preferences.value.streamingDiagnostics,
+      );
       // The lock is decided before anything else is drawn.
       await _lock.start();
 

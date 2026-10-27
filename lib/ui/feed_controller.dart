@@ -29,6 +29,7 @@ import '../playback/playback_trace.dart';
 import '../playback/player_slot.dart';
 import '../playback/video_source.dart';
 import '../playback/watch_store.dart';
+import '../playback/streaming_diagnostics.dart';
 import '../td/td_error_kind.dart';
 import '../util/latest_only.dart';
 
@@ -116,7 +117,9 @@ class FeedController extends ChangeNotifier {
     int? preloadCount,
     this.pollInterval = const Duration(milliseconds: 250),
     this.watch,
+    StreamingDiagnostics? diagnostics,
   })  : _muted = defaultMuted,
+        _diagnostics = diagnostics ?? StreamingDiagnostics.instance,
         preloadCount = preloadCount ??
             (preloadAdjacent ? AppPreferences.defaultPreloadCount : 0);
 
@@ -145,6 +148,20 @@ class FeedController extends ChangeNotifier {
   /// Local watch state (position + finished). Optional so a test without one
   /// exercises exactly the same playback path minus the bookkeeping.
   final WatchStore? watch;
+
+  /// Where the live streaming evidence for the current play is recorded.
+  /// Defaults to the process-wide instance the overlay and the settings
+  /// diagnostics section read from; tests inject their own.
+  final StreamingDiagnostics _diagnostics;
+
+  /// Live streaming evidence for the current play (settings screen, overlay).
+  StreamingDiagnostics get diagnostics => _diagnostics;
+
+  /// True when the current play gave up on streaming and used the full
+  /// download instead. Kept here as well so the diagnostics screen can show it
+  /// without reaching into the resolver.
+  bool _fallbackOccurred = false;
+  bool get fallbackOccurred => _fallbackOccurred;
 
   /// Set once the finish for the current item has been recorded, so a 250 ms
   /// poll does not write the same row eight times a second.
@@ -517,6 +534,7 @@ class FeedController extends ChangeNotifier {
     );
     trace.mark(PlaybackStage.selected);
     _lastTrace = trace;
+    _fallbackOccurred = false;
 
     // The index stores whatever `messageVideo.video.file_name` held when the
     // message was mirrored, and for channel videos that is frequently empty.
@@ -621,6 +639,8 @@ class FeedController extends ChangeNotifier {
       // Fall back to the full download — silently, no error screen, and the
       // bytes already fetched keep the wait short.
       trace.mark(PlaybackStage.streamingFallback);
+      _diagnostics.noteFallback('播放器初始化失败');
+      _fallbackOccurred = true;
       await source.dispose();
       _activeSource = null;
       try {
@@ -630,6 +650,7 @@ class FeedController extends ChangeNotifier {
           messageId: record.messageId,
           trace: trace,
           onRecordRefreshed: _absorbRefreshed,
+          forPlayback: true,
         );
         await player.activate(path);
         trace.mark(PlaybackStage.playerInitialized);
@@ -664,6 +685,8 @@ class FeedController extends ChangeNotifier {
   ) async {
     trace.mark(PlaybackStage.streamingFallback);
     trace.note = '流式失败，改用完整下载';
+    _diagnostics.noteFallback('$cause');
+    _fallbackOccurred = true;
     try {
       return await sources.resolve(
         record.fileId,
@@ -671,6 +694,7 @@ class FeedController extends ChangeNotifier {
         messageId: record.messageId,
         trace: trace,
         onRecordRefreshed: _absorbRefreshed,
+        forPlayback: true,
         onProgress: (update) {
           if (update.stage == SourceStage.fetching) {
             _bufferFraction = update.fraction;
@@ -849,9 +873,37 @@ class FeedController extends ChangeNotifier {
       _position = (active as PlayerProgress).position;
       _duration = (active as PlayerProgress).duration;
     }
+    _captureStreamingEvidence();
     _checkDecoderError(active);
     _maybeRecordProgress();
     _notify();
+  }
+
+  /// Takes the streaming evidence at the first confirmed playhead movement.
+  ///
+  /// This is the moment the whole verdict rests on: the byte counter is
+  /// whatever TDLib last reported (`updateFile`), the playhead is whatever
+  /// the player reported. Comparing the two here — and only here — is what
+  /// separates "played while bytes were still missing" from "played after the
+  /// file finished". Nothing is inferred from which code path ran.
+  void _captureStreamingEvidence() {
+    final active = player.active;
+    if (active == null || !active.isPlaying) return;
+    if (_position <= Duration.zero) return;
+    // Idempotent: the player's own listener may have taken the snapshot
+    // first (it fires per value change, this runs on the 250 ms poll).
+    _diagnostics.recordFirstPlayback();
+    final trace = _lastTrace;
+    if (trace == null) return;
+    if (!trace.has(PlaybackStage.firstPlayback)) {
+      trace.mark(
+        PlaybackStage.firstPlayback,
+        bytes: _diagnostics.firstPlaybackDownloadedBytes,
+      );
+    }
+    if (!trace.has(PlaybackStage.firstFrame)) {
+      trace.mark(PlaybackStage.firstFrame);
+    }
   }
 
   /// A real decoder failure (AVPlayerItem.status == failed) is one recoverable

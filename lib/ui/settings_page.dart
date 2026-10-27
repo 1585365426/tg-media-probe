@@ -6,6 +6,7 @@
 /// download feature is cancelled — not disabled, absent.
 library;
 
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
@@ -18,13 +19,16 @@ import '../lock/lock_screens.dart';
 import '../lock/unlock_controller.dart';
 import '../security/biometric.dart';
 import '../security/lock_policy.dart';
+import '../playback/streaming_diagnostics.dart';
 import '../storage/cache_budget.dart';
 import '../storage/cache_manager.dart';
 import '../storage/storage_layout.dart';
 import '../storage/temp_zone_report.dart';
 import '../util/byte_format.dart';
 import '../util/redact.dart';
+import 'app_theme.dart';
 import 'status_view.dart';
+import 'streaming_overlay.dart';
 
 class SettingsPage extends StatefulWidget {
   const SettingsPage({
@@ -73,6 +77,7 @@ class _SettingsPageState extends State<SettingsPage> {
           _securitySection(),
           _storageSection(),
           _appearanceSection(),
+          _playbackDiagnosticsSection(),
           _aboutSection(),
         ],
       ),
@@ -526,6 +531,112 @@ class _SettingsPageState extends State<SettingsPage> {
     if (!mounted) return;
     ScaffoldMessenger.of(context)
         .showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  // ---- 播放诊断（边下边播真机验收）------------------------------------
+
+  /// Streaming evidence, live.
+  ///
+  /// The point of this section is to make the claim falsifiable: a play is
+  /// only reported as 边下边播 when the player was running while TDLib still
+  /// had bytes to fetch and the proxy really answered `206`. A full download
+  /// followed by playback says so, and a run that never produced the data
+  /// says 无法判定 instead of assuming.
+  Widget _playbackDiagnosticsSection() {
+    return ListenableBuilder(
+      listenable: widget.preferences,
+      builder: (context, _) {
+        final prefs = widget.preferences.value;
+        return ListenableBuilder(
+          listenable: StreamingDiagnostics.instance,
+          builder: (context, _) {
+            final diag = StreamingDiagnostics.instance;
+            return SettingsSection(
+              title: '播放诊断',
+              footnote: '角标与下面的数字全部来自真实运行数据：TDLib updateFile、'
+                  '代理实际写回的 HTTP 状态、AVPlayer 自己的播放状态。'
+                  '只有“开始播放时文件还不完整 + 至少一次 206”才会判定为边下边播。',
+              children: <Widget>[
+                SettingsRow(
+                  title: '边下边播诊断模式',
+                  subtitle: '在视频右上角显示实时角标（STREAM / FULL）',
+                  leading: const Icon(Icons.analytics_outlined),
+                  trailing: Switch(
+                    value: prefs.streamingDiagnostics,
+                    onChanged: (value) {
+                      StreamingDiagnostics.instance.setEnabled(value);
+                      unawaited(
+                        widget.preferences.setStreamingDiagnostics(value),
+                      );
+                    },
+                  ),
+                ),
+                const SettingsDivider(),
+                SettingsRow(
+                  title: diag.acceptanceRunning ? '结束验收' : '开始边下边播验收',
+                  subtitle: diag.acceptanceRunning
+                      ? (diag.verdict == StreamingVerdict.unknown
+                          ? '验收进行中：请打开一个大视频（建议 500MB–1GB）开始播放'
+                          : '验收完成，结论见下方')
+                      : '清零证据后播放一个大视频，自动记录 firstPlayback / 206 / 完成时间',
+                  leading: const Icon(Icons.play_circle_outline),
+                  showChevron: true,
+                  onTap: diag.acceptanceRunning ? _stopAcceptance : _startAcceptance,
+                ),
+                const SettingsDivider(),
+                SettingsRow(
+                  title: '复制播放诊断',
+                  subtitle: '把当前证据与验收结论复制到剪贴板',
+                  leading: const Icon(Icons.copy_all_outlined),
+                  showChevron: true,
+                  onTap: _copyPlaybackDiagnostics,
+                ),
+                const SettingsDivider(),
+                Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: AppTheme.pagePadding,
+                    vertical: 12,
+                  ),
+                  child: const StreamingDiagnosticsSection(),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+
+  /// Clears the previous run and arms the acceptance recorder.
+  ///
+  /// Nothing is simulated here: from this moment on, whatever the next play
+  /// produces is the evidence. If the video turns out to be already cached,
+  /// the run honestly reports 全部下载完成后播放.
+  Future<void> _startAcceptance() async {
+    StreamingDiagnostics.instance.startAcceptance();
+    _showMessage('已清零，请打开一个大视频开始播放；播放后回到本页查看结论。');
+  }
+
+  /// Ends the run. The evidence stays on screen until the next one; only the
+  /// "armed" flag is cleared, so a later play cannot overwrite the result.
+  Future<void> _stopAcceptance() async {
+    StreamingDiagnostics.instance.stopAcceptance();
+    final verdict = StreamingDiagnostics.instance.verdict;
+    _showMessage(verdict == StreamingVerdict.unknown
+        ? '验收已结束：本次没有产生足够数据，结论仍为无法判定'
+        : '验收已结束：${verdict.code}');
+  }
+
+  Future<void> _copyPlaybackDiagnostics() async {
+    final diag = StreamingDiagnostics.instance;
+    final lines = <String>[
+      ...diag.diagnosticLines(),
+      'acceptance:',
+      ...diag.acceptanceLines(),
+    ];
+    await Clipboard.setData(ClipboardData(text: lines.join('\n')));
+    if (!mounted) return;
+    _showMessage('播放诊断已复制到剪贴板');
   }
 
   // ---- 5.5 关于 -------------------------------------------------------
