@@ -1203,9 +1203,11 @@ class _LiveFileWatch implements FileProgressWatch {
       _path = initial.path;
       _windowOffset = initial.downloadOffset;
       _prefix = initial.downloadedSize;
+      _present.add(_windowOffset, _windowOffset + _prefix - 1);
     }
     _expected = initial?.expectedSize ?? 0;
     _complete = initial?.isCompleted == true && _path.isNotEmpty;
+    if (_complete && _expected > 0) _present.add(0, _expected - 1);
     _canDownload = initial?.canBeDownloaded ?? true;
     _subscription = _api.updates().listen(
           _onState,
@@ -1234,6 +1236,14 @@ class _LiveFileWatch implements FileProgressWatch {
   bool _complete = false;
   bool _canDownload = true;
 
+  /// Every byte range TDLib has already written, across all window moves.
+  ///
+  /// The local file keeps what was downloaded; only the *window* moves. Using
+  /// the live window as the readable map made a tail probe erase the head from
+  /// the proxy's point of view — the main `bytes=0-` response then sat on
+  /// bytes that were already on disk and called it a stall.
+  final ByteCoverage _present = ByteCoverage();
+
   /// Set while a targeted window is in flight, so a sequential restore can be
   /// skipped when the proxy asks for another window immediately after.
   bool _windowSteered = false;
@@ -1250,33 +1260,34 @@ class _LiveFileWatch implements FileProgressWatch {
     if (state.isCompleted) {
       _complete = true;
       _windowOffset = 0;
-      _prefix = state.downloadedSize > 0
-          ? state.downloadedSize
-          : _expected;
+      _prefix = state.downloadedSize > 0 ? state.downloadedSize : _expected;
+      if (_expected > 0) _present.add(0, _expected - 1);
     } else {
       _windowOffset = state.downloadOffset;
       _prefix = state.downloadedSize;
+      if (_path.isNotEmpty && _prefix > 0) {
+        _present.add(_windowOffset, _windowOffset + _prefix - 1);
+      }
     }
     if (!_changes.isClosed) _changes.add(null);
   }
 
   @override
-  int get headBytes => _windowOffset == 0 ? _prefix : 0;
+  int get headBytes {
+    if (_complete) return _expected;
+    return _present.prefixLength;
+  }
 
   @override
   int readableEndFrom(int from) {
     if (_complete) return _expected - 1;
-    if (from >= _windowOffset && from < _windowOffset + _prefix) {
-      return _windowOffset + _prefix - 1;
-    }
-    return -1;
+    return _present.endFrom(from);
   }
 
   @override
   bool covers(int from, int end) {
     if (_complete) return true;
-    if (end < from) return true;
-    return from >= _windowOffset && end <= _windowOffset + _prefix - 1;
+    return _present.covers(from, end);
   }
 
   @override

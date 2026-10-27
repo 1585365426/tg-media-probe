@@ -8,20 +8,28 @@
 /// bytes TDLib has already written, and fetches (bounded) the bytes that have
 /// not arrived yet while the download keeps running behind it.
 ///
-/// Two rules came out of device evidence and are not negotiable:
+/// Four rules came out of device evidence and are not negotiable:
 ///
 /// 1. **The declared range is the served range.** If the player asks for
-///    `bytes=0-3707092490`, the 206 must carry
-///    `Content-Range: bytes 0-3707092490/3707092491` and a body that keeps
-///    flowing until that range is complete. The earlier build closed the
-///    response at the current download head while advertising the same
-///    Content-Range — AVPlayer read that as a broken resource, dropped the
-///    bytes it had, asked again with the identical range, and never reached
-///    readyToPlay. Truncating a range is never an optimisation.
+///    `bytes=0-659667829`, the 206 must carry
+///    `Content-Range: bytes 0-659667829/659667830`, a matching Content-Length,
+///    and a body that keeps flowing until that range is complete. Closing the
+///    response at the current download head while advertising the full range
+///    is what made AVPlayer answer `-1005 网络连接已中断` on device.
 /// 2. **Bytes are written as they land.** The body loop writes every readable
 ///    chunk immediately and waits between chunks; it never waits for the whole
-///    range before the first byte leaves. That is what makes "play while
-///    downloading" real instead of rhetorical.
+///    range before the first byte leaves.
+/// 3. **"Not downloaded yet" is not a failure.** The body loop treats a gap as
+///    a wait, never as an error, and the stall timer only measures *silence
+///    from TDLib* — never "this byte is not here yet".
+/// 4. **The window is a shared resource with an owner.** TDLib can only run
+///    one download per file, so a tail probe (moov at the end) and the main
+///    `bytes=0-` response cannot both pull data at the same time. A diversion
+///    is serialised, deduplicated by range, released when its consumer is
+///    gone, and always followed by a restore of the sequential download. While
+///    a diversion owns the window, the other responses wait instead of
+///    declaring a network stall — that self-inflicted stall (`播放数据停止增长`)
+///    was the second device failure.
 ///
 /// The listener binds 127.0.0.1 only, the URL carries a per-play random token,
 /// and unknown paths are refused. Nothing is exposed to the network and the
@@ -32,20 +40,84 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:math';
 
+/// Which byte ranges of a file are physically on disk right now.
+///
+/// TDLib downloads a *window* (`download_offset` + `downloaded_size`) and
+/// keeps everything it already wrote when the window moves — the bytes stay in
+/// the local file. Tracking only the live window therefore reports
+/// `readable = nothing` the moment a tail probe moves the window away, and the
+/// main response then waits for bytes that are already sitting on disk. This
+/// map is what makes the proxy's answer match the file.
+///
+/// Intervals are merged and inclusive; the count stays small (one entry per
+/// download window, merged when contiguous), so lookups are linear over a
+/// handful of elements — no index to keep in sync.
+class ByteCoverage {
+  final List<int> _starts = <int>[];
+  final List<int> _ends = <int>[];
+
+  /// Number of merged intervals; diagnostics only.
+  int get segmentCount => _starts.length;
+
+  /// Marks `from`..`to` (inclusive) as present.
+  void add(int from, int to) {
+    if (to < from) return;
+    var start = from;
+    var end = to;
+    var i = 0;
+    while (i < _starts.length && _ends[i] + 1 < start) {
+      i++;
+    }
+    // Absorb every interval that touches or overlaps the new one.
+    while (i < _starts.length && _starts[i] <= end + 1) {
+      start = min(start, _starts[i]);
+      end = max(end, _ends[i]);
+      _starts.removeAt(i);
+      _ends.removeAt(i);
+    }
+    _starts.insert(i, start);
+    _ends.insert(i, end);
+  }
+
+  /// Last byte of the contiguous run that starts at [from], or -1.
+  int endFrom(int from) {
+    for (var i = 0; i < _starts.length; i++) {
+      if (from >= _starts[i] && from <= _ends[i]) return _ends[i];
+      if (_starts[i] > from) return -1;
+    }
+    return -1;
+  }
+
+  /// Length of the contiguous run starting at byte 0.
+  int get prefixLength {
+    if (_starts.isEmpty || _starts.first > 0) return 0;
+    return _ends.first + 1;
+  }
+
+  /// True when every byte of `from`..`to` is present.
+  bool covers(int from, int to) {
+    if (to < from) return true;
+    return endFrom(from) >= to;
+  }
+
+  void reset() {
+    _starts.clear();
+    _ends.clear();
+  }
+}
+
 /// How the proxy sees and steers the TDLib download.
 ///
 /// TDLib keeps ONE active download per file; `downloaded_size` is the prefix
 /// already on disk counted from `download_offset` (td_api.tl, localFile). The
 /// watcher exposes that window model and lets the proxy move the window.
 abstract class FileProgressWatch {
-  /// Absolute prefix from byte 0 readable right now. 0 while the window sits
-  /// elsewhere; grows again once the sequential download is restored (TDLib
-  /// resumes over the bytes already in the local file).
+  /// Absolute prefix from byte 0 readable right now. Must not shrink when the
+  /// window moves: bytes already written stay on disk.
   int get headBytes;
 
   /// The last byte (inclusive) readable in one contiguous run starting at
-  /// [from], or -1 when [from] itself is not on disk. Honours the current
-  /// TDLib window, not just the head prefix.
+  /// [from], or -1 when [from] itself is not on disk.
   int readableEndFrom(int from);
 
   /// True when every byte of [from]..[end] (inclusive) is on disk right now,
@@ -137,25 +209,39 @@ class ProxyExchange {
   /// Milliseconds since the proxy started.
   final int millis;
 
-  /// `stall`, `client closed`, … — only set when something ended early.
+  /// `RANGE_TRUNCATED …`, `client closed`, … — only set when something ended
+  /// early.
   final String? note;
+
+  /// Bytes the request asked for, resolved against the real total.
+  int get requestedLength {
+    if (status != HttpStatus.partialContent) return 0;
+    final from = requestedFrom ?? 0;
+    final to = requestedTo ?? (total - 1);
+    return to - from + 1;
+  }
 
   /// The client asked for a wider byte span than the proxy served.
   bool get truncated =>
-      requestedTo != null &&
-      status == HttpStatus.partialContent &&
-      writtenBytes < (requestedTo! - (requestedFrom ?? 0) + 1);
+      status == HttpStatus.partialContent && writtenBytes < requestedLength;
 
   /// The player asked for bytes away from 0 — a moov probe or a seek.
   bool get isForwardRange => (requestedFrom ?? 0) > 0;
 
-  /// `req=0-3707092490 → 206 0-3707092490/3707092491 len=3707092491 w=505MB`
+  /// `#2 req=bytes=0- → 206 want=659667830 served=0-… len=… wrote=…`
+  ///
+  /// `want` is the requested length resolved against the real total, `len` the
+  /// Content-Length actually written, `wrote` the bytes that really left. The
+  /// three being equal is the contract; `TRUNCATED` marks the case that broke
+  /// the device build.
   String describe() {
     final asked = rangeHeader == '-' ? 'no range' : 'req=$rangeHeader';
     final noteText = note == null ? '' : ' note=$note';
+    final truncatedText = truncated ? ' TRUNCATED' : '';
     return '#$index $asked → $status '
+        'want=$requestedLength '
         'served=$servedFrom-$servedTo/$total '
-        'len=$declaredLength wrote=$writtenBytes '
+        'len=$declaredLength wrote=$writtenBytes$truncatedText '
         'type=$contentType enc=$contentEncoding$noteText';
   }
 }
@@ -167,6 +253,7 @@ class StreamProxyServer {
     this.startupBufferBytes = defaultStartupBufferBytes,
     this.maxWait = const Duration(seconds: 90),
     this.stallTimeout = const Duration(seconds: 20),
+    this.detourBudget = const Duration(seconds: 40),
     this.chunkBytes = defaultChunkBytes,
     this.windowBytes = defaultWindowBytes,
     this.contentType = 'video/mp4',
@@ -195,10 +282,11 @@ class StreamProxyServer {
   static const int defaultWindowBytes = 16 * 1024 * 1024;
 
   /// Distance from the head that makes a cursor a *seek* rather than the
-  /// natural edge of the sequential download. Inside this gap the proxy waits
-  /// for the download to grow — steering there would throw the head away and
-  /// turn linear playback into a chase.
-  static const int seekGapBytes = 1024 * 1024;
+  /// natural edge of the sequential download. Exactly at the head the proxy
+  /// waits — steering there would restart the download that is already
+  /// producing those bytes. A quarter megabyte beyond it is a seek (the player
+  /// jumped), and waiting for the crawl is the original bug.
+  static const int seekGapBytes = 256 * 1024;
 
   /// Ceiling for one blocked wait *before* the response starts. Once the body
   /// is flowing there is no absolute ceiling — a 3.7 GB play legitimately
@@ -209,6 +297,13 @@ class StreamProxyServer {
   /// verdict in this file. Steady growth keeps resetting it — a slow download
   /// is not a failure.
   final Duration stallTimeout;
+
+  /// How long one diversion may hold the download window. A diversion exists
+  /// to feed a specific response; when that response is gone or the range is
+  /// filled, the window goes back to the sequential download. The budget is
+  /// the upper bound on how long the main stream can be paused by one tail
+  /// probe, so it must stay in the same order of magnitude as a play start.
+  final Duration detourBudget;
 
   /// Bytes per socket write in the body loop.
   final int chunkBytes;
@@ -265,10 +360,22 @@ class StreamProxyServer {
   int _served = 0;
   int _windowSwitches = 0;
   int _stalls = 0;
+  int _diversions = 0;
+  int _dedupeHits = 0;
+  int _truncations = 0;
 
   /// Serialises window moves: two sockets must not fight over TDLib's single
   /// active download for the same file.
   Future<void> _windowChain = Future<void>.value();
+
+  // --- current diversion (one at a time, by construction) ------------------
+
+  bool _detourActive = false;
+  int _detourFrom = -1;
+  int _detourTo = -1;
+  String _detourKey = '';
+  Completer<void>? _detourFirstByte;
+  Completer<void>? _detourFinished;
 
   /// Bind result: the URL the player should open.
   Uri? _url;
@@ -279,6 +386,21 @@ class StreamProxyServer {
   int get servedCount => _served;
   int get windowSwitches => _windowSwitches;
   int get stallCount => _stalls;
+
+  /// Targeted windows opened for forward ranges.
+  int get diversionCount => _diversions;
+
+  /// Repeat requests answered by the diversion already in flight / by the
+  /// bytes it left on disk. AVPlayer asks for the same tail six times; without
+  /// this the head download is restarted six times.
+  int get dedupeCount => _dedupeHits;
+
+  /// Responses that ended before their declared Content-Length.
+  int get truncationCount => _truncations;
+
+  /// True while a target window owns the TDLib download. Other responses must
+  /// wait for it instead of reading that silence as a dead network.
+  bool get diversionActive => _detourActive;
 
   final List<void Function()> _onClose = <void Function()>[];
 
@@ -372,8 +494,7 @@ class StreamProxyServer {
 
   Future<void> _serveRange(HttpRequest request) async {
     final total = _totalSize();
-    final rangeHeader =
-        request.headers.value(HttpHeaders.rangeHeader) ?? '-';
+    final rangeHeader = request.headers.value(HttpHeaders.rangeHeader) ?? '-';
     final index = _requests;
 
     if (request.method == 'HEAD') {
@@ -462,7 +583,10 @@ class StreamProxyServer {
     }
 
     final hasRange = rangeHeader != '-';
-    final requestedTo = to ?? (total - 1);
+    // A player may ask for more than the resource holds (it guesses a size
+    // from a manifest). Clamping keeps Content-Range truthful; the unsaid
+    // bytes were never ours to promise.
+    final requestedTo = min(to ?? (total - 1), total - 1);
     onEvent?.call('req ${request.method} range=$rangeHeader '
         'head=${watch.headBytes} total=$total');
     if (hasRange) onRangeRequest?.call(from: from, to: to);
@@ -489,6 +613,9 @@ class StreamProxyServer {
       ..set(HttpHeaders.contentEncodingHeader, 'identity')
       ..set(HttpHeaders.cacheControlHeader, 'no-store');
     final declared = requestedTo - from + 1;
+    // Declared length is the *requested* length, not the downloaded prefix.
+    // If the body cannot reach it, the exchange is recorded as truncated —
+    // that is a bug report, never a shortcut.
     response.contentLength = declared;
     response.bufferOutput = false;
 
@@ -505,33 +632,50 @@ class StreamProxyServer {
     var cursor = from;
     var written = 0;
     String? note;
+    RandomAccessFile? reader;
     try {
+      reader = await file.open();
       while (cursor <= requestedTo) {
         final available = watch.isComplete
             ? requestedTo
             : min(requestedTo, watch.readableEndFrom(cursor));
         if (available < cursor) {
-          // Not on disk here. A cursor sitting at the edge of the sequential
-          // download is the normal case — wait for it to grow. A cursor far
-          // beyond it is a seek or a moov probe: waiting would never end, so
-          // steer TDLib to the cursor instead.
-          if (!watch.isComplete &&
-              cursor > watch.headBytes + seekGapBytes) {
-            _steer(cursor, requestedTo, total);
-          }
+          // A gap is a wait, never a failure: point the download at the gap if
+          // it is far away, then wait for it to be filled.
+          await _ensureReadable(cursor, total);
           await _waitForGrowth(cursor);
           continue;
         }
         final chunkEnd = min(available, cursor + chunkBytes - 1);
-        await response.addStream(file.openRead(cursor, chunkEnd + 1));
-        written += chunkEnd - cursor + 1;
-        cursor = chunkEnd + 1;
+        final want = chunkEnd - cursor + 1;
+        await reader.setPosition(cursor);
+        final bytes = await reader.read(want);
+        if (bytes.isEmpty) {
+          // The file is shorter than TDLib reported: wait for the next update
+          // instead of spinning on empty reads.
+          await _waitForGrowth(cursor);
+          continue;
+        }
+        // Awaiting the write is the backpressure: a player that stops reading
+        // slows the loop instead of buffering the whole file in the process.
+        await response.addStream(Stream<List<int>>.value(bytes));
+        written += bytes.length;
+        cursor += bytes.length;
       }
     } on Object catch (e) {
       // Body already committed: a stall or a dead socket ends the exchange.
-      // The player retries with its own range — that is not our decision.
-      note = _brief(e);
+      // The player retries with its own range — that is not our decision, but
+      // it is recorded as a truncation with the real numbers.
+      note = 'RANGE_TRUNCATED ${_brief(e)}';
       onEvent?.call('body ended at $cursor/$requestedTo: $note');
+    } finally {
+      await reader?.close();
+    }
+
+    if (written < declared) {
+      _truncations++;
+      note ??= 'RANGE_TRUNCATED';
+      onEvent?.call('RANGE_TRUNCATED #$index $written/$declared');
     }
 
     final servedTo = written == 0 ? from - 1 : from + written - 1;
@@ -560,146 +704,277 @@ class StreamProxyServer {
       // Client vanished mid-body; nothing left to say to it.
     }
 
-    // A targeted window is a detour, not the destination: put the sequential
-    // download back so the play keeps building toward a complete cache.
-    if (from >= watch.headBytes && !watch.isComplete) {
-      unawaited(watch.resumeSequential());
+    // The response that justified this diversion is over — finished or
+    // cancelled. Give the window back so the sequential download resumes and
+    // the other response can keep flowing.
+    if (_detourActive && from >= _detourFrom && from <= _detourTo) {
+      _abortDiversion('response #$index ended');
     }
   }
 
-  /// Makes the first byte of [from] servable, or throws with the real numbers.
+  // --- window arbitration -------------------------------------------------
+
+  Future<T> _serial<T>(Future<T> Function() op) {
+    final next = _windowChain.then((_) => op());
+    _windowChain = next.then((_) {}, onError: (Object _) {});
+    return next;
+  }
+
+  /// Makes [cursor] readable, by waiting on the sequential download or by
+  /// pointing the window at it.
   ///
-  /// Three cases, deliberately distinct:
-  /// 1. first paint (`from == 0`, nothing served yet) → startup gate;
-  /// 2. inside the head prefix → nothing to do, serve progressively;
-  /// 3. beyond the head (tail probe, arbitrary seek) → steer the TDLib window
-  ///    to exactly that range and wait for its first byte.
+  /// The three cases are deliberately distinct and must stay that way:
+  /// 1. inside the head prefix (or just past it) → let the sequential download
+  ///    do its job: never steal the window for a cursor that is about to
+  ///    arrive on its own;
+  /// 2. far ahead (a tail probe, a seek) → open a diversion;
+  /// 3. a diversion already owns the window → wait for it, do not fight it.
+  Future<void> _ensureReadable(int cursor, int total) async {
+    for (var attempt = 0; attempt < 3; attempt++) {
+      if (watch.isComplete) return;
+      if (watch.readableEndFrom(cursor) >= cursor) return;
+      if (_detourActive) {
+        // This diversion exists for this very range: the bytes are on their
+        // way, so just wait for them. Blocking on the diversion's completion
+        // here would freeze a consumer that could still be writing.
+        if (cursor >= _detourFrom && cursor <= _detourTo) return;
+        final finished = _detourFinished;
+        if (finished != null && !finished.isCompleted) {
+          onEvent?.call('wait diversion cursor=$cursor');
+          await finished.future;
+        }
+        continue;
+      }
+      if (cursor <= watch.headBytes + seekGapBytes) {
+        await _restoreSequential();
+        return;
+      }
+      await _openDiversion(cursor, total);
+      return;
+    }
+  }
+
+  String _keyFor(int from, int to) => '$from-$to';
+
+  /// Opens (or joins) a target window for [cursor]..end-of-window.
+  Future<void> _openDiversion(int cursor, int total) async {
+    for (var attempt = 0; attempt < 3; attempt++) {
+      final from = cursor & ~1023; // TDLib chunks on 1 KB boundaries
+      final end = min(total - 1, from + windowBytes - 1);
+      final key = _keyFor(from, end);
+
+      if (_detourActive) {
+        if (_detourKey == key) {
+          // Same tail, asked six times by the player: join the diversion that
+          // is already filling this range instead of restarting the download.
+          _dedupeHits++;
+          onEvent?.call('diversion dedupe $key');
+          final first = _detourFirstByte;
+          if (first != null && !first.isCompleted) await first.future;
+          return;
+        }
+        // A different range owns the window; queue behind it and re-apply.
+        final finished = _detourFinished;
+        if (finished != null) await finished.future;
+        continue;
+      }
+
+      _diversions++;
+      _detourActive = true;
+      _detourFrom = from;
+      _detourTo = end;
+      _detourKey = key;
+      _detourFirstByte = Completer<void>();
+      _detourFinished = Completer<void>();
+      _windowSwitches++;
+      onEvent?.call('window→$from-$end (head=${watch.headBytes})');
+      onWindowMove?.call(start: from, end: end);
+
+      final first = _detourFirstByte!;
+      unawaited(_runDiversion(from, end));
+      await first.future;
+      return;
+    }
+  }
+
+  /// Steers the window, hands the first byte to the waiting response as soon
+  /// as it exists, and keeps filling in the background.
+  Future<void> _runDiversion(int from, int end) async {
+    bool cancelled() => !_detourActive;
+    try {
+      await _serial(() => watch.requestWindow(from, end));
+      // Only the first byte is awaited before headers go out: a 10 MB tail
+      // must not delay the 206 that tells the player where the moov is.
+      final firstByte = await _awaitSignal(
+        () => watch.isComplete || watch.readableEndFrom(from) >= from,
+        label: 'diversion first byte $from',
+        ownDiversion: true,
+        budget: detourBudget,
+        cancelled: cancelled,
+      );
+      final first = _detourFirstByte;
+      if (first != null && !first.isCompleted) first.complete();
+      if (!firstByte) {
+        onEvent?.call('diversion no first byte $from');
+        return;
+      }
+      // Hold the window while this range is being consumed. Released by the
+      // response loop (abort), by coverage completing, or by the budget.
+      final filled = await _awaitSignal(
+        () => watch.isComplete || watch.covers(from, end),
+        label: 'diversion fill $from-$end',
+        ownDiversion: true,
+        budget: detourBudget,
+        cancelled: cancelled,
+      );
+      onEvent?.call(
+          'diversion ${cancelled() ? "aborted" : (filled ? "filled" : "budget")} '
+          '$from-$end');
+    } on Object catch (e) {
+      onEvent?.call('diversion end ${_brief(e)}');
+    } finally {
+      _finishDiversion();
+    }
+  }
+
+  void _abortDiversion(String why) {
+    if (!_detourActive) return;
+    onEvent?.call('diversion abort ($why)');
+    _finishDiversion();
+  }
+
+  void _finishDiversion() {
+    if (!_detourActive) return;
+    // A diversion that cannot even deliver its first byte must not leave the
+    // waiting response blocked on a completer nobody will complete.
+    if (!(_detourFirstByte?.isCompleted ?? true)) _detourFirstByte!.complete();
+    if (!(_detourFinished?.isCompleted ?? true)) _detourFinished!.complete();
+    _detourActive = false;
+    _detourKey = '';
+    _detourFrom = -1;
+    _detourTo = -1;
+    _detourFirstByte = null;
+    _detourFinished = null;
+    // A targeted window is a detour, not the destination: put the sequential
+    // download back so the play keeps building toward a complete cache.
+    unawaited(_restoreSequential());
+  }
+
+  Future<void> _restoreSequential() {
+    if (watch.isComplete) return Future<void>.value();
+    return _serial(() async {
+      if (_detourActive) return; // a newer diversion already owns the window
+      await watch.resumeSequential();
+    });
+  }
+
+  /// Makes the first byte of `from` servable, or throws with the real numbers.
   Future<void> _prepare(int from, int to, int total) async {
     final requestLength = to - from + 1;
     final gate = max(1, min(min(total, startupBufferBytes), requestLength));
     if (from == 0 && _served == 0 && watch.headBytes < gate) {
       onEvent?.call('gate wait ${gate}B (head=${watch.headBytes})');
-      await _waitFor(() => watch.headBytes >= gate || watch.isComplete,
-          label: 'startup');
-      onEvent?.call('gate ok ${watch.headBytes}B');
+      final ok = await _awaitSignal(
+        () => watch.headBytes >= gate || watch.isComplete,
+        label: 'startup',
+      );
+      onEvent?.call('gate ${ok ? "ok" : "fail"} ${watch.headBytes}B');
+      if (!ok) {
+        throw StreamProxyException('缓冲区等待超时（startup，可读 ${watch.headBytes}B）');
+      }
     }
 
     if (watch.isComplete) return;
-    if (from < watch.headBytes) return;
     if (watch.readableEndFrom(from) >= from) return;
 
-    // Just past the head: the sequential download will reach it, and steering
-    // would restart the window elsewhere for no gain.
-    if (from <= watch.headBytes + seekGapBytes) {
-      await _waitFor(
-        () => watch.isComplete || watch.readableEndFrom(from) >= from,
-        label: 'head grow to $from',
-      );
-      return;
+    await _ensureReadable(from, total);
+    final ok = await _awaitSignal(
+      () => watch.isComplete || watch.readableEndFrom(from) >= from,
+      label: 'first byte $from',
+    );
+    if (!ok) {
+      throw StreamProxyException(
+          '首字节等待超时（$from，可读 ${watch.headBytes}B，$_windowLabel）');
     }
-
-    await _steerAwait(from, to, total);
   }
 
-  /// Fire-and-forget window move for the body loop: the loop re-checks
-  /// readability after every TDLib event, so it does not need to await.
-  void _steer(int from, int to, int total) {
-    unawaited(_steerAwait(from, to, total));
-  }
+  String get _windowLabel =>
+      _detourActive ? 'diversion $_detourFrom-$_detourTo' : 'head';
 
-  Future<void> _steerAwait(int from, int to, int total) {
-    final end = min(to, total - 1);
-    final windowEnd = min(end, from + windowBytes - 1);
-    _windowSwitches++;
-    onEvent?.call('window→$from-$windowEnd (head=${watch.headBytes})');
-    onWindowMove?.call(start: from, end: windowEnd);
-    final next = _windowChain.then((_) => watch.requestWindow(from, windowEnd));
-    _windowChain = next.catchError((Object _) {});
-    return next;
-  }
-
-  /// Waits until byte [cursor] is readable, or throws after a real silence.
+  /// Waits until byte [cursor] is readable.
   ///
-  /// No absolute ceiling here on purpose: the body of a legitimate 3.7 GB
-  /// response takes minutes, and a wall-clock cap would cut playback mid
-  /// film. Silence — no TDLib event at all — is the only failure signal.
+  /// No absolute ceiling on purpose: the body of a legitimate 3.7 GB response
+  /// takes minutes, and a wall-clock cap would cut playback mid film. Silence
+  /// from TDLib is the only failure signal — and silence we caused ourselves
+  /// (a diversion holding the window) is not silence.
   Future<void> _waitForGrowth(int cursor) async {
-    final done = Completer<void>();
-    final stall = Completer<void>();
-    Timer? stallTimer;
-    void arm() {
-      stallTimer?.cancel();
-      stallTimer = Timer(stallTimeout, () {
-        if (!stall.isCompleted) stall.complete();
-      });
-    }
-
-    bool ready() => watch.isComplete || watch.readableEndFrom(cursor) >= cursor;
-
-    arm();
-    late final StreamSubscription<void> sub;
-    sub = watch.progress.listen((_) {
-      if (ready()) {
-        if (!done.isCompleted) done.complete();
-      } else {
-        arm(); // 有动静：慢，但不是失败
-      }
-    });
-    try {
-      await Future.any(<Future<void>>[done.future, stall.future]);
-    } finally {
-      stallTimer?.cancel();
-      await sub.cancel();
-    }
-    if (!ready()) {
-      onEvent?.call('body stall at $cursor');
-      onStall?.call('body stall at $cursor');
+    final ok = await _awaitSignal(
+      () => watch.isComplete || watch.readableEndFrom(cursor) >= cursor,
+      label: 'body $cursor',
+    );
+    if (!ok) {
       throw StreamProxyException(
-          '播放数据停止增长（$cursor，可读 ${watch.headBytes}B）');
+          '播放数据停止增长（$cursor，可读 ${watch.headBytes}B，$_windowLabel）');
     }
   }
 
-  /// Waits until [ready] is true. **Every TDLib event resets the stall
-  /// timer** — a slow but moving download never trips it; only real silence
-  /// (no updateFile at all for [stallTimeout]) does. Bounded by [maxWait]
-  /// because this runs before the response is committed: the caller can still
-  /// answer 503 and fall back.
-  Future<void> _waitFor(bool Function() ready, {required String label}) async {
-    final stall = Completer<void>();
-    final ceiling = Completer<void>();
-    Timer? stallTimer;
-    void arm() {
-      stallTimer?.cancel();
-      stallTimer = Timer(stallTimeout, () {
-        if (!ready() && !stall.isCompleted) stall.complete();
-      });
-    }
-
-    arm();
+  /// Waits until [ready] is true. Three ways out, and nothing else:
+  ///
+  /// * ready — the bytes are there;
+  /// * stall — no TDLib event at all for [stallTimeout];
+  /// * budget — [ceiling] and [budget] elapsed (pre-response waits only).
+  ///
+  /// While a diversion owns the TDLib window the data legitimately does not
+  /// grow for this response: the timer is held off instead of firing, unless
+  /// this wait *is* the diversion (`ownDiversion`), which is bounded by its
+  /// own budget.
+  Future<bool> _awaitSignal(
+    bool Function() ready, {
+    required String label,
+    bool ownDiversion = false,
+    bool ceiling = true,
+    Duration? budget,
+    bool Function()? cancelled,
+  }) async {
+    if (ready()) return true;
+    final limit = budget ?? maxWait;
+    final started = DateTime.now();
+    var lastSignal = started;
+    final done = Completer<bool>();
     late final StreamSubscription<void> sub;
     sub = watch.progress.listen((_) {
+      lastSignal = DateTime.now();
+      if (ready() && !done.isCompleted) done.complete(true);
+    });
+    final ticker = Timer.periodic(const Duration(milliseconds: 25), (_) {
+      if (done.isCompleted) return;
       if (ready()) {
-        if (!stall.isCompleted) stall.complete();
-      } else {
-        arm(); // 有动静：慢，但不是失败
+        done.complete(true);
+        return;
       }
+      if (cancelled != null && cancelled()) {
+        done.complete(false);
+        return;
+      }
+      final now = DateTime.now();
+      if (!ownDiversion && _detourActive) {
+        lastSignal = now; // 我们自己的绕行把窗口挪走了，不是网络静默
+        return;
+      }
+      if (now.difference(lastSignal) >= stallTimeout) {
+        done.complete(false);
+        return;
+      }
+      if (ceiling && now.difference(started) >= limit) done.complete(false);
     });
-    final ceilingTimer = Timer(maxWait, () {
-      if (!ceiling.isCompleted) ceiling.complete();
-    });
-    try {
-      await Future.any(<Future<void>>[stall.future, ceiling.future]);
-    } finally {
-      stallTimer?.cancel();
-      ceilingTimer.cancel();
-      await sub.cancel();
-    }
-    if (!ready()) {
+    final ok = await done.future;
+    ticker.cancel();
+    await sub.cancel();
+    if (!ok) {
       onEvent?.call('wait fail $label');
-      onStall?.call('wait fail $label');
-      throw StreamProxyException(
-          '等待播放数据超时（$label，可读 ${watch.headBytes}B）');
+      onStall?.call('wait fail $label ($_windowLabel)');
     }
+    return ok;
   }
 
   (int, int?)? _parseRange(String header, int total) {
