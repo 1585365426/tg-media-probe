@@ -311,6 +311,25 @@ void main() {
       c.shutdown();
     });
 
+    // Test 6 from the spec: a neighbour can be warmed, and that must never
+    // change what the player is on. The old bug looked like the app loading a
+    // 152 MB video first; the fix is that preloading cannot reach the player
+    // at all, so the only id that may appear here is the one that was tapped.
+    test('a prefetched neighbour never becomes the player', () async {
+      final transfer = _Transfer(localIds: <int>{900100});
+      final c = controller(transfer: transfer, preloadCount: 3);
+      await c.load();
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+
+      expect(c.activeFileId, 900100);
+      expect(c.current?.messageId, 100);
+      expect(transfer.started, isNot(contains(900100)),
+          reason: '预加载不得碰当前正在播放的文件');
+      // Whatever the window warmed, it is not the play.
+      expect(c.prefetchCompleted, greaterThanOrEqualTo(1));
+      c.shutdown();
+    });
+
     test('shutdown stops the window from continuing', () async {
       final transfer = _Transfer();
       final c = controller(transfer: transfer, preloadCount: 3);

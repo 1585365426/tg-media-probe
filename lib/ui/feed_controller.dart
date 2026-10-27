@@ -29,6 +29,7 @@ import '../playback/playback_trace.dart';
 import '../playback/native_streaming.dart';
 import '../playback/playback_failure.dart';
 import '../playback/player_slot.dart';
+import '../playback/source_decision.dart';
 import '../playback/video_source.dart';
 import '../playback/watch_store.dart';
 import '../playback/streaming_diagnostics.dart';
@@ -789,6 +790,7 @@ class FeedController extends ChangeNotifier {
       } on Object catch (e) {
         // No bridge, a refused session, or a native error: the transport is
         // unavailable, the video is not. Say so and use V1.
+        _diagnostics.noteTransportAttempt('RESOURCE_LOADER', failed: true);
         _diagnostics.noteResourceLoader(
           'v2 unavailable: $e',
           generation: generation,
@@ -847,6 +849,9 @@ class FeedController extends ChangeNotifier {
       _diagnostics.notePlayerCreated(generation: generation);
       await player.activate(source.url);
       if (!_ownsRecord(generation, record)) return false;
+      _diagnostics.noteFinalSource(source.isResourceLoader
+          ? 'RESOURCE_LOADER'
+          : (source.isStreaming ? 'HTTP_PROXY' : 'LOCAL_FILE'));
       _diagnostics.notePlayerReady(generation: generation);
       trace.mark(PlaybackStage.playerInitialized);
       return true;
@@ -870,6 +875,15 @@ class FeedController extends ChangeNotifier {
   }
 
   /// One step down the transport chain: V2 → V1 → full download → error.
+  ///
+  /// The next rung is chosen from a fresh reading of the file, not from the
+  /// rung that failed. The device report is the reason: V2 failed to install,
+  /// the controller went straight to V1, and by then the 756 MB file was
+  /// complete — V1 is the one transport that cannot serve a complete file
+  /// without a growing-file race, and it produced a 206 that declared
+  /// 754,966,576 bytes and carried 20,496,682.
+  ///
+  /// A complete file here is not a step down at all. It is the answer.
   Future<PlaySource?> _nextTransportAfter(
     PlaySource failed,
     MediaRecord record,
@@ -885,7 +899,33 @@ class FeedController extends ChangeNotifier {
       }
       return null;
     }
-    if (failed.isResourceLoader && !fullDownloadTried) {
+    _diagnostics.noteTransportAttempt(
+      failed.isResourceLoader ? 'RESOURCE_LOADER' : 'HTTP_PROXY',
+      failed: true,
+    );
+    final facts = await sources.inspect(record.fileId);
+    if (!_ownsRecord(generation, record)) return null;
+    final decision = decideAfterTransportFailure(
+      facts,
+      failed: failed.isResourceLoader
+          ? PlaybackSourceKind.resourceLoader
+          : PlaybackSourceKind.httpProxy,
+      v2Supported: StreamingV2.supported,
+    );
+    _diagnostics.noteSourceDecision(decision, generation: generation);
+
+    if (decision.source == PlaybackSourceKind.localFile) {
+      _diagnostics.noteDecision(
+        proxyAvailable: false,
+        decision: 'LOCAL_FILE',
+        reason: decision.reason,
+        generation: generation,
+      );
+      trace.note = '流式传输失败后文件已完整，改用本地文件';
+      return PlaySource.file(facts.path);
+    }
+
+    if (decision.source == PlaybackSourceKind.httpProxy && !fullDownloadTried) {
       // A resource-loader play that never became ready is one transport's
       // failure, not the video's: the loopback proxy reads the same growing
       // file through a completely different path, so it is worth one attempt
@@ -913,6 +953,7 @@ class FeedController extends ChangeNotifier {
           await v1.dispose();
           return null;
         }
+        _diagnostics.noteTransportAttempt('HTTP_PROXY', failed: false);
         _diagnostics.noteDecision(
           proxyAvailable: true,
           decision: 'STREAM',
@@ -921,6 +962,7 @@ class FeedController extends ChangeNotifier {
         );
         return v1;
       } on Object catch (e) {
+        _diagnostics.noteTransportAttempt('HTTP_PROXY', failed: true);
         _diagnostics.noteFallback('V1 也失败：$e');
       }
     }
@@ -1034,6 +1076,12 @@ class FeedController extends ChangeNotifier {
     final count = preloadCount.clamp(0, AppPreferences.maxPreloadCount);
     if (count <= 0) return;
     final window = ++_prefetchGeneration;
+    // What the warm window is, stated as ids: the isolation check compares it
+    // against `activeFileId`, and a bare counter cannot answer that.
+    _diagnostics.notePreloadWindow(<int>[
+      for (var offset = 1; offset <= count; offset++)
+        if (_index + offset < _items.length) _items[_index + offset].fileId,
+    ].where((id) => id != 0));
     for (var offset = 1; offset <= count; offset++) {
       final next = _index + offset;
       if (next >= _items.length) return;

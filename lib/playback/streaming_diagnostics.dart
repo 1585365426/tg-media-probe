@@ -27,6 +27,7 @@ import '../td/td_models.dart' show FileState;
 import '../util/byte_format.dart';
 import '../util/redact.dart';
 import 'mp4_probe.dart';
+import 'source_decision.dart';
 import 'playback_failure.dart';
 import 'stream_proxy.dart' show ProxyExchange;
 
@@ -174,6 +175,24 @@ class StreamingDiagnostics extends ChangeNotifier {
 
   /// Was the file already whole when the play was resolved?
   bool? _decisionFileComplete;
+
+  /// The transport decision taken from measured facts. Separate from
+  /// `_decision` above, which is the *legacy* branch label: this one names the
+  /// transport the play should have used (`LOCAL_FILE`, `RESOURCE_LOADER`,
+  /// `HTTP_PROXY`, `FULL_DOWNLOAD`) and the numbers it was based on, so a
+  /// report can be audited without re-running the device.
+  String? _playbackDecision;
+  String? _playbackDecisionReason;
+  int? _decisionLocalSize;
+  int? _decisionExpectedSize;
+  bool? _decisionDiskCovers;
+  bool _decisionRedownload = false;
+  List<int> _preloadFileIds = const <int>[];
+  bool _v2Attempted = false;
+  bool _v2Failed = false;
+  bool _v1Attempted = false;
+  bool _v1Failed = false;
+  String? _finalSource;
 
   /// STREAM / LOCAL_FILE / FALLBACK — what the resolver returned.
   String? _decision;
@@ -600,6 +619,65 @@ class StreamingDiagnostics extends ChangeNotifier {
   String? get decision => _decision;
   String? get decisionReason => _decisionReason;
 
+  /// The decided transport, with the facts behind it.
+  ///
+  /// Every field here is copied from [playback_decision.SourceFacts], whose
+  /// `diskSize` came from a `stat` — the difference between "TDLib says 100%"
+  /// and "the bytes are actually there" is the whole point of the line.
+  void noteSourceDecision(PlaybackDecision decision, {int? generation}) {
+    if (_sealedResult || _stale(generation)) return;
+    _playbackDecision = decision.code;
+    _playbackDecisionReason = decision.reason;
+    _decisionLocalSize = decision.facts.diskSize;
+    _decisionExpectedSize = decision.facts.expectedBytes;
+    _decisionDiskCovers = decision.facts.diskCoversExpected;
+    _decisionRedownload = decision.needsRedownload;
+    _note('playbackDecision=${decision.code} reason=${decision.reason} '
+        'disk=${decision.facts.diskSize} expected=${decision.facts.expectedBytes}');
+    notifyListeners();
+  }
+
+  /// The transport was actually tried, and whether it failed. Counted
+  /// separately from the decision: "decided V2" and "V2 ran" are different
+  /// statements, and the report has to be able to tell them apart.
+  void noteTransportAttempt(String transport, {required bool failed}) {
+    if (_sealedResult) return;
+    switch (transport) {
+      case 'RESOURCE_LOADER':
+        _v2Attempted = true;
+        if (failed) _v2Failed = true;
+      case 'HTTP_PROXY':
+        _v1Attempted = true;
+        if (failed) _v1Failed = true;
+    }
+  }
+
+  /// What the player finally opened.
+  void noteFinalSource(String source) {
+    if (_sealedResult) return;
+    _finalSource = source;
+    _note('finalSource=$source');
+  }
+
+  /// The file ids the preload window is warming, for the isolation check.
+  void notePreloadWindow(Iterable<int> fileIds) {
+    if (_sealedResult) return;
+    _preloadFileIds = List<int>.unmodifiable(fileIds);
+  }
+
+  String? get playbackDecision => _playbackDecision;
+  String? get playbackDecisionReason => _playbackDecisionReason;
+  int? get decisionLocalSize => _decisionLocalSize;
+  int? get decisionExpectedSize => _decisionExpectedSize;
+  bool? get decisionDiskCovers => _decisionDiskCovers;
+  bool get decisionNeedsRedownload => _decisionRedownload;
+  List<int> get preloadFileIds => _preloadFileIds;
+  bool get v2Attempted => _v2Attempted;
+  bool get v2Failed => _v2Failed;
+  bool get v1Attempted => _v1Attempted;
+  bool get v1Failed => _v1Failed;
+  String? get finalSource => _finalSource;
+
   /// Records what the player is about to open — called from the feed
   /// controller immediately before `player.activate`, with the same source.
   ///
@@ -920,6 +998,18 @@ class StreamingDiagnostics extends ChangeNotifier {
     _decisionFileComplete = null;
     _decision = null;
     _decisionReason = null;
+    _playbackDecision = null;
+    _playbackDecisionReason = null;
+    _decisionLocalSize = null;
+    _decisionExpectedSize = null;
+    _decisionDiskCovers = null;
+    _decisionRedownload = false;
+    _preloadFileIds = const <int>[];
+    _v2Attempted = false;
+    _v2Failed = false;
+    _v1Attempted = false;
+    _v1Failed = false;
+    _finalSource = null;
     _startedAt = _clock();
     _growth.clear();
     _events.clear();
@@ -1178,6 +1268,13 @@ class StreamingDiagnostics extends ChangeNotifier {
         // The decision itself, with the reason that produced it: this is the
         // line that answers "why did effective streaming end up OFF?".
         'decision=${_decision ?? '-'} reason=${_decisionReason ?? '-'}',
+        // The measured decision: transport, why, and the two sizes that
+        // decided it. `disk` is a stat, `expected` is TDLib's claim.
+        'playbackDecision=${_playbackDecision ?? '-'} '
+            'reason=${_playbackDecisionReason ?? '-'}',
+        'localFile=${_decisionDiskCovers == null ? '-' : (_decisionDiskCovers! ? 'covers' : 'SHORT')} '
+            'disk=${_decisionLocalSize ?? '-'} expected=${_decisionExpectedSize ?? '-'} '
+            'redownload=${_decisionRedownload ? 'yes' : 'no'}',
         'candidate=${_decisionCandidate ?? '-'} '
             'complete=${_decisionFileComplete ?? '-'} '
             'proxyAvailable=${_decisionProxyAvailable ?? '-'}'
@@ -1271,6 +1368,26 @@ class StreamingDiagnostics extends ChangeNotifier {
       'fileComplete=${_decisionFileComplete ?? '-'}',
       'decision=${_decision ?? '-'}',
       'reason=${_decisionReason ?? '-'}',
+    ]);
+    // The measured half: which transport the facts picked, what the file
+    // really measured, and which attempts actually ran. A report that says
+    // "V1 proxy, 20 MB carried" has to be able to answer "why not LOCAL_FILE".
+    lines.addAll(<String>[
+      'playbackDecision=${_playbackDecision ?? '-'}',
+      'playbackDecisionReason=${_playbackDecisionReason ?? '-'}',
+      'finalSource=${_finalSource ?? _playerSourceType ?? '-'}',
+      'localFileExists=${_decisionLocalSize == null ? '-' : (_decisionLocalSize! > 0 ? 'true' : 'false')}',
+      'localFileSize=${_decisionLocalSize ?? '-'}',
+      'expectedFileSize=${_decisionExpectedSize ?? '-'}',
+      'diskCoversExpected=${_decisionDiskCovers ?? '-'}',
+      'needsRedownload=${_decisionRedownload ? 'true' : 'false'}',
+      'v2Attempted=${_v2Attempted ? 'true' : 'false'} '
+          'v2Failed=${_v2Failed ? 'true' : 'false'}',
+      'v1Attempted=${_v1Attempted ? 'true' : 'false'} '
+          'v1Failed=${_v1Failed ? 'true' : 'false'}',
+      'activeFileId=${_activeFileId ?? '-'}',
+      'playerFileId=${_playerFileId ?? '-'}',
+      'preloadFileIds=$_preloadFileIds',
     ]);
     // Every LOCAL_FILE has to name why it is not a stream — the one question
     // the device reports kept failing to answer.
@@ -1445,6 +1562,25 @@ class StreamingDiagnostics extends ChangeNotifier {
           'retryable': _failureKind?.retryable,
         },
         'truncatedRanges': _truncatedCount,
+        // The measured half of the decision, exported beside the transport
+        // counts: a report that says "V1 proxy" must carry the disk size that
+        // made it choose that.
+        'playback': <String, Object?>{
+          'decision': _playbackDecision,
+          'decisionReason': _playbackDecisionReason,
+          'finalSource': _finalSource,
+          'localFileSize': _decisionLocalSize,
+          'expectedFileSize': _decisionExpectedSize,
+          'diskCoversExpected': _decisionDiskCovers,
+          'needsRedownload': _decisionRedownload,
+          'activeFileId': _activeFileId,
+          'playerFileId': _playerFileId,
+          'preloadFileIds': _preloadFileIds,
+          'v2Attempted': _v2Attempted,
+          'v2Failed': _v2Failed,
+          'v1Attempted': _v1Attempted,
+          'v1Failed': _v1Failed,
+        },
         'resourceLoader': <String, Object?>{
           'sessions': _rlSessions,
           'requests': _rlRequests,

@@ -48,6 +48,11 @@ class FakeWatch implements FileProgressWatch {
   @override
   Stream<void> get progress => _changes.stream;
 
+  /// The real watch measures the file; this double is driven by the test, so
+  /// there is nothing to measure.
+  @override
+  Future<void> refresh() async {}
+
   @override
   int readableEndFrom(int from) {
     if (complete) return total - 1;

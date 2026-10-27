@@ -32,6 +32,7 @@ import 'mp4_probe.dart';
 import 'native_streaming.dart';
 import 'playback_trace.dart';
 import 'resource_loader.dart';
+import 'source_decision.dart';
 import 'stream_proxy.dart';
 import 'streaming_diagnostics.dart';
 
@@ -627,6 +628,63 @@ class VideoSourceResolver {
     return future.whenComplete(() => inflight.remove(fileId));
   }
 
+  /// Reads every fact the decision is allowed to use.
+  ///
+  /// `diskSize` is measured, never inferred from `downloaded_size`: the device
+  /// report showed a record at 100% with ~21 MB of bytes behind it, and only a
+  /// `stat` can tell those apart.
+  Future<SourceFacts> _factsFor(FileState? state, int fileId) async {
+    if (state == null) return SourceFacts.missing(fileId);
+    var exists = false;
+    // The size TDLib reports is the starting point, not the truth: a `stat`
+    // overwrites it whenever one is available. Starting here keeps a platform
+    // that will not stat (or a test double with no bytes behind its path) from
+    // reading as "zero bytes on disk" when the record says otherwise.
+    var diskSize = state.path.isNotEmpty ? state.size : -1;
+    if (state.path.isNotEmpty) {
+      // The injected probe owns "does it exist"; `stat` owns "how big".
+      // Keeping them separate is what lets a test describe a file that has no
+      // bytes behind it, and what keeps a vanished file from being called
+      // complete because a record remembers it.
+      exists = await _fileExists(state.path);
+      if (exists) {
+        try {
+          final measured = (await File(state.path).stat()).size;
+          if (measured > 0) diskSize = measured;
+        } on Object {
+          // No real bytes behind the path: the record's size stands.
+        }
+      } else {
+        diskSize = -1;
+      }
+    }
+    return SourceFacts(
+      fileId: fileId,
+      hasRecord: true,
+      claimedComplete: state.isCompleted,
+      downloadedBytes: state.downloadedSize,
+      downloadOffset: state.downloadOffset,
+      recordSize: state.size,
+      expectedBytes: state.expectedSize,
+      path: state.path,
+      pathExists: exists,
+      diskSize: diskSize,
+    );
+  }
+
+  /// The same facts, for a caller that is not currently resolving — the feed
+  /// asks after a transport failed, to find out whether the file finished in
+  /// the meantime.
+  Future<SourceFacts> inspect(int fileId) async {
+    FileState? state;
+    try {
+      state = await api.stat(fileId);
+    } on Object {
+      state = null;
+    }
+    return _factsFor(state, fileId);
+  }
+
   /// Low-priority warm start for an item the user has not opened.
   ///
   /// Returns false when the request was refused (TDLib error, no such file).
@@ -756,59 +814,73 @@ class VideoSourceResolver {
         generation: generation,
       );
     }
-    // Cache hit check is byte-identical to the full-download path: a complete
-    // record with wrong size or a vanished file is NOT a hit — those videos
-    // stream (or re-download), they never get a truncated player.
-    final sizeMatches = existing == null ||
-        existing.expectedSize <= 0 ||
-        existing.size >= existing.expectedSize;
-    final fileComplete = existing != null &&
-        existing.isCompleted &&
-        existing.path.isNotEmpty &&
-        sizeMatches &&
-        await _fileExists(existing.path);
-    // FORCE_STREAMING_TEST must exercise the pipeline even when the bytes are
-    // already on disk, otherwise every prefetched video silently becomes a
-    // LOCAL_FILE run and the acceptance can never test the proxy at all.
-    // Normal mode keeps the fast path: a complete file is played directly.
-    final forced = _diagnostics.forceStreamingTest;
+    // One rule, one place. The old check trusted `is_downloading_completed`
+    // and then, when it failed, still opened the proxy — which is how a
+    // 756 MB file whose bytes were already on disk ended up in a growing-file
+    // response that could only carry 20 MB of them.
+    final facts = await _factsFor(existing, fileId);
+    final decision = decidePlaybackSource(
+      facts,
+      streamingEnabled: _diagnostics.userStreamingPreference,
+      forceStreaming: _diagnostics.forceStreamingTest,
+      v2Supported: transport == StreamTransport.resourceLoader,
+    );
+    _diagnostics.noteSourceDecision(decision, generation: generation);
+    final fileComplete = facts.isPlayableFromDisk;
+    final forced = decision.forced;
     _diagnostics.noteDecision(
       preference: _diagnostics.userStreamingPreference,
       force: forced,
       fileComplete: fileComplete,
       generation: generation,
     );
-    if (fileComplete && !forced) {
-      trace?.mark(PlaybackStage.fileReady, bytes: existing.size);
+    if (decision.source == PlaybackSourceKind.localFile) {
+      trace?.mark(PlaybackStage.fileReady, bytes: facts.diskSize);
       onProgress?.call(VideoSourceUpdate(
         stage: SourceStage.ready,
-        downloadedBytes: existing.size,
-        expectedBytes: existing.size,
-        path: existing.path,
+        downloadedBytes: facts.diskSize,
+        expectedBytes: facts.expectedBytes,
+        path: facts.path,
       ));
-      _diagnostics.noteDecision(
-        candidate: false,
-        candidateReason: 'already_completed_normal_mode',
-        decision: 'LOCAL_FILE',
-        reason: 'already_completed_normal_mode',
-        generation: generation,
-      );
-      return PlaySource.file(existing.path);
+      return PlaySource.file(facts.path);
     }
 
-    // A record without a size cannot be streamed honestly: there is no total
-    // to advertise in Content-Range. Fall back before touching the transfer.
-    if (existing != null && existing.expectedSize <= 0) {
+    // Nothing honest to serve yet: no record, or no size to put in
+    // Content-Range. The caller's full-download path owns both.
+    if (decision.source == PlaybackSourceKind.fullDownload) {
       trace?.mark(PlaybackStage.streamingModeSelected);
       trace?.errorCategory = 'streamingUnavailable';
       _diagnostics.noteDecision(
         candidate: false,
-        candidateReason: 'invalid_video_metadata',
+        candidateReason: decision.reason,
         decision: 'FALLBACK',
-        reason: 'invalid_video_metadata',
+        reason: decision.reason,
         generation: generation,
       );
-      throw VideoSourceException('流式播放不可用（文件大小未知）');
+      throw VideoSourceException(
+        decision.reason == 'unknown_size'
+            ? '流式播放不可用（文件大小未知）'
+            : '流式播放不可用（${decision.reason}）',
+      );
+    }
+
+    // TDLib says finished, the disk says otherwise. Nothing more will ever be
+    // sent for this file, so waiting is a guaranteed stall: restart it.
+    if (decision.needsRedownload) {
+      _diagnostics.noteSourceDecision(decision, generation: generation);
+      try {
+        await api.cancel(fileId);
+        await api.start(fileId);
+      } on Object catch (e) {
+        _diagnostics.noteDecision(
+          candidate: false,
+          candidateReason: 'redownload_failed',
+          decision: 'FALLBACK',
+          reason: 'redownload_failed',
+          generation: generation,
+        );
+        throw VideoSourceException('文件不完整且无法重新下载：$e');
+      }
     }
 
     trace?.mark(PlaybackStage.streamingModeSelected);
@@ -817,6 +889,7 @@ class VideoSourceResolver {
     final watch = _LiveFileWatch(
       api,
       fileId,
+      trustClaimedComplete: !decision.needsRedownload,
       initial: existing,
       // Guarded by the generation captured above: a watcher left over from a
       // superseded play keeps receiving `updateFile` for its own file, and
@@ -1551,6 +1624,7 @@ class _LiveFileWatch implements FileProgressWatch {
     this._fileId, {
     required FileState? initial,
     this.onState,
+    this.trustClaimedComplete = true,
   }) {
     if (initial != null && initial.path.isNotEmpty) {
       _path = initial.path;
@@ -1559,7 +1633,11 @@ class _LiveFileWatch implements FileProgressWatch {
       _present.add(_windowOffset, _windowOffset + _prefix - 1);
     }
     _expected = initial?.expectedSize ?? 0;
-    _complete = initial?.isCompleted == true && _path.isNotEmpty;
+    // A record that claims completion while the bytes are short must not be
+    // trusted twice: the decision layer already sent it back for a
+    // re-download, and believing the claim here would serve holes as video.
+    _complete =
+        trustClaimedComplete && initial?.isCompleted == true && _path.isNotEmpty;
     if (_complete && _expected > 0) _present.add(0, _expected - 1);
     _canDownload = initial?.canBeDownloaded ?? true;
     _subscription = _api.updates().listen(
@@ -1581,6 +1659,10 @@ class _LiveFileWatch implements FileProgressWatch {
   /// Mirrors every parsed `updateFile` to the diagnostics panel. The same
   /// stream that drives the wait loop, so the numbers cannot drift apart.
   final void Function(FileState state)? onState;
+
+  /// Whether TDLib's "completed" flag may be believed before the disk is
+  /// measured. False for a file the decision layer flagged as short.
+  final bool trustClaimedComplete;
 
   String _path = '';
   int _windowOffset = 0;
@@ -1670,6 +1752,36 @@ class _LiveFileWatch implements FileProgressWatch {
     if (!_windowSteered || _complete) return;
     _windowSteered = false;
     await _api.start(_fileId);
+  }
+
+  /// Measures the file and folds the result in.
+  ///
+  /// `updateFile` is the only thing that normally moves [_present], and it
+  /// stops the moment TDLib considers the transfer finished. A play that
+  /// starts after that point — the normal case for a cached 720 MB video —
+  /// then waits on a file that is already complete. One `stat` decides it.
+  ///
+  /// Only a size that reaches [_expected] is folded in as a full range: a
+  /// short file can be sparse (TDLib downloads windows), and treating
+  /// `0..size-1` as present would serve zero-filled holes as video.
+  @override
+  Future<void> refresh() async {
+    if (_path.isEmpty) return;
+    if (_complete && _expected > 0) return;
+    int size;
+    try {
+      size = await File(_path).length();
+    } on Object {
+      return;
+    }
+    if (size <= 0) return;
+    if (_expected > 0 && size >= _expected) {
+      _complete = true;
+      _windowOffset = 0;
+      _prefix = size;
+      _present.add(0, _expected - 1);
+      if (!_changes.isClosed) _changes.add(null);
+    }
   }
 
   @override

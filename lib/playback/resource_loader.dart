@@ -209,6 +209,15 @@ class ResourceSupply {
     final total = watch.expectedBytes;
     final path = watch.localPath;
 
+    // Disk first: `updateFile` stops once TDLib considers the file finished,
+    // so a supply that begins after that point would otherwise wait on
+    // silence forever. The stat is only paid when there is nothing to serve.
+    var reach = watch.readableEndFrom(offset);
+    if (!watch.isComplete && reach < offset) {
+      await watch.refresh();
+      reach = watch.readableEndFrom(offset);
+    }
+
     if (watch.isComplete) {
       return SupplyReading(
         path: path,
@@ -224,7 +233,6 @@ class ResourceSupply {
     // and the reach at the offset it is serving. A window move that lands new
     // bytes is progress too — the request may be waiting on a region the
     // sequential download will never reach.
-    final reach = watch.readableEndFrom(offset);
     final head = watch.headBytes;
     if (head != _seenHead || reach != _seenReach || watch.isComplete != _seenComplete) {
       _seenHead = head;

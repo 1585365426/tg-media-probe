@@ -18,6 +18,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:tg_media_probe/playback/native_streaming.dart'
     show StreamingV2Unavailable;
 import 'package:tg_media_probe/playback/resource_loader.dart';
+import 'package:tg_media_probe/playback/source_decision.dart';
 import 'package:tg_media_probe/playback/streaming_diagnostics.dart';
 import 'package:tg_media_probe/playback/video_source.dart';
 import 'package:tg_media_probe/td/td_models.dart';
@@ -118,8 +119,10 @@ class V2File implements FileTransferApi {
     await startRange(id, offset: 0, limit: 0);
   }
 
+  final List<int> cancelled = <int>[];
+
   @override
-  Future<void> cancel(int id) async {}
+  Future<void> cancel(int id) async => cancelled.add(id);
 
   @override
   Stream<FileState> updates() => _updates.stream;
@@ -462,6 +465,70 @@ void main() {
       await source.dispose();
       await api.close();
       await transport.dispose();
+    });
+  });
+
+  // The 720 MB device report, reproduced at the resolver layer: TDLib says
+  // 100%, the disk holds 64 KB. Streaming that would wait forever (nothing
+  // more will ever be sent) and playing it would read holes. The only correct
+  // action is a re-download, and the watch must not believe the claim either.
+  group('a short file behind a complete record', () {
+    test('is re-downloaded instead of being streamed as-is', () async {
+      final api = V2File(sandbox, expectedSize: 8 * 1024 * 1024);
+      await api.advance(64 * 1024);
+      api.completed = true;              // TDLib: 100%
+      api.downloaded = api.expectedSize; // and it says every byte is there
+      final transport = V2Transport();
+      final resolver = VideoSourceResolver(
+        api: api,
+        fileExists: (_) async => true,
+        nativeTransport: transport,
+        diagnostics: freshDiagnostics(),
+      );
+
+      final source = await resolver.resolveStreamV2(9);
+
+      expect(source.kind, PlaySourceKind.resourceLoader,
+          reason: '短文件不是本地文件，但不完整也不是不可播');
+      expect(api.cancelled, contains(9),
+          reason: '声称完成却字节不足，必须取消并重下');
+      expect(source.session!.watch.isComplete, isFalse,
+          reason: '声明不能代替测量');
+
+      await source.dispose();
+      await api.close();
+      await transport.dispose();
+    });
+
+    test('inspect measures the disk and calls the record short', () async {
+      final api = V2File(sandbox, expectedSize: 8 * 1024 * 1024);
+      await api.advance(64 * 1024);
+      api.completed = true;
+      api.downloaded = api.expectedSize;
+      final resolver = VideoSourceResolver(
+        api: api,
+        fileExists: (_) async => true,
+        diagnostics: freshDiagnostics(),
+      );
+
+      final facts = await resolver.inspect(9);
+
+      expect(facts.claimedComplete, isTrue);
+      expect(facts.diskSize, 64 * 1024);
+      expect(facts.expectedBytes, 8 * 1024 * 1024);
+      expect(facts.isPlayableFromDisk, isFalse);
+      expect(facts.isShorterThanClaimed, isTrue);
+
+      final decision = decideAfterTransportFailure(
+        facts,
+        failed: PlaybackSourceKind.resourceLoader,
+        v2Supported: true,
+      );
+      expect(decision.source, PlaybackSourceKind.httpProxy,
+          reason: '还没下载完，V2 失败后可以用 V1 再试一次');
+      expect(decision.needsRedownload, isTrue);
+
+      await api.close();
     });
   });
 }

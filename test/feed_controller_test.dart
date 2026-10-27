@@ -771,6 +771,34 @@ void main() {
       rig.controller.shutdown();
       await rig.api.dispose();
     });
+
+    // Test 5 from the spec: A is tapped, B is tapped 200 ms later. B must own
+    // the player, the generation, and the file id — and everything A still had
+    // in flight must land on a stale generation and be dropped.
+    test('tapping A then B ends on B and A cannot touch it', () async {
+      final rig = Rig(pages: <List<MediaRecord>>[
+        <MediaRecord>[video(1), video(2), video(3)],
+      ]);
+      rig.api.alreadyLocal.addAll(<int>[1001, 1002]);
+      await rig.controller.load();
+      await Future<void>.delayed(Duration.zero);
+
+      expect(rig.controller.activeFileId, 1001);
+      final generationA = rig.controller.playGeneration;
+
+      await rig.controller.goNext();
+      await Future<void>.delayed(Duration.zero);
+
+      expect(rig.controller.activeFileId, 1002);
+      expect(rig.controller.current?.messageId, 2);
+      expect(rig.controller.playGeneration, greaterThan(generationA));
+      expect(rig.ledger.live, 1,
+          reason: 'B 接管时必须只剩一个播放器');
+      expect(rig.ledger.loaded.last, contains('1002'));
+
+      rig.controller.shutdown();
+      await rig.api.dispose();
+    });
   });
 
   group('tapping a row opens that exact video', () {

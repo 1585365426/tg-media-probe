@@ -146,6 +146,18 @@ abstract class FileProgressWatch {
   /// completion. Never fires for nothing, so "no events" is a real stall.
   Stream<void> get progress;
 
+  /// Folds what is actually on disk into what this watch believes.
+  ///
+  /// `updateFile` is the only thing that normally moves [headBytes], and it
+  /// stops arriving the moment TDLib considers the file finished. A play that
+  /// starts after that point then waits on silence for a file that is already
+  /// complete: that is the 720 MB report — `completed=true`, 756 MB declared,
+  /// 20 MB carried, `PROXY_STALL`. One `stat` removes the whole class.
+  ///
+  /// Default is a no-op so test doubles stay one-liners; the live watch
+  /// implements it against the real file.
+  Future<void> refresh() async {}
+
   /// Releases the update subscription. Called by whoever owns the transport:
   /// the proxy's close hook, or the resource-loader session.
   Future<void> dispose();
@@ -623,6 +635,9 @@ class StreamProxyServer {
         'head=${watch.headBytes} total=$total');
     if (hasRange) onRangeRequest?.call(from: from, to: to);
 
+    // Ask the disk before asking TDLib. A complete file whose updates already
+    // stopped would otherwise look like a stalled download.
+    await watch.refresh();
     // Make the first byte servable: startup gate for a fresh play, window
     // steering for a range the sequential download has not reached yet.
     await _prepare(from, requestedTo, total);
@@ -998,6 +1013,10 @@ class StreamProxyServer {
   /// from TDLib is the only failure signal — and silence we caused ourselves
   /// (a diversion holding the window) is not silence.
   Future<void> _waitForGrowth(int cursor) async {
+    // Cheap and decisive: if the bytes landed while no update arrived, this
+    // ends the wait instead of starting a 20-second one.
+    await watch.refresh();
+    if (watch.isComplete || watch.readableEndFrom(cursor) >= cursor) return;
     final ok = await _awaitSignal(
       () => watch.isComplete || watch.readableEndFrom(cursor) >= cursor,
       label: 'body $cursor',

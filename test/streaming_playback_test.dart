@@ -231,6 +231,11 @@ class FixtureWatch implements FileProgressWatch {
   final StreamController<void> _changes = StreamController<void>.broadcast();
   late final StreamSubscription<FileState> sub;
 
+  /// The production watch re-measures the file; this fixture is fed by hand,
+  /// so a refresh has nothing to add.
+  @override
+  Future<void> refresh() async {}
+
   void _apply(FileState state) {
     if (state.id != fileId) return;
     if (state.path.isNotEmpty) path = state.path;
