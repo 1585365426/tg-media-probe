@@ -108,6 +108,10 @@ class SyncCycleReport {
     required this.cancelled,
     this.reachedEnd = false,
     this.lastError,
+    this.channelsTotal = 0,
+    this.channelsAtEnd = 0,
+    this.channelsProgressed = 0,
+    this.retryAfter,
   });
 
   final int pages;
@@ -116,16 +120,33 @@ class SyncCycleReport {
   final List<String> errors;
   final bool cancelled;
 
-  /// True when the walk stopped because TDLib returned a short page: there is
-  /// no older history. Distinct from "we ran out of page budget" and from "the
-  /// cursor refused to move", both of which must stay retryable.
+  /// True only when **every** channel in this cycle reported a short page.
+  ///
+  /// It used to be "any channel reached its end", which is why a 725-video
+  /// channel stopped growing: the directory also holds channels with five
+  /// messages, the first of those ended the cycle, and the scheduler treated
+  /// the whole backfill as finished.
   final bool reachedEnd;
 
   /// The last error text, for the screen. Kept alongside [errors] so callers
   /// that only show one line do not have to parse the list.
   final String? lastError;
 
+  /// How many channels the cycle was asked to walk, how many are fully walked,
+  /// and how many moved their cursor. The three numbers are what tells "still
+  /// working" apart from "nothing left to do".
+  final int channelsTotal;
+  final int channelsAtEnd;
+  final int channelsProgressed;
+
+  /// Set when TDLib answered `FLOOD_WAIT_<n>`: the scheduler must wait this
+  /// long before the next slice, or it will be answered the same way forever.
+  final Duration? retryAfter;
+
   bool get isError => errors.isNotEmpty;
+
+  /// True when at least one channel advanced, even if others failed.
+  bool get madeProgress => channelsProgressed > 0 || insertedRecords > 0;
 }
 
 /// Pulls channel history one bounded page at a time into the local mirror.
@@ -208,12 +229,17 @@ class ChannelSyncEngine {
     highestId ??= rawHighestId;
 
     final inserted = await store.upsertAll(records);
-    if (lowestId != null || highestId != null) {
+    if (lowestId != null || highestId != null || rawLowestId != null) {
       final existing = store.watermark(chatId);
       await store.setWatermark(
         chatId: chatId,
         newestMessageId: _maxNullable(existing?.newestMessageId, highestId),
         oldestMessageId: _minNullable(existing?.oldestMessageId, lowestId),
+        // The resume point is the oldest **raw** id, not the oldest media id.
+        // A 50-message batch with one video would otherwise leave a cursor that
+        // re-reads 49 messages on the next pass (or, when the media ids happen
+        // to line up, no progress at all).
+        oldestScannedMessageId: rawLowestId,
         nowUnix: DateTime.now().millisecondsSinceEpoch ~/ 1000,
       );
     }
@@ -248,16 +274,21 @@ class ChannelSyncEngine {
   /// Reads a bounded number of pages per channel.
   ///
   /// [resume] decides where the walk starts:
-  /// * `true` (default) continues from the oldest message already indexed, so
-  ///   repeated calls keep digging into a 4000-message channel instead of
-  ///   re-reading the same newest pages forever;
+  /// * `true` (default) continues from the scanned cursor — the oldest **raw**
+  ///   message id already consumed — so repeated calls keep digging into a
+  ///   4000-message channel instead of re-reading the same newest pages;
   /// * `false` starts at the newest message, which is what a pull-to-refresh
   ///   wants.
+  ///
+  /// [pageGap] spaces `getChatHistory` calls. Zero-gap bursts are what get a
+  /// long backfill answered with `FLOOD_WAIT`, and a flood wait is
+  /// indistinguishable from a stall to the user.
   Future<SyncCycleReport> syncCycle({
     required List<int> chatIds,
     int? pagesPerChannel,
     SyncCancelToken? cancel,
     bool resume = true,
+    Duration pageGap = const Duration(milliseconds: 120),
   }) async {
     final pagesBudget = (pagesPerChannel ?? maxPagesPerCycle).clamp(1, 10);
     var pages = 0;
@@ -265,15 +296,25 @@ class ChannelSyncEngine {
     var inserted = 0;
     final errors = <String>[];
     var cancelled = false;
-    var reachedEnd = false;
+    var progressed = 0;
+    var atEnd = 0;
     String? lastError;
+    Duration? retryAfter;
 
     for (final chatId in chatIds) {
-      int? cursor = resume ? store.watermark(chatId)?.oldestMessageId : null;
+      // Resume from the scan cursor; fall back to the media watermark for rows
+      // written by an older build that predates the field.
+      final watermark = store.watermark(chatId);
+      int? cursor = resume ? (watermark?.scanCursor ?? watermark?.oldestMessageId) : null;
+      var channelAtEnd = false;
+      var channelMoved = false;
       for (var i = 0; i < pagesBudget; i++) {
         if (cancel?.isCancelled ?? false) {
           cancelled = true;
           break;
+        }
+        if (pages > 0 && pageGap > Duration.zero) {
+          await Future<void>.delayed(pageGap);
         }
         final result = await loadPage(chatId: chatId, cursor: cursor, cancel: cancel);
         if (result.cancelled) {
@@ -283,18 +324,27 @@ class ChannelSyncEngine {
         if (result.isError) {
           errors.add('chat $chatId: ${result.error}');
           lastError = result.error;
+          retryAfter ??= parseRetryAfter(result.error);
+          // One bad channel must not stop the others: a channel the account
+          // left, or a flood wait on one id, used to end the whole cycle.
           break;
         }
         pages++;
         raw += result.rawMessageCount;
         inserted += result.inserted;
+        if (result.nextCursor != null &&
+            (cursor == null || result.nextCursor! < cursor)) {
+          channelMoved = true;
+        }
         if (result.reachedEnd) {
-          reachedEnd = true;
+          channelAtEnd = true;
           break;
         }
         if (!result.hasMore || result.nextCursor == null) break;
         cursor = result.nextCursor;
       }
+      if (channelMoved) progressed++;
+      if (channelAtEnd) atEnd++;
       if (cancelled) break;
     }
 
@@ -304,8 +354,14 @@ class ChannelSyncEngine {
       insertedRecords: inserted,
       errors: errors,
       cancelled: cancelled,
-      reachedEnd: reachedEnd,
+      // Only "every channel is exhausted" ends the backfill. Anything else
+      // means there is still history to walk.
+      reachedEnd: chatIds.isNotEmpty && atEnd == chatIds.length && !cancelled,
       lastError: lastError,
+      channelsTotal: chatIds.length,
+      channelsAtEnd: atEnd,
+      channelsProgressed: progressed,
+      retryAfter: retryAfter,
     );
   }
 
@@ -373,6 +429,21 @@ class ChannelSyncEngine {
     if (b == null) return a;
     return a < b ? a : b;
   }
+}
+
+/// Pulls the wait out of `TDLib error 420: FLOOD_WAIT_37`.
+///
+/// Returning null means "not a flood wait", which is a different instruction
+/// to the scheduler: a flood wait must be honoured to the second, anything else
+/// may be retried with ordinary backoff.
+Duration? parseRetryAfter(String? text) {
+  if (text == null || text.isEmpty) return null;
+  final match = RegExp(r'FLOOD_WAIT_(\d+)').firstMatch(text.toUpperCase());
+  if (match == null) return null;
+  final seconds = int.tryParse(match.group(1)!);
+  if (seconds == null || seconds <= 0) return null;
+  // Capped: a bogus 86400 in an error string must not park the app for a day.
+  return Duration(seconds: seconds.clamp(1, 900));
 }
 
 /// Scroll-to-bottom pagination over the local mirror (not over Telegram).

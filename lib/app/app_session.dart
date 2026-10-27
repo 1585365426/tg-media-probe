@@ -453,16 +453,26 @@ class AppSession extends ChangeNotifier {
   }
 
   /// One bounded slice of history for **every** channel, continuing from the
-  /// indexed watermark.
+  /// indexed scan cursor.
   ///
   /// Separate from [syncChannel] because the backfill walks the whole list: it
   /// is the thing a scheduler may call repeatedly, and each call is bounded so
   /// the UI stays responsive.
-  Future<SyncCycleReport?> syncHistorySlice({int pagesPerChannel = 6}) async {
+  ///
+  /// [chatIds] narrows the walk to specific channels; the scheduler uses it to
+  /// spend its budget on the channels that are still moving instead of
+  /// re-reading finished ones.
+  Future<SyncCycleReport?> syncHistorySlice({
+    int pagesPerChannel = 6,
+    List<int>? chatIds,
+    Duration pageGap = const Duration(milliseconds: 120),
+  }) async {
     final client = _client;
     final index = _index;
     if (client == null || index == null) return null;
-    final ids = _directory?.entries.map((e) => e.id).toList() ?? const <int>[];
+    final ids = chatIds ??
+        _directory?.entries.map((e) => e.id).toList() ??
+        const <int>[];
     if (ids.isEmpty) return null;
     final engine = ChannelSyncEngine(
       source: TdHistorySource(client),
@@ -473,6 +483,7 @@ class AppSession extends ChangeNotifier {
         chatIds: ids,
         pagesPerChannel: pagesPerChannel,
         resume: true,
+        pageGap: pageGap,
       );
       _directory?.applyCounts(index.countByChat());
       _notify();
@@ -487,6 +498,8 @@ class AppSession extends ChangeNotifier {
         errors: <String>[redactText('$e')],
         cancelled: false,
         lastError: redactText('$e'),
+        channelsTotal: ids.length,
+        retryAfter: parseRetryAfter('$e'),
       );
     }
   }

@@ -164,20 +164,33 @@ class _TgMediaAppState extends State<TgMediaApp> with WidgetsBindingObserver {
       case AppLifecycleState.paused:
       case AppLifecycleState.hidden:
       case AppLifecycleState.detached:
+        // A history slice in flight is wasted work once the process is about to
+        // be suspended; the cursor is already persisted, so stopping loses
+        // nothing.
+        _backfill?.stop();
         _lock.onPaused();
     }
   }
 
-  /// Startup / foreground housekeeping: one cache check and one history slice.
+  /// Startup / foreground housekeeping: one cache check and the history walk.
   ///
-  /// Throttled and de-duplicated: entering the app ten times in a minute must
-  /// not start ten cleaners, and both jobs return immediately when one is
-  /// already running. Nothing here runs on a timer — iOS would not honour it
-  /// and it would cost battery for no benefit.
+  /// The cache check is throttled: entering the app ten times in a minute must
+  /// not start ten cleaners, and it returns immediately when one is running.
+  ///
+  /// The history walk is a *loop*, not a one-shot kick. A single kick was the
+  /// reason a 4000-message channel froze at 725 videos: the slice budget ran
+  /// out, and nothing ever asked again. `start()` is idempotent, so calling it
+  /// on every resume is safe.
   void _runMaintenance() {
     final session = _session;
     final storage = _storage;
     if (session == null || storage == null) return;
+
+    final backfill = _backfill ??= HistoryBackfill(
+      fetch: (pages) => session.syncHistorySlice(pagesPerChannel: pages),
+    );
+    backfill.start();
+
     final now = DateTime.now();
     if (_lastMaintenance != null &&
         now.difference(_lastMaintenance!) < const Duration(seconds: 30)) {
@@ -191,16 +204,12 @@ class _TgMediaAppState extends State<TgMediaApp> with WidgetsBindingObserver {
       activeFiles: _activeFiles,
     );
     unawaited(cleaner.check(limitBytes: _preferences.value.cacheLimitBytes));
-
-    final backfill = _backfill ??= HistoryBackfill(
-      fetch: (pages) => session.syncHistorySlice(pagesPerChannel: pages),
-    );
-    unawaited(backfill.kick());
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _backfill?.stop();
     _session?.dispose();
     _lock.dispose();
     _preferences.dispose();

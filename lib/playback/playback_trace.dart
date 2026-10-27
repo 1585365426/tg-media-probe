@@ -40,6 +40,15 @@ enum PlaybackStage {
 
   /// The first frame is on screen (best effort: the UI marks it).
   firstFrame,
+
+  /// TDLib rejected the stored `file_id` and the message was re-read to obtain
+  /// a fresh one. Deliberately last in the enum: it is an *event*, not a point
+  /// on the happy path, so it must not change the ordering of the stages above
+  /// ([lastStage], [between]).
+  fileIdRefreshed,
+
+  /// The message was read again to fill in a missing file name or size.
+  metadataFetched,
 }
 
 class PlaybackTrace {
@@ -60,6 +69,13 @@ class PlaybackTrace {
   String? errorCategory;
   int? expectedBytes;
   int? downloadedBytes;
+
+  /// How many times a transient TDLib failure was retried before the answer.
+  int retries = 0;
+
+  /// Free-form, already-redacted note for the diagnostics ("file_id 失效，
+  /// 已从消息重新获取"). Never a path and never the message text.
+  String? note;
 
   Map<PlaybackStage, DateTime> get marks => Map<PlaybackStage, DateTime>.unmodifiable(_marks);
 
@@ -127,7 +143,9 @@ class PlaybackTrace {
       'total=${total ?? -1}ms',
       if (expectedBytes != null) 'expected=${expectedBytes}B',
       if (downloadedBytes != null) 'got=${downloadedBytes}B',
+      if (retries > 0) 'retries=$retries',
       if (errorCategory != null) 'error=$errorCategory',
+      if (note != null) 'note=$note',
       ...stageLines(),
     ];
     return parts.join(' ');

@@ -104,7 +104,7 @@ void main() {
       final api = ScriptedApi(neverFinishes: true);
       final resolver = VideoSourceResolver(
         api: api,
-        fetchTimeout: const Duration(milliseconds: 40),
+        stallTimeout: const Duration(milliseconds: 40),
       );
 
       await expectLater(
@@ -119,7 +119,7 @@ void main() {
       final api = ScriptedApi(neverFinishes: true);
       final resolver = VideoSourceResolver(
         api: api,
-        fetchTimeout: const Duration(seconds: 15),
+        stallTimeout: const Duration(seconds: 15),
       );
 
       try {
@@ -148,7 +148,7 @@ void main() {
       final api = ScriptedApi(neverFinishes: true);
       final resolver = VideoSourceResolver(
         api: api,
-        fetchTimeout: const Duration(milliseconds: 60),
+        stallTimeout: const Duration(milliseconds: 60),
       );
 
       final pending = resolver.resolve(7);
@@ -226,7 +226,7 @@ void main() {
       final resolver = VideoSourceResolver(
         api: api,
         fileExists: (_) async => true,
-        fetchTimeout: const Duration(seconds: 5),
+        stallTimeout: const Duration(seconds: 5),
       );
 
       final pending = resolver.resolve(12);

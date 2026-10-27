@@ -5,26 +5,41 @@ import 'package:path/path.dart' as p;
 import '../storage/file_ops.dart';
 import 'media_record.dart';
 
-/// Per-channel sync bookmark. `newest` is the highest message id ever indexed,
-/// `oldest` the lowest — together they define the window covered by the mirror
-/// so incremental sync knows where to resume instead of re-pulling history.
+/// Per-channel sync bookmark.
+///
+/// Three ids, and mixing them up is what stalled a 4000-message channel:
+/// * `newest` — highest **media** message id ever indexed (what the UI can
+///   claim to have);
+/// * `oldest` — lowest media id, kept for display and for "do we have
+///   anything at all" questions;
+/// * `scanCursor` — lowest **raw** message id the walk has consumed. This is
+///   the only correct resume point: a batch has 50 messages but maybe one
+///   video, so resuming from a media id either re-reads most of the batch or
+///   skips over it.
 class ChannelWatermark {
   const ChannelWatermark({
     required this.chatId,
     this.newestMessageId,
     this.oldestMessageId,
+    this.scanCursor,
     this.updatedAtUnix = 0,
   });
 
   final int chatId;
   final int? newestMessageId;
   final int? oldestMessageId;
+
+  /// Oldest raw message id already walked. Pass this back to
+  /// `getChatHistory` as `from_message_id` to continue where the last slice
+  /// stopped.
+  final int? scanCursor;
   final int updatedAtUnix;
 
   Map<String, Object?> toJson() => <String, Object?>{
         'chat': chatId,
         if (newestMessageId != null) 'newest': newestMessageId,
         if (oldestMessageId != null) 'oldest': oldestMessageId,
+        if (scanCursor != null) 'scan': scanCursor,
         if (updatedAtUnix != 0) 'at': updatedAtUnix,
       };
 
@@ -34,13 +49,14 @@ class ChannelWatermark {
       chatId: chat is int ? chat : int.tryParse('$chat') ?? 0,
       newestMessageId: json['newest'] is int ? json['newest']! as int : null,
       oldestMessageId: json['oldest'] is int ? json['oldest']! as int : null,
+      scanCursor: json['scan'] is int ? json['scan']! as int : null,
       updatedAtUnix: json['at'] is int ? json['at']! as int : 0,
     );
   }
 
   @override
-  String toString() =>
-      'ChannelWatermark(chat=$chatId newest=$newestMessageId oldest=$oldestMessageId)';
+  String toString() => 'ChannelWatermark(chat=$chatId newest=$newestMessageId '
+      'oldest=$oldestMessageId scan=$scanCursor)';
 }
 
 class IndexPage {
@@ -192,6 +208,10 @@ class IndexStore {
               watermark.newestMessageId ?? existing?.newestMessageId,
           oldestMessageId:
               watermark.oldestMessageId ?? existing?.oldestMessageId,
+          // The journal is replayed on top of a snapshot that may already be
+          // older; keeping the minimum makes replay idempotent.
+          scanCursor:
+              _minNullable(existing?.scanCursor, watermark.scanCursor),
           updatedAtUnix: watermark.updatedAtUnix,
         );
       case 'rm':
@@ -254,6 +274,7 @@ class IndexStore {
     required int chatId,
     int? newestMessageId,
     int? oldestMessageId,
+    int? oldestScannedMessageId,
     int nowUnix = 0,
   }) async {
     final existing = _watermarks[chatId];
@@ -261,6 +282,12 @@ class IndexStore {
       chatId: chatId,
       newestMessageId: newestMessageId ?? existing?.newestMessageId,
       oldestMessageId: oldestMessageId ?? existing?.oldestMessageId,
+      // Monotonic downwards: a walk never moves its cursor back up, so a batch
+      // that happens to start above the stored cursor cannot rewind the walk.
+      scanCursor: _minNullable(
+        existing?.scanCursor,
+        oldestScannedMessageId,
+      ),
       updatedAtUnix: nowUnix,
     );
     _watermarks[chatId] = merged;
@@ -401,6 +428,12 @@ class IndexStore {
 
   static bool _isOlder(int date, int id, int cursorDate, int cursorId) =>
       date < cursorDate || (date == cursorDate && id < cursorId);
+
+  static int? _minNullable(int? a, int? b) {
+    if (a == null) return b;
+    if (b == null) return a;
+    return a < b ? a : b;
+  }
 
   int _firstIndexBefore(int cursorDate, int cursorId) {
     var low = 0;

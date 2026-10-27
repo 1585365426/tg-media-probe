@@ -5,6 +5,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:tg_media_probe/data/media_record.dart';
 import 'package:tg_media_probe/playback/player_slot.dart';
 import 'package:tg_media_probe/playback/video_source.dart';
+import 'package:tg_media_probe/td/td_error_kind.dart';
 import 'package:tg_media_probe/td/td_models.dart';
 import 'package:tg_media_probe/ui/feed_controller.dart';
 
@@ -244,7 +245,7 @@ class Rig {
       player: SinglePlayerController(factory: _Factory(tracker)),
       sources: VideoSourceResolver(
         api: api,
-        fetchTimeout: timeout,
+        stallTimeout: timeout,
         // The fake pool paths never exist on disk; the real resolver now
         // verifies existence, so the rig answers for its own pool.
         fileExists: (_) async => true,
@@ -446,7 +447,8 @@ void main() {
   });
 
   group('failures', () {
-    test('a transfer that never finishes becomes 加载超时', () async {
+    test('a transfer that stops sending data is reported as a network stall',
+        () async {
       final rig = Rig(
         pages: <List<MediaRecord>>[
           <MediaRecord>[video(1)],
@@ -457,7 +459,10 @@ void main() {
       await rig.controller.load();
 
       expect(rig.controller.phase, FeedPhase.error);
-      expect(rig.controller.error, contains('加载超时'));
+      // The wording has to name the condition: "0 bytes for 30ms" is a stall,
+      // and only a stall may be called a network problem.
+      expect(rig.controller.error, contains('仍未收到任何数据'));
+      expect(rig.controller.failure, RequestFailure.offline);
       expect(rig.ledger.live, 0);
     });
 

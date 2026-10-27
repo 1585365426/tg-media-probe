@@ -24,6 +24,8 @@ import '../playback/video_source.dart';
 import '../playback/watch_store.dart';
 import '../storage/file_ops.dart';
 import '../storage/active_files.dart';
+import '../playback/media_metadata.dart';
+import '../td/td_error_kind.dart';
 import '../util/byte_format.dart';
 import 'app_theme.dart';
 import 'feed_controller.dart';
@@ -120,13 +122,22 @@ class _FeedPageState extends State<FeedPage> with WidgetsBindingObserver {
     }
 
     final titles = widget.session.directory?.titles ?? const <int, String>{};
+    // One lookup object for both users: the resolver (file id repair) and the
+    // controller (file name repair).
+    final metadata = TdMediaMetadataLookup(client);
     final controller = FeedController(
       source: IndexFeedSource(store: store, chatId: _chatFilter),
       player: SinglePlayerController(
         factory: const VideoPlayerFactory(),
         activeFiles: _activeFiles,
       ),
-      sources: VideoSourceResolver(api: TdFileTransferApi(client)),
+      sources: VideoSourceResolver(
+        api: TdFileTransferApi(client),
+        // One `getMessage` is what repairs a stale file id and what fills in a
+        // missing file name — both were reported from the device.
+        metadata: metadata,
+      ),
+      metadata: metadata,
       // Watch state lives next to the index (protected zone), keyed by
       // chatId+messageId so a longer list never inherits another video's
       // resume point.
@@ -257,27 +268,110 @@ class _FeedPageState extends State<FeedPage> with WidgetsBindingObserver {
           onAction: controller.retry,
         );
       case FeedPhase.error:
-        return FailureView(
-          failure: controller.failure,
-          detail: controller.error,
-          onRetry: controller.retry,
+        // With items already loaded, the list stays: a failed transfer is not
+        // a reason to drop the user back to the first video. The error is an
+        // overlay on top of the item that failed.
+        if (controller.length == 0) {
+          return FailureView(
+            failure: controller.failure,
+            detail: controller.error,
+            onRetry: controller.retry,
+          );
+        }
+        return Stack(
+          fit: StackFit.expand,
+          children: <Widget>[
+            _buildPageView(controller),
+            _buildErrorOverlay(controller),
+          ],
         );
       case FeedPhase.buffering:
       case FeedPhase.ready:
-        return PageView.builder(
-          controller: _pager,
-          scrollDirection: Axis.vertical,
-          itemCount: controller.length,
-          onPageChanged: (index) {
-            // One call, awaited by nobody on purpose: goToIndex now extends the
-            // list when the target is past the loaded window, so the old
-            // "goToIndex then goNext" pair (which raced and computed an
-            // out-of-range target from the stale index) is gone.
-            controller.goToIndex(index);
-          },
-          itemBuilder: (context, index) => _buildPage(controller, index),
-        );
+        return _buildPageView(controller);
     }
+  }
+
+  Widget _buildPageView(FeedController controller) {
+    return PageView.builder(
+      controller: _pager,
+      scrollDirection: Axis.vertical,
+      itemCount: controller.length,
+      onPageChanged: (index) {
+        // One call, awaited by nobody on purpose: goToIndex now extends the
+        // list when the target is past the loaded window, so the old
+        // "goToIndex then goNext" pair (which raced and computed an
+        // out-of-range target from the stale index) is gone.
+        controller.goToIndex(index);
+      },
+      itemBuilder: (context, index) => _buildPage(controller, index),
+    );
+  }
+
+  /// Failure card over the current item, with two different recoveries:
+  /// [FeedController.retry] re-activates this item (position kept), and
+  /// [FeedController.reload] rebuilds the list (position lost) — only the
+  /// second one is allowed to move the user back to item 1.
+  Widget _buildErrorOverlay(FeedController controller) {
+    final theme = Theme.of(context);
+    final retryable = isRetryable(controller.failure);
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 24),
+        child: Material(
+          color: Colors.black.withValues(alpha: 0.82),
+          borderRadius: BorderRadius.circular(AppTheme.cardRadius),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(18, 18, 18, 12),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                Text(
+                  failureTitle(controller.failure),
+                  style: theme.textTheme.titleMedium?.copyWith(
+                    color: Colors.white,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  <String>[
+                    failureHint(controller.failure),
+                    if (controller.error != null) controller.error!,
+                  ].join('\n'),
+                  style: theme.textTheme.bodySmall
+                      ?.copyWith(color: Colors.white70, height: 1.4),
+                ),
+                const SizedBox(height: 10),
+                Text(
+                  '当前 ${controller.positionLabel}',
+                  style: theme.textTheme.bodySmall
+                      ?.copyWith(color: Colors.white38),
+                ),
+                const SizedBox(height: 4),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.end,
+                  children: <Widget>[
+                    TextButton(
+                      onPressed: controller.reload,
+                      child: const Text(
+                        '重新加载列表',
+                        style: TextStyle(color: Colors.white54),
+                      ),
+                    ),
+                    if (retryable)
+                      FilledButton(
+                        onPressed: controller.retry,
+                        child: const Text('重试'),
+                      ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
   }
 
   Widget _buildPage(FeedController controller, int index) {
@@ -364,9 +458,16 @@ class _FeedPageState extends State<FeedPage> with WidgetsBindingObserver {
 
   Widget _buildTopBar() {
     final directory = widget.session.directory;
-    final title = _chatFilter == null
+    final channelTitle = _chatFilter == null
         ? '视频'
         : (directory?.titles[_chatFilter] ?? '视频');
+    final current = _controller?.current;
+    // The name of the video now leads, and the channel becomes the second line:
+    // in landscape the bottom info block is hidden, so the top bar was the only
+    // place left where the file name could have been shown — and it showed the
+    // channel instead.
+    final title = current == null ? channelTitle : _controller!.titleOf(current);
+    final subtitle = current == null || title == channelTitle ? null : channelTitle;
     return Positioned(
       top: 0,
       left: 0,
@@ -391,15 +492,28 @@ class _FeedPageState extends State<FeedPage> with WidgetsBindingObserver {
             else
               const SizedBox(width: 8),
             Expanded(
-              child: Text(
-                title,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(
-                  color: Colors.white,
-                  fontSize: 16,
-                  fontWeight: FontWeight.w600,
-                ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: <Widget>[
+                  Text(
+                    title,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 16,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  if (subtitle != null)
+                    Text(
+                      subtitle,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(color: Colors.white70, fontSize: 12),
+                    ),
+                ],
               ),
             ),
             // Top entry is "jump to video number", not a text search: the
@@ -450,7 +564,7 @@ class _FeedPageState extends State<FeedPage> with WidgetsBindingObserver {
               ),
               const SizedBox(height: 6),
               Text(
-                '${controller.currentChannelTitle} · '
+                '${controller.currentChannelTitle} · #${record.messageId} · '
                 '${_formatDate(record.messageDateUnix)}'
                 '${record.sizeBytes > 0 ? ' · ${formatBytes(record.sizeBytes)}' : ''}',
                 style: const TextStyle(color: Colors.white70, fontSize: 13),

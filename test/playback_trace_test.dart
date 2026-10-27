@@ -15,6 +15,7 @@ class _Api implements FileTransferApi {
     this.expectedSize = 1000,
     this.startCompletes = true,
     this.failStart = false,
+    this.partialBytes,
   });
 
   /// When set, `stat` reports a completed file of this size.
@@ -22,6 +23,10 @@ class _Api implements FileTransferApi {
   final int expectedSize;
   final bool startCompletes;
   final bool failStart;
+
+  /// When set, `start` emits one non-final update with this many bytes and then
+  /// goes quiet — a transfer that is running but making no progress.
+  final int? partialBytes;
 
   final StreamController<FileState> _updates =
       StreamController<FileState>.broadcast();
@@ -49,6 +54,18 @@ class _Api implements FileTransferApi {
     startCalls++;
     startedIds.add(fileId);
     if (failStart) throw VideoSourceException('TDLib error 400: FILE_ID_INVALID');
+    final partial = partialBytes;
+    if (partial != null) {
+      _updates.add(FileState(
+        id: fileId,
+        size: 0,
+        expectedSize: expectedSize,
+        downloadedSize: partial,
+        isCompleted: false,
+        path: '',
+        canBeDownloaded: true,
+      ));
+    }
     if (!startCompletes) return;
     _updates.add(FileState(
       id: fileId,
@@ -210,25 +227,50 @@ void main() {
   });
 
   group('waiting ends with a specific reason', () {
-    test('a timeout reports the byte progress, not just "15s"', () async {
+    test('a quiet transfer says nothing arrived instead of a generic timeout',
+        () async {
       final api = _Api(startCompletes: false);
       final resolver = VideoSourceResolver(
         api: api,
         fileExists: (_) async => true,
-        fetchTimeout: const Duration(milliseconds: 30),
+        stallTimeout: const Duration(milliseconds: 30),
       );
       final trace = PlaybackTrace(fileId: 4)..expectedBytes = 1000;
 
       await expectLater(
         resolver.resolve(4, trace: trace),
-        throwsA(isA<VideoSourceTimeout>().having(
+        throwsA(isA<VideoSourceStalled>().having(
           (e) => e.message,
           'message',
-          contains('已下载'),
+          contains('仍未收到任何数据'),
         )),
       );
-      expect(trace.errorCategory, 'timeout');
+      // "stalled" and "taskTimeout" must stay distinguishable: only the first
+      // one is a network verdict, and the feed maps them to different screens.
+      expect(trace.errorCategory, 'stalled');
       expect(api.cancelCalls, 1, reason: '超时后必须停掉不再需要的传输');
+      await api.close();
+    });
+
+    test('a stall after partial progress reports the bytes, not just the limit',
+        () async {
+      final api = _Api(startCompletes: false, partialBytes: 400);
+      final resolver = VideoSourceResolver(
+        api: api,
+        fileExists: (_) async => true,
+        stallTimeout: const Duration(milliseconds: 40),
+      );
+      final trace = PlaybackTrace(fileId: 4)..expectedBytes = 1000;
+
+      await expectLater(
+        resolver.resolve(4, trace: trace),
+        throwsA(isA<VideoSourceStalled>().having(
+          (e) => e.message,
+          'message',
+          allOf(contains('已下载'), contains('40%')),
+        )),
+      );
+      expect(trace.errorCategory, 'stalled');
       await api.close();
     });
 

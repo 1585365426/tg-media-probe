@@ -24,6 +24,7 @@ import '../data/index_store.dart';
 import '../app/app_preferences.dart';
 import '../data/media_record.dart';
 import '../data/video_number_lookup.dart';
+import '../playback/media_metadata.dart';
 import '../playback/playback_trace.dart';
 import '../playback/player_slot.dart';
 import '../playback/video_source.dart';
@@ -108,6 +109,7 @@ class FeedController extends ChangeNotifier {
     required this.source,
     required this.player,
     required this.sources,
+    this.metadata,
     this.chatTitles = const <int, String>{},
     bool defaultMuted = false,
     bool preloadAdjacent = true,
@@ -121,6 +123,11 @@ class FeedController extends ChangeNotifier {
   final FeedPageSource source;
   final SinglePlayerController player;
   final VideoSourceResolver sources;
+
+  /// Reads one message again to repair a missing file name or a stale file id.
+  /// Null in tests that do not care about it; the feed then simply shows the
+  /// channel title as before.
+  final MediaMetadataLookup? metadata;
 
   /// Prefetch window: how many items after the current one may be prepared.
   /// 0 disables it. Read from the saved preference.
@@ -219,8 +226,20 @@ class FeedController extends ChangeNotifier {
     final channel = chatTitles[record.chatId];
     final name = record.fileName;
     if (name != null && name.isNotEmpty) return name;
-    if (channel != null && channel.isNotEmpty) return channel;
-    return '视频';
+    if (channel != null && channel.isNotEmpty) {
+      // A channel video with no file name is the common case, not an edge one.
+      // The message id is the only stable handle the user can match against
+      // the Telegram client, so it goes in the label instead of a bare "视频".
+      return '$channel · #${record.messageId}';
+    }
+    return '视频 #${record.messageId}';
+  }
+
+  /// True when the current item has no file name yet — the UI may show the
+  /// channel title meanwhile, and [metadata] is being asked in the background.
+  bool get currentHasName {
+    final name = current?.fileName;
+    return name != null && name.isNotEmpty;
   }
 
   String get currentChannelTitle {
@@ -269,7 +288,34 @@ class FeedController extends ChangeNotifier {
     await _activateCurrent();
   }
 
-  Future<void> retry() => load();
+  /// Retries the item that failed **without rebuilding the list**.
+  ///
+  /// This used to be `load()`, which cleared `_items`, reset the source cursor
+  /// and landed on item 1. A failed play therefore threw away the paging work
+  /// and put the user back at "1 / 38" — reported as "播放失败后回到第一条".
+  /// A play failure is a transfer problem, not an index problem, so only the
+  /// current item is activated again.
+  Future<void> retry() async {
+    if (_items.isEmpty) {
+      await load();
+      return;
+    }
+    if (_index < 0 || _index >= _items.length) {
+      await load();
+      return;
+    }
+    _error = null;
+    _failure = RequestFailure.none;
+    _bufferFraction = 0;
+    _pathCache.clear();
+    // The cached path is the most likely stale input in a retry; the resolver
+    // checks it again, but dropping it here keeps the retry honest.
+    await _activateCurrent();
+  }
+
+  /// Rebuilds the list from the first page. Only for an explicit
+  /// "重新加载列表" — never for a play failure.
+  Future<void> reload() => load();
 
   /// Pulls pages until one contains a video or the source is exhausted.
   ///
@@ -466,18 +512,33 @@ class FeedController extends ChangeNotifier {
     trace.mark(PlaybackStage.selected);
     _lastTrace = trace;
 
+    // The index stores whatever `messageVideo.video.file_name` held when the
+    // message was mirrored, and for channel videos that is frequently empty.
+    // Ask the message itself; the answer arrives a moment later and the label
+    // updates without blocking the play.
+    unawaited(_fetchNameIfMissing(record));
+
     String? path;
     try {
       path = await _gate.run(() async {
         final cached = _pathCache.remove(record.fileId);
         if (cached != null) {
-          // A prefetched path is a real cache hit: no TDLib request, no wait.
-          trace.mark(PlaybackStage.fileReady);
-          return cached;
+          // A prefetched path is not a promise: the pool entry may have been
+          // purged between the prefetch and this swipe. Verify before handing
+          // it to the player, otherwise the failure surfaces as a decode error.
+          if (await sources.isUsable(cached)) {
+            trace.mark(PlaybackStage.fileReady);
+            return cached;
+          }
         }
         return sources.resolve(
           record.fileId,
+          chatId: record.chatId,
+          messageId: record.messageId,
           trace: trace,
+          // TDLib rejected the stored file id (or the message carried a file
+          // name the mirror never had): keep the repaired record.
+          onRecordRefreshed: _absorbRefreshed,
           onProgress: (update) {
             if (update.stage == SourceStage.fetching) {
               _bufferFraction = update.fraction;
@@ -487,8 +548,13 @@ class FeedController extends ChangeNotifier {
         );
       });
     } on VideoSourceTimeout catch (e) {
-      // A transfer that never finishes is a network symptom, not a bug.
-      _fail(e.message, failure: RequestFailure.offline);
+      // Only "no data arrived" is a network verdict. Hitting the absolute task
+      // ceiling on a large, steadily downloading file is not — reporting it as
+      // "网络不可用" is what made big videos look like a connection failure.
+      _fail(
+        e.message,
+        failure: e.isStall ? RequestFailure.offline : RequestFailure.generic,
+      );
       return;
     } on VideoSourceException catch (e) {
       _fail(e.message, failure: classifyFailure(e));
@@ -540,7 +606,12 @@ class FeedController extends ChangeNotifier {
       final record = _items[next];
       if (record.fileId == 0 || _pathCache.containsKey(record.fileId)) continue;
       try {
-        final path = await sources.resolve(record.fileId);
+        final path = await sources.resolve(
+          record.fileId,
+          chatId: record.chatId,
+          messageId: record.messageId,
+          onRecordRefreshed: _absorbRefreshed,
+        );
         if (_disposed || generation != _prefetchGeneration) return;
         _pathCache[record.fileId] = path;
         while (_pathCache.length > _pathCacheLimit) {
@@ -558,6 +629,58 @@ class FeedController extends ChangeNotifier {
   /// The trace of the most recent play, for the diagnostics export.
   PlaybackTrace? _lastTrace;
   PlaybackTrace? get lastTrace => _lastTrace;
+
+  /// The mirror this feed pages, when it pages one. Null for a synthetic source
+  /// (tests, previews), in which case nothing is persisted.
+  IndexStore? get _store {
+    final source = this.source;
+    return source is IndexFeedSource ? source.store : null;
+  }
+
+  /// Replaces the row for [fresh] and writes it back to the mirror.
+  ///
+  /// Called when TDLib answered with a different file id or a file name the
+  /// index never had. The favourite flag is kept: a metadata refresh must not
+  /// silently unstar an item.
+  void _absorbRefreshed(MediaRecord fresh) {
+    var replaced = false;
+    for (var i = 0; i < _items.length; i++) {
+      final item = _items[i];
+      if (item.chatId != fresh.chatId || item.messageId != fresh.messageId) {
+        continue;
+      }
+      if (item.fileId == fresh.fileId &&
+          (item.fileName ?? '') == (fresh.fileName ?? '')) {
+        return; // Nothing changed; do not churn the store.
+      }
+      _items[i] = fresh.copyWith(favorite: item.favorite);
+      replaced = true;
+      break;
+    }
+    if (!replaced) return;
+    _lastTrace?.mark(PlaybackStage.metadataFetched);
+    final store = _store;
+    if (store != null) {
+      unawaited(store.upsertAll(<MediaRecord>[fresh]).catchError((Object _) => 0));
+    }
+    _notify();
+  }
+
+  /// Fills in a missing file name by re-reading one message.
+  ///
+  /// Deliberately one shot and silent: a name is a label, and a failed lookup
+  /// must not turn into an error screen on top of a playing video.
+  Future<void> _fetchNameIfMissing(MediaRecord record) async {
+    final lookup = metadata;
+    if (lookup == null) return;
+    final name = record.fileName;
+    if (name != null && name.isNotEmpty) return;
+    final fresh = await lookup.fetch(record.chatId, record.messageId);
+    if (_disposed || fresh == null) return;
+    final freshName = fresh.fileName;
+    if (freshName == null || freshName.isEmpty) return;
+    _absorbRefreshed(fresh);
+  }
 
   /// Counters for the report: how many prefetches finished, failed, or were
   /// dropped because the user moved on. No gameplay depends on them.
