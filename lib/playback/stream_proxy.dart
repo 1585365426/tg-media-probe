@@ -375,6 +375,7 @@ class StreamProxyServer {
   int _detourFrom = -1;
   int _detourTo = -1;
   String _detourKey = '';
+  int _detourGeneration = 0;
   Completer<void>? _detourFirstByte;
   Completer<void>? _detourFinished;
 
@@ -798,6 +799,7 @@ class StreamProxyServer {
       }
 
       _diversions++;
+      _detourGeneration++;
       _detourActive = true;
       _detourFrom = from;
       _detourTo = end;
@@ -809,7 +811,7 @@ class StreamProxyServer {
       onWindowMove?.call(start: from, end: end);
 
       final first = _detourFirstByte!;
-      unawaited(_runDiversion(from, end));
+      unawaited(_runDiversion(from, end, _detourGeneration));
       await first.future;
       return;
     }
@@ -817,8 +819,10 @@ class StreamProxyServer {
 
   /// Steers the window, hands the first byte to the waiting response as soon
   /// as it exists, and keeps filling in the background.
-  Future<void> _runDiversion(int from, int end) async {
-    bool cancelled() => !_detourActive;
+  Future<void> _runDiversion(int from, int end, int generation) async {
+    // A diversion only owns the window until the next one opens: a late
+    // callback from this generation must not release somebody else's window.
+    bool gone() => !_detourActive || _detourGeneration != generation;
     try {
       await _serial(() => watch.requestWindow(from, end));
       // Only the first byte is awaited before headers go out: a 10 MB tail
@@ -828,7 +832,7 @@ class StreamProxyServer {
         label: 'diversion first byte $from',
         ownDiversion: true,
         budget: detourBudget,
-        cancelled: cancelled,
+        cancelled: gone,
       );
       final first = _detourFirstByte;
       if (first != null && !first.isCompleted) first.complete();
@@ -843,26 +847,26 @@ class StreamProxyServer {
         label: 'diversion fill $from-$end',
         ownDiversion: true,
         budget: detourBudget,
-        cancelled: cancelled,
+        cancelled: gone,
       );
       onEvent?.call(
-          'diversion ${cancelled() ? "aborted" : (filled ? "filled" : "budget")} '
+          'diversion ${gone() ? "aborted" : (filled ? "filled" : "budget")} '
           '$from-$end');
     } on Object catch (e) {
       onEvent?.call('diversion end ${_brief(e)}');
     } finally {
-      _finishDiversion();
+      _finishDiversion(generation);
     }
   }
 
   void _abortDiversion(String why) {
     if (!_detourActive) return;
     onEvent?.call('diversion abort ($why)');
-    _finishDiversion();
+    _finishDiversion(_detourGeneration);
   }
 
-  void _finishDiversion() {
-    if (!_detourActive) return;
+  void _finishDiversion(int generation) {
+    if (!_detourActive || _detourGeneration != generation) return;
     // A diversion that cannot even deliver its first byte must not leave the
     // waiting response blocked on a completer nobody will complete.
     if (!(_detourFirstByte?.isCompleted ?? true)) _detourFirstByte!.complete();
