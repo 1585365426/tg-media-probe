@@ -134,6 +134,10 @@ class _TgMediaAppState extends State<TgMediaApp> with WidgetsBindingObserver {
       // arming and playing — that was the "STREAMING TEST: OFF" hole.
       StreamingDiagnostics.instance
           .setForceStreamingTest(_preferences.value.forceStreamingTest);
+      // The preference layer of the streaming decision, recorded next to the
+      // forced flag so the panel can show both without guessing.
+      StreamingDiagnostics.instance
+          .setStreamingPreference(_preferences.value.streamingPlayback);
       // The lock is decided before anything else is drawn.
       await _lock.start();
 

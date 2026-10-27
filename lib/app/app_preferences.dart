@@ -80,6 +80,7 @@ class AppPreferences {
     this.cacheLimitBytes = CacheBudget.defaultLimit,
     this.streamingDiagnostics = false,
     this.forceStreamingTest = false,
+    this.streamingPlayback = true,
   });
 
   /// How many videos **after** the current one may be prepared in advance.
@@ -123,6 +124,12 @@ class AppPreferences {
   /// between arming and playing was the "STREAMING TEST: OFF" hole.
   final bool forceStreamingTest;
 
+  /// The preference layer of the streaming decision: play-while-downloading
+  /// is on by default. Kept separate from [forceStreamingTest] so the two
+  /// layers can be told apart in the decision trace — the acceptance needs
+  /// "preference off, force on" to still stream.
+  final bool streamingPlayback;
+
   AppPreferences copyWith({
     ThemePreference? theme,
     FeedDirection? feedDirection,
@@ -132,6 +139,7 @@ class AppPreferences {
     int? cacheLimitBytes,
     bool? streamingDiagnostics,
     bool? forceStreamingTest,
+    bool? streamingPlayback,
   }) {
     final count = preloadCount ?? this.preloadCount;
     return AppPreferences(
@@ -144,6 +152,7 @@ class AppPreferences {
       streamingDiagnostics:
           streamingDiagnostics ?? this.streamingDiagnostics,
       forceStreamingTest: forceStreamingTest ?? this.forceStreamingTest,
+      streamingPlayback: streamingPlayback ?? this.streamingPlayback,
     );
   }
 
@@ -156,6 +165,7 @@ class AppPreferences {
       'cacheLimitBytes': cacheLimitBytes,
       'streamingDiagnostics': streamingDiagnostics,
       'forceStreamingTest': forceStreamingTest,
+      'streamingPlayback': streamingPlayback,
       };
 
   /// Tolerant decode: an unknown enum name falls back to the default for that
@@ -171,6 +181,8 @@ class AppPreferences {
       cacheLimitBytes: _limitFromJson(json),
       streamingDiagnostics: json['streamingDiagnostics'] == true,
       forceStreamingTest: json['forceStreamingTest'] == true,
+      // Missing key = the documented default (on), not "off".
+      streamingPlayback: json['streamingPlayback'] != false,
     );
   }
 
@@ -204,13 +216,14 @@ class AppPreferences {
       other.preloadCount == preloadCount &&
       other.cacheLimitBytes == cacheLimitBytes &&
       other.streamingDiagnostics == streamingDiagnostics &&
-      other.forceStreamingTest == forceStreamingTest;
+      other.forceStreamingTest == forceStreamingTest &&
+      other.streamingPlayback == streamingPlayback;
 
   @override
   int get hashCode =>
       Object.hash(theme, feedDirection, defaultMuted, preloadAdjacent,
           preloadCount, cacheLimitBytes, streamingDiagnostics,
-          forceStreamingTest);
+          forceStreamingTest, streamingPlayback);
 
   @override
   String toString() =>
@@ -307,6 +320,9 @@ class PreferencesController extends ChangeNotifier {
 
   Future<void> setForceStreamingTest(bool enabled) =>
       update(_value.copyWith(forceStreamingTest: enabled));
+
+  Future<void> setStreamingPlayback(bool enabled) =>
+      update(_value.copyWith(streamingPlayback: enabled));
 
   Future<void> setPreloadAdjacent(bool enabled) =>
       update(_value.copyWith(preloadCount: enabled ? 1 : 0));

@@ -18,6 +18,7 @@ import 'package:tg_media_probe/data/media_record.dart';
 import 'package:tg_media_probe/playback/media_metadata.dart';
 import 'package:tg_media_probe/playback/playback_trace.dart';
 import 'package:tg_media_probe/playback/stream_proxy.dart';
+import 'package:tg_media_probe/playback/streaming_diagnostics.dart';
 import 'package:tg_media_probe/playback/video_source.dart';
 import 'package:tg_media_probe/td/td_models.dart';
 
@@ -603,6 +604,53 @@ void main() {
       expect(trace.proxyEvents, isNotEmpty, reason: '代理行为必须进诊断');
       expect(trace.proxyEvents.join(' '), contains('206'));
       await source.dispose();
+      await api.close();
+    });
+
+    test('FORCE_STREAMING_TEST streams a complete file so the proxy runs',
+        () async {
+      // Every acceptance attempt kept landing on a prefetched video: a
+      // complete file short-circuited to PlaySource.file and the proxy was
+      // never exercised. Under the forced test the complete file must still
+      // go through the range proxy.
+      final api = ScriptedFile(sandbox);
+      await api.complete();
+      final diag = StreamingDiagnostics()..setForceStreamingTest(true);
+      final resolver = VideoSourceResolver(
+        api: api,
+        fileExists: (_) async => true,
+        diagnostics: diag,
+      );
+
+      final source = await resolver.resolveStream(1001);
+
+      expect(source.isStreaming, isTrue,
+          reason: '强制模式不得因为文件已完整就绕过代理');
+      expect(Uri.parse(source.url).scheme, 'http');
+      expect(diag.decision, 'STREAM');
+      expect(diag.decisionReason, 'complete_file_served_over_http');
+      await source.dispose();
+      await api.close();
+    });
+
+    test('streaming off by preference returns the path and says why', () async {
+      final api = ScriptedFile(sandbox);
+      await api.complete();
+      final diag = StreamingDiagnostics()..setStreamingPreference(false);
+      final resolver = VideoSourceResolver(
+        api: api,
+        fileExists: (_) async => true,
+        diagnostics: diag,
+      );
+
+      final source = await resolver.resolveStream(1001);
+
+      expect(source.isStreaming, isFalse);
+      expect(source.path, api.path);
+      expect(diag.decision, 'LOCAL_FILE');
+      expect(diag.decisionReason, 'streaming_disabled_by_preference',
+          reason: '每个 LOCAL_FILE 都必须回答为什么不是流式');
+      expect(diag.panelLines().join('\n'), contains('PREFERENCE STREAMING: OFF'));
       await api.close();
     });
   });

@@ -355,7 +355,13 @@ class VideoSourceResolver {
   }) {
     final running = _inflight[fileId];
     if (running != null) return running.then((source) => source.path);
-    if (forPlayback) {
+    // A playback resolve usually opens the evidence block for its play — but
+    // NOT when it is the *fallback* of a play whose block already exists
+    // (resolveStream opened it, noteFallback just recorded why streaming
+    // died). Re-calling beginPlay here wiped the fallback reason and the
+    // proxy/206 evidence, so the acceptance report showed a full download
+    // with no explanation. Same file id = same play = keep the evidence.
+    if (forPlayback && _diagnostics.fileId != fileId) {
       _diagnostics.beginPlay(
         fileId: fileId,
         streaming: false,
@@ -415,6 +421,33 @@ class VideoSourceResolver {
   }) {
     final running = _inflight[fileId];
     if (running != null) return running;
+    // Preference layer, before anything else: streaming off and no forced
+    // test means this play is a plain full download — and it says so, instead
+    // of looking like a streaming pipeline that mysteriously produced a path.
+    if (!_diagnostics.forceStreamingTest &&
+        !_diagnostics.userStreamingPreference) {
+      // Written *after* the full download: `resolve(forPlayback: true)` opens
+      // a fresh evidence block, which would erase anything recorded first.
+      return resolve(
+        fileId,
+        chatId: chatId,
+        messageId: messageId,
+        onProgress: onProgress,
+        trace: trace,
+        onRecordRefreshed: onRecordRefreshed,
+        forPlayback: true,
+      ).then((path) {
+        _diagnostics.noteDecision(
+          preference: false,
+          force: false,
+          candidate: false,
+          candidateReason: 'streaming_disabled_by_preference',
+          decision: 'LOCAL_FILE',
+          reason: 'streaming_disabled_by_preference',
+        );
+        return PlaySource.file(path);
+      });
+    }
     final future = _streamWithRepair(
       fileId,
       chatId: chatId,
@@ -533,11 +566,22 @@ class VideoSourceResolver {
     final sizeMatches = existing == null ||
         existing.expectedSize <= 0 ||
         existing.size >= existing.expectedSize;
-    if (existing != null &&
+    final fileComplete = existing != null &&
         existing.isCompleted &&
         existing.path.isNotEmpty &&
         sizeMatches &&
-        await _fileExists(existing.path)) {
+        await _fileExists(existing.path);
+    // FORCE_STREAMING_TEST must exercise the pipeline even when the bytes are
+    // already on disk, otherwise every prefetched video silently becomes a
+    // LOCAL_FILE run and the acceptance can never test the proxy at all.
+    // Normal mode keeps the fast path: a complete file is played directly.
+    final forced = _diagnostics.forceStreamingTest;
+    _diagnostics.noteDecision(
+      preference: _diagnostics.userStreamingPreference,
+      force: forced,
+      fileComplete: fileComplete,
+    );
+    if (fileComplete && !forced) {
       trace?.mark(PlaybackStage.fileReady, bytes: existing.size);
       onProgress?.call(VideoSourceUpdate(
         stage: SourceStage.ready,
@@ -545,6 +589,12 @@ class VideoSourceResolver {
         expectedBytes: existing.size,
         path: existing.path,
       ));
+      _diagnostics.noteDecision(
+        candidate: false,
+        candidateReason: 'already_completed_normal_mode',
+        decision: 'LOCAL_FILE',
+        reason: 'already_completed_normal_mode',
+      );
       return PlaySource.file(existing.path);
     }
 
@@ -553,10 +603,17 @@ class VideoSourceResolver {
     if (existing != null && existing.expectedSize <= 0) {
       trace?.mark(PlaybackStage.streamingModeSelected);
       trace?.errorCategory = 'streamingUnavailable';
+      _diagnostics.noteDecision(
+        candidate: false,
+        candidateReason: 'invalid_video_metadata',
+        decision: 'FALLBACK',
+        reason: 'invalid_video_metadata',
+      );
       throw VideoSourceException('流式播放不可用（文件大小未知）');
     }
 
     trace?.mark(PlaybackStage.streamingModeSelected);
+    _diagnostics.noteDecision(candidate: true);
     _diagnostics.noteStreamingSelected();
     final watch = _LiveFileWatch(
       api,
@@ -595,6 +652,12 @@ class VideoSourceResolver {
       final localPath = watch.localPath;
       if (localPath.isEmpty) {
         trace?.errorCategory = 'streamingUnavailable';
+        _diagnostics.noteDecision(
+          candidate: false,
+          candidateReason: 'no_local_path',
+          decision: 'FALLBACK',
+          reason: 'no_local_path',
+        );
         throw VideoSourceException('流式播放不可用（下载未产生本地文件）');
       }
 
@@ -605,6 +668,13 @@ class VideoSourceResolver {
       // prints it next to playerSourceType so a device run shows *where* the
       // bytes came from.
       _diagnostics.noteProxyStarted(url.toString());
+      _diagnostics.noteDecision(
+        proxyAvailable: true,
+        decision: 'STREAM',
+        reason: fileComplete
+            ? 'complete_file_served_over_http'
+            : 'streaming_active',
+      );
       // When the play ends (or the resolver is torn down) the watch dies with
       // the proxy: one subscription, one owner, no leak.
       proxy.onClose(watch.dispose);
@@ -645,6 +715,12 @@ class VideoSourceResolver {
       // A rejected file id must reach the repair loop as [_MissingFile], the
       // same conversion the full-download path performs on its errors.
       final text = '$e';
+      // Nothing was served: the proxy never handed the player a URL.
+      _diagnostics.noteDecision(
+        proxyAvailable: false,
+        decision: 'FALLBACK',
+        reason: proxy == null ? 'stream_initialization_failed' : 'proxy_start_failed',
+      );
       if (_looksMissing(text.toUpperCase())) throw _MissingFile(text);
       rethrow;
     }

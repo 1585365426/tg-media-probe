@@ -589,6 +589,12 @@ void main() {
       final diag = StreamingDiagnostics();
       diag.setForceStreamingTest(true);
       diag.beginPlay(fileId: 1001, streaming: false, totalBytes: 1000);
+      // Streaming was genuinely exercised (proxy bound, a range served), yet
+      // the file was whole before the playhead moved: that is the honest
+      // FULL_DOWNLOAD_BEFORE_PLAYBACK, not "never started".
+      diag.noteProxyStarted('http://127.0.0.1:8099/t/abc');
+      diag.noteRangeRequest(from: 0, to: 1000);
+      diag.noteResponse(status: 206, from: 0, end: 1000, total: 1000, length: 1001);
       await _playAndAdvance(
         diag,
         downloadedAtPlayback: 1000,
@@ -730,6 +736,8 @@ void main() {
       final diag = StreamingDiagnostics();
       diag.setForceStreamingTest(true);
       diag.beginPlay(fileId: 1001, streaming: false, totalBytes: 1000);
+      diag.noteProxyStarted('http://127.0.0.1:8099/t/abc');
+      diag.noteRangeRequest(from: 0, to: 1000);
       await _playAndAdvance(
         diag,
         downloadedAtPlayback: 1000,
@@ -801,6 +809,144 @@ void main() {
       diag.startAcceptance();
       expect(diag.fileId, 0, reason: '新一轮验收从清零开始');
       expect(diag.verdict, StreamingVerdict.unknown);
+    });
+  });
+
+  group('streaming decision trace', () {
+    test('preference off + force off => LOCAL_FILE with the reason named', () {
+      final diag = StreamingDiagnostics();
+      diag.setStreamingPreference(false);
+      diag.setForceStreamingTest(false);
+      diag.beginPlay(fileId: 1001, streaming: false, totalBytes: 1000);
+      diag.noteDecision(
+        preference: false,
+        force: false,
+        candidate: false,
+        candidateReason: 'streaming_disabled_by_preference',
+        decision: 'LOCAL_FILE',
+        reason: 'streaming_disabled_by_preference',
+      );
+
+      final panel = diag.panelLines().join('\n');
+      expect(panel, contains('PREFERENCE STREAMING: OFF'));
+      expect(panel, contains('decision=LOCAL_FILE'));
+      expect(panel, contains('reason=streaming_disabled_by_preference'));
+
+      final report = diag.acceptanceLines().join('\n');
+      expect(report, contains('LOCAL_FILE_REASON=streaming_disabled_by_preference'));
+      expect(report, contains('preference=false'));
+      expect(report, contains('forceTest=false'));
+    });
+
+    test('force on overrides a preference that is off', () {
+      final diag = StreamingDiagnostics();
+      diag.setStreamingPreference(false);
+      diag.setForceStreamingTest(true);
+      diag.beginPlay(fileId: 1001, streaming: true, totalBytes: 1000);
+      diag.noteDecision(preference: false, force: true, candidate: true);
+      diag.noteProxyStarted('http://127.0.0.1:8099/t/abc');
+      diag.notePlayerSource(
+        isStreaming: true,
+        url: 'http://127.0.0.1:8099/t/abc',
+      );
+      diag.noteRangeRequest(from: 0, to: 1048575);
+      diag.noteResponse(
+          status: 206, from: 0, end: 1048575, total: 1000, length: 1048576);
+      diag.updateTransfer(
+        downloadedBytes: 300,
+        totalBytes: 1000,
+        downloadOffset: 0,
+        completed: false,
+      );
+      diag.updatePlayer(
+        position: const Duration(seconds: 2),
+        duration: const Duration(seconds: 60),
+        isPlaying: true,
+        isBuffering: false,
+      );
+
+      expect(diag.verdict, StreamingVerdict.streamingActive);
+      expect(diag.acceptanceLines().join('\n'), contains('preference=false'));
+      expect(diag.acceptanceLines().join('\n'), contains('forceTest=true'));
+    });
+
+    test('a forced run that never bound the proxy is NOT_STARTED', () async {
+      // The device shape: full download completed, player on a local file,
+      // zero range requests. Rounds of reports read this as "full download
+      // before playback"; it has to read as "streaming did not run".
+      final diag = StreamingDiagnostics();
+      diag.setForceStreamingTest(true);
+      diag.beginPlay(fileId: 1001, streaming: false, totalBytes: 1000);
+      // Drive the facts without the range/206 helper: this run never touched
+      // the proxy at all.
+      diag.updateTransfer(
+        downloadedBytes: 1000,
+        totalBytes: 1000,
+        downloadOffset: 0,
+        completed: true,
+      );
+      diag.updatePlayer(
+        position: const Duration(seconds: 2),
+        duration: const Duration(seconds: 60),
+        isPlaying: true,
+        isBuffering: false,
+      );
+
+      expect(diag.verdict, StreamingVerdict.streamingNotStarted);
+      expect(diag.acceptanceLines().join('\n'),
+          contains('STREAMING_TEST_FAILED: STREAMING_NOT_STARTED'));
+    });
+
+    test('a fallback that never bound the proxy is NOT_STARTED, not FALLBACK',
+        () async {
+      final diag = StreamingDiagnostics();
+      diag.setForceStreamingTest(true);
+      diag.beginPlay(fileId: 1001, streaming: false, totalBytes: 1000);
+      diag.noteDecision(
+        candidate: false,
+        candidateReason: 'invalid_video_metadata',
+        decision: 'FALLBACK',
+        reason: 'invalid_video_metadata',
+      );
+      diag.noteFallback('流式播放不可用（文件大小未知）');
+      diag.updateTransfer(
+        downloadedBytes: 1000,
+        totalBytes: 1000,
+        downloadOffset: 0,
+        completed: true,
+      );
+      diag.updatePlayer(
+        position: const Duration(seconds: 2),
+        duration: const Duration(seconds: 60),
+        isPlaying: true,
+        isBuffering: false,
+      );
+
+      expect(diag.verdict, StreamingVerdict.streamingNotStarted,
+          reason: '没有尝试过流式，不能记成 fallback');
+      final report = diag.acceptanceLines().join('\n');
+      expect(report, contains('fallbackReason=流式播放不可用（文件大小未知）'));
+      expect(report, contains('reason=invalid_video_metadata'));
+    });
+
+    test('a fallback after the proxy bound stays STREAMING_FALLBACK', () async {
+      final diag = StreamingDiagnostics();
+      diag.setForceStreamingTest(true);
+      diag.beginPlay(fileId: 1001, streaming: true, totalBytes: 1000);
+      diag.noteProxyStarted('http://127.0.0.1:8099/t/abc');
+      diag.noteRangeRequest(from: 0, to: 1048575);
+      diag.noteFallback('播放器初始化失败');
+      await _playAndAdvance(
+        diag,
+        downloadedAtPlayback: 900,
+        totalBytes: 1000,
+        completed: false,
+      );
+
+      expect(diag.verdict, StreamingVerdict.fallbackUsed);
+      final report = diag.acceptanceLines().join('\n');
+      expect(report, contains('STREAMING_FALLBACK'));
+      expect(report, contains('fallbackReason=播放器初始化失败'));
     });
   });
 

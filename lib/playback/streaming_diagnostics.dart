@@ -107,6 +107,33 @@ class StreamingDiagnostics extends ChangeNotifier {
   /// wipe the recorded evidence. Only [startAcceptance] unseals it.
   bool _sealedResult = false;
 
+  // ---- streaming decision trace -------------------------------------
+  //
+  // The ON→OFF question had no answer on screen because the decision was
+  // implicit: several branches returned a local file without saying why.
+  // These fields make the decision itself evidence: every LOCAL_FILE /
+  // FALLBACK return has to name its reason.
+
+  /// The preference layer: is streaming allowed for an ordinary play?
+  bool? _decisionPreference;
+
+  /// The acceptance layer: was FORCE_STREAMING_TEST on for this play?
+  bool? _decisionForce;
+
+  /// Did the video pass the structural checks (size known, path, format)?
+  bool? _decisionCandidate;
+  String? _decisionCandidateReason;
+
+  /// Did the loopback proxy actually bind and get handed to the player?
+  bool? _decisionProxyAvailable;
+
+  /// Was the file already whole when the play was resolved?
+  bool? _decisionFileComplete;
+
+  /// STREAM / LOCAL_FILE / FALLBACK — what the resolver returned.
+  String? _decision;
+  String? _decisionReason;
+
   /// FORCE_STREAMING_TEST: the developer/acceptance switch. While on, the
   /// feed controller must not serve the play from the prefetch cache and must
   /// not run background prefetches — every play goes through the streaming
@@ -114,11 +141,14 @@ class StreamingDiagnostics extends ChangeNotifier {
   bool _forceTest = false;
 
   /// The app's standing preference for the current video: streaming first.
-  /// There is no user-facing preference that can turn this off — the feed
-  /// always calls `resolveStream` before any full download — so this is a
-  /// constant, recorded here so the panel can show the three lines the
-  /// acceptance asks for (TEST / PREFERENCE / EFFECTIVE) side by side.
-  static const bool userStreamingPreference = true;
+  ///
+  /// Sourced from [AppPreferences.streamingPlayback] at startup and exposed
+  /// here so the panel can show TEST / PREFERENCE / EFFECTIVE side by side —
+  /// and so a preference that is off is *visible*, not inferred from a
+  /// silent full download.
+  bool _preferenceStreaming = true;
+
+  bool get userStreamingPreference => _preferenceStreaming;
 
   /// What the live player was actually handed: `STREAM_HTTP` (a loopback URL
   /// served by the range proxy) or `LOCAL_FILE` (a path). Written by the feed
@@ -278,6 +308,12 @@ class StreamingDiagnostics extends ChangeNotifier {
   ///    missing → [StreamingVerdict.streamingActive];
   /// 6. otherwise → [StreamingVerdict.unknown].
   StreamingVerdict get verdict {
+    // "Streaming never ran" is not a fallback. A fallback that never bound a
+    // proxy and never served a byte is a decision made before the pipeline
+    // started, and the report has to say NOT_STARTED with a reason — calling
+    // it STREAMING_FALLBACK was exactly the mislabel the device report caught.
+    final attempted = _proxyStartedMillis != null || _rangeRequests > 0;
+    if (_fallback && !attempted) return StreamingVerdict.streamingNotStarted;
     if (_fallback) return StreamingVerdict.fallbackUsed;
     final atFirstPlayback = _firstPlaybackDownloadedBytes;
     // No confirmed playhead = nothing to compare against.
@@ -285,6 +321,12 @@ class StreamingDiagnostics extends ChangeNotifier {
     final totalAtFirstPlayback = _firstPlaybackTotalBytes ?? 0;
     // Without a total, "146 MB" cannot be placed on any scale.
     if (totalAtFirstPlayback <= 0) return StreamingVerdict.unknown;
+    // A forced run that never bound the proxy did not test streaming at all —
+    // whatever the download numbers say. Reported before the completion check
+    // so a prefetched video cannot pass off as "streaming was verified".
+    if (_forceTestAtPlay && !attempted) {
+      return StreamingVerdict.streamingNotStarted;
+    }
     // Full file before the first played frame = not play-while-downloading.
     if (atFirstPlayback >= totalAtFirstPlayback || _firstPlaybackCompleted) {
       return StreamingVerdict.fullDownloadBeforePlayback;
@@ -325,6 +367,44 @@ class StreamingDiagnostics extends ChangeNotifier {
     _forceTest = value;
     notifyListeners();
   }
+
+  /// Records the preference layer (see [AppPreferences.streamingPlayback]).
+  void setStreamingPreference(bool value) {
+    if (_preferenceStreaming == value) return;
+    _preferenceStreaming = value;
+    notifyListeners();
+  }
+
+  /// Writes the streaming decision trace. Fields are merged: the resolver
+  /// fills preference/force first, then candidate, then the final decision.
+  ///
+  /// [decision] is one of `STREAM` / `LOCAL_FILE` / `FALLBACK`; [reason] is a
+  /// stable token (never prose) so a device report can be matched to the
+  /// branch that produced it without guessing.
+  void noteDecision({
+    bool? preference,
+    bool? force,
+    bool? candidate,
+    String? candidateReason,
+    bool? proxyAvailable,
+    bool? fileComplete,
+    String? decision,
+    String? reason,
+  }) {
+    if (_sealedResult) return;
+    if (preference != null) _decisionPreference = preference;
+    if (force != null) _decisionForce = force;
+    if (candidate != null) _decisionCandidate = candidate;
+    if (candidateReason != null) _decisionCandidateReason = candidateReason;
+    if (proxyAvailable != null) _decisionProxyAvailable = proxyAvailable;
+    if (fileComplete != null) _decisionFileComplete = fileComplete;
+    if (decision != null) _decision = decision;
+    if (reason != null) _decisionReason = reason;
+    notifyListeners();
+  }
+
+  String? get decision => _decision;
+  String? get decisionReason => _decisionReason;
 
   /// Records what the player is about to open — called from the feed
   /// controller immediately before `player.activate`, with the same source.
@@ -393,6 +473,14 @@ class StreamingDiagnostics extends ChangeNotifier {
     _downloadCompletedMillis = null;
     _firstBytesMillis = null;
     _first206Millis = null;
+    _decisionPreference = null;
+    _decisionForce = null;
+    _decisionCandidate = null;
+    _decisionCandidateReason = null;
+    _decisionProxyAvailable = null;
+    _decisionFileComplete = null;
+    _decision = null;
+    _decisionReason = null;
     _startedAt = _clock();
     _growth.clear();
     _events.clear();
@@ -637,6 +725,13 @@ class StreamingDiagnostics extends ChangeNotifier {
         'PREFERENCE STREAMING: ${userStreamingPreference ? 'ON' : 'OFF'}',
         'EFFECTIVE STREAMING: ${_streamingEnabled ? 'ON' : 'OFF'}',
         'playerSourceType=${_playerSourceType ?? '-'}',
+        // The decision itself, with the reason that produced it: this is the
+        // line that answers "why did effective streaming end up OFF?".
+        'decision=${_decision ?? '-'} reason=${_decisionReason ?? '-'}',
+        'candidate=${_decisionCandidate ?? '-'} '
+            'complete=${_decisionFileComplete ?? '-'} '
+            'proxyAvailable=${_decisionProxyAvailable ?? '-'}'
+        '${_decisionCandidateReason == null ? '' : ' candidateReason=$_decisionCandidateReason'}',
         if (_proxyUrl != null) 'proxyUrl=${redactText(_proxyUrl!)}',
         'streamingEnabled=${_streamingEnabled ? 'true' : 'false'}',
         'file=${_fileId ?? '-'} msg=${_messageId ?? '-'} chat=${_chatId ?? '-'}',
@@ -684,6 +779,29 @@ class StreamingDiagnostics extends ChangeNotifier {
         verdict == StreamingVerdict.fullDownloadBeforePlayback) {
       lines.add('STREAMING_TEST_FAILED: '
           'FULL_DOWNLOAD_OCCURRED_BEFORE_PLAYBACK');
+    }
+    // Streaming never ran during a forced run is its own failure: the marker
+    // names it so a report cannot be read as "we tried and it was slow".
+    if (_forceTestAtPlay && verdict == StreamingVerdict.streamingNotStarted) {
+      lines.add('STREAMING_TEST_FAILED: STREAMING_NOT_STARTED');
+    }
+    // The decision trace, always present: preference / force / candidate /
+    // proxy / completion / the branch taken and why.
+    lines.addAll(<String>[
+      'StreamingDecision:',
+      'preference=${_decisionPreference ?? userStreamingPreference}',
+      'forceTest=${_decisionForce ?? _forceTestAtPlay}',
+      'candidate=${_decisionCandidate ?? '-'}'
+          '${_decisionCandidateReason == null ? '' : ' (${_decisionCandidateReason!})'}',
+      'proxyAvailable=${_decisionProxyAvailable ?? '-'}',
+      'fileComplete=${_decisionFileComplete ?? '-'}',
+      'decision=${_decision ?? '-'}',
+      'reason=${_decisionReason ?? '-'}',
+    ]);
+    // Every LOCAL_FILE has to name why it is not a stream — the one question
+    // the device reports kept failing to answer.
+    if (_decision == 'LOCAL_FILE') {
+      lines.add('LOCAL_FILE_REASON=${_decisionReason ?? 'unknown'}');
     }
     if (_fallback && _fallbackReason != null) {
       lines.add('fallbackReason=$_fallbackReason');

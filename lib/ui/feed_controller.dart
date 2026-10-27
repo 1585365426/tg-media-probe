@@ -665,6 +665,11 @@ class FeedController extends ChangeNotifier {
       // bytes already fetched keep the wait short.
       trace.mark(PlaybackStage.streamingFallback);
       _diagnostics.noteFallback('播放器初始化失败');
+      _diagnostics.noteDecision(
+        proxyAvailable: true,
+        decision: 'FALLBACK',
+        reason: 'stream_initialization_failed',
+      );
       _fallbackOccurred = true;
       await source.dispose();
       _activeSource = null;
@@ -712,6 +717,12 @@ class FeedController extends ChangeNotifier {
     trace.mark(PlaybackStage.streamingFallback);
     trace.note = '流式失败，改用完整下载';
     _diagnostics.noteFallback('$cause');
+    // Keep the resolver's stable token when it has one; only name the branch
+    // when the failure came from somewhere that did not set a reason.
+    _diagnostics.noteDecision(
+      decision: 'FALLBACK',
+      reason: _diagnostics.decisionReason ?? 'stream_error',
+    );
     _fallbackOccurred = true;
     try {
       return await sources.resolve(
