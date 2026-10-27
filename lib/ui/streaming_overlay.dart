@@ -96,6 +96,9 @@ class _Badge extends StatelessWidget {
             Text(source.lastStatus == null
                 ? 'HTTP -'
                 : 'HTTP ${source.lastStatus}'),
+            // What the player actually opened: STREAM_HTTP proves the bytes
+            // flow through the range proxy, LOCAL_FILE means a local path.
+            Text('SRC ${source.playerSourceType ?? '-'}'),
             Text('PLAY ${_clock(source.playerTime)}'),
           ],
         ),

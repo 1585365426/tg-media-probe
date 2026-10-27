@@ -545,7 +545,13 @@ class FeedController extends ChangeNotifier {
     PlaySource? source;
     try {
       source = await _gate.run(() async {
-        final cached = _pathCache.remove(record.fileId);
+        // FORCE_STREAMING_TEST: the prefetch cache is a full-download result
+        // — playing from it would silently bypass resolveStream and the proxy
+        // entirely. Under the forced run every play must enter the streaming
+        // resolver, so the cache is ignored, not merely deprioritised.
+        final cached = _diagnostics.forceStreamingTest
+            ? null
+            : _pathCache.remove(record.fileId);
         if (cached != null) {
           // A prefetched path is not a promise: the pool entry may have been
           // purged between the prefetch and this swipe. Verify before handing
@@ -625,6 +631,13 @@ class FeedController extends ChangeNotifier {
 
     try {
       trace.mark(PlaybackStage.playerCreated);
+      // Record what the player is *about to open*, from the source itself.
+      // STREAM_HTTP + the proxy URL is the streaming evidence; LOCAL_FILE
+      // here forces the verdict off STREAMING_CONFIRMED.
+      _diagnostics.notePlayerSource(
+        isStreaming: source.isStreaming,
+        url: source.url,
+      );
       await player.activate(source.url);
       trace.mark(PlaybackStage.playerInitialized);
     } on Object {
@@ -652,6 +665,7 @@ class FeedController extends ChangeNotifier {
           onRecordRefreshed: _absorbRefreshed,
           forPlayback: true,
         );
+        _diagnostics.notePlayerSource(isStreaming: false, url: path);
         await player.activate(path);
         trace.mark(PlaybackStage.playerInitialized);
         _activeSource = PlaySource.file(path);
@@ -714,6 +728,10 @@ class FeedController extends ChangeNotifier {
   /// window is capped by [AppPreferences.maxPreloadCount] and by the path cache
   /// size, so this can never turn into "download the channel".
   Future<void> _prefetchNext() async {
+    // FORCE_STREAMING_TEST: a background full download steals bandwidth from
+    // the play under test and fills the path cache that the forced run must
+    // ignore. During acceptance the feed prefetches nothing.
+    if (_diagnostics.forceStreamingTest) return;
     final count = preloadCount.clamp(0, AppPreferences.maxPreloadCount);
     if (count <= 0) return;
     final generation = ++_prefetchGeneration;

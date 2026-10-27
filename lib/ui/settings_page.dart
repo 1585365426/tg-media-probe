@@ -14,6 +14,7 @@ import 'package:flutter/services.dart';
 
 import '../app/app_preferences.dart';
 import '../app/app_session.dart';
+import '../data/media_record.dart';
 import '../td/td_models.dart';
 import '../lock/lock_screens.dart';
 import '../lock/unlock_controller.dart';
@@ -60,10 +61,32 @@ class _SettingsPageState extends State<SettingsPage> {
   String? _storageError;
   AutoCleanResult? _lastAutoClean;
 
+  /// Biggest indexed videos, offered as the acceptance target.
+  List<MediaRecord> _largestVideos = const <MediaRecord>[];
+
   @override
   void initState() {
     super.initState();
     _refreshInventory();
+    _refreshLargestVideos();
+  }
+
+  /// Reads the biggest videos straight from the mirror.
+  ///
+  /// Only used to *choose* a target — the acceptance verdict never reads this
+  /// list, it reads the live transfer counters.
+  Future<void> _refreshLargestVideos() async {
+    final store = widget.session.feedStore;
+    if (store == null) return;
+    try {
+      final page = await store.page(limit: 500, videosOnly: true);
+      final videos = page.items.toList()
+        ..sort((a, b) => b.sizeBytes.compareTo(a.sizeBytes));
+      if (!mounted) return;
+      setState(() => _largestVideos = videos.take(3).toList(growable: false));
+    } on Object {
+      // The mirror may still be booting; the section stays empty.
+    }
   }
 
   @override
@@ -573,12 +596,14 @@ class _SettingsPageState extends State<SettingsPage> {
                 ),
                 const SettingsDivider(),
                 SettingsRow(
-                  title: diag.acceptanceRunning ? '结束验收' : '开始边下边播验收',
+                  title: diag.acceptanceRunning
+                      ? '结束验收（强制 Streaming 运行中）'
+                      : '开始边下边播验收（强制 Streaming）',
                   subtitle: diag.acceptanceRunning
                       ? (diag.verdict == StreamingVerdict.unknown
                           ? '验收进行中：请打开一个大视频（建议 500MB–1GB）开始播放'
                           : '验收完成，结论见下方')
-                      : '清零证据后播放一个大视频，自动记录 firstPlayback / 206 / 完成时间',
+                      : '开启 FORCE_STREAMING_TEST、清零证据，然后播放一个大视频',
                   leading: const Icon(Icons.play_circle_outline),
                   showChevron: true,
                   onTap: diag.acceptanceRunning ? _stopAcceptance : _startAcceptance,
@@ -599,6 +624,24 @@ class _SettingsPageState extends State<SettingsPage> {
                   ),
                   child: const StreamingDiagnosticsSection(),
                 ),
+                // Acceptance target: a video that is definitely not cached
+                // yet. Without this the run proves nothing, because a cached
+                // video plays instantly for the wrong reason.
+                if (_largestVideos.isNotEmpty) ...<Widget>[
+                  const SettingsDivider(),
+                  SettingsRow(
+                    title: '验收用：体积最大的视频',
+                    subtitle: '播放其中一个，回来查看结论',
+                    leading: const Icon(Icons.video_library_outlined),
+                  ),
+                  for (final record in _largestVideos)
+                    SettingsRow(
+                      title: formatBytes(record.sizeBytes),
+                      subtitle: '${_chatTitle(record.chatId)} · '
+                          'msg=${record.messageId}',
+                      leading: const Icon(Icons.play_arrow, size: 18),
+                    ),
+                ],
               ],
             );
           },
@@ -607,19 +650,28 @@ class _SettingsPageState extends State<SettingsPage> {
     );
   }
 
-  /// Clears the previous run and arms the acceptance recorder.
+  String _chatTitle(int chatId) =>
+      widget.session.directory?.titles[chatId] ?? '频道 $chatId';
+
+  /// Clears the previous run, arms the acceptance recorder and turns
+  /// FORCE_STREAMING_TEST on.
   ///
-  /// Nothing is simulated here: from this moment on, whatever the next play
-  /// produces is the evidence. If the video turns out to be already cached,
-  /// the run honestly reports 全部下载完成后播放.
+  /// Forced mode is the point of this button: while it runs, the feed ignores
+  /// the prefetch cache, starts no background prefetch, and every play enters
+  /// `resolveStream` — a full download before playback now reports
+  /// STREAMING_TEST_FAILED instead of hiding behind a cached path.
   Future<void> _startAcceptance() async {
+    StreamingDiagnostics.instance.setForceStreamingTest(true);
     StreamingDiagnostics.instance.startAcceptance();
-    _showMessage('已清零，请打开一个大视频开始播放；播放后回到本页查看结论。');
+    _showMessage('强制 Streaming 已开启，证据已清零。请打开一个大视频'
+        '（500MB–1GB）开始播放；播放后回到本页查看结论。');
   }
 
   /// Ends the run. The evidence stays on screen until the next one; only the
   /// "armed" flag is cleared, so a later play cannot overwrite the result.
+  /// FORCE_STREAMING_TEST goes off with it — normal user behaviour resumes.
   Future<void> _stopAcceptance() async {
+    StreamingDiagnostics.instance.setForceStreamingTest(false);
     StreamingDiagnostics.instance.stopAcceptance();
     final verdict = StreamingDiagnostics.instance.verdict;
     _showMessage(verdict == StreamingVerdict.unknown

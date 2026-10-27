@@ -41,6 +41,11 @@ enum StreamingVerdict {
 
   /// Streaming was attempted and abandoned; the full download took over.
   fallbackUsed,
+
+  /// The pipeline never entered the streaming branch for this play — either
+  /// the resolver skipped it (prefetch cache) or the player was fed a local
+  /// file path. Bytes-on-disk numbers alone cannot make this a stream.
+  streamingNotStarted,
 }
 
 extension StreamingVerdictView on StreamingVerdict {
@@ -49,6 +54,7 @@ extension StreamingVerdictView on StreamingVerdict {
         StreamingVerdict.streamingActive => '✅ 已确认：边下边播',
         StreamingVerdict.fullDownloadBeforePlayback => '⚠️ 全部下载完成后播放',
         StreamingVerdict.fallbackUsed => '⏭️ 流式失败，已回退到完整下载',
+        StreamingVerdict.streamingNotStarted => '⛔ Streaming 未启动',
         StreamingVerdict.unknown => '❓ 无法判定',
       };
 
@@ -58,6 +64,7 @@ extension StreamingVerdictView on StreamingVerdict {
         StreamingVerdict.fullDownloadBeforePlayback =>
           'FULL_DOWNLOAD_BEFORE_PLAYBACK',
         StreamingVerdict.fallbackUsed => 'STREAMING_FALLBACK',
+        StreamingVerdict.streamingNotStarted => 'STREAMING_NOT_STARTED',
         StreamingVerdict.unknown => 'UNKNOWN',
       };
 }
@@ -89,6 +96,28 @@ class StreamingDiagnostics extends ChangeNotifier {
 
   /// True when the resolver took the streaming branch for this play.
   bool _streamingEnabled = false;
+
+  /// FORCE_STREAMING_TEST: the developer/acceptance switch. While on, the
+  /// feed controller must not serve the play from the prefetch cache and must
+  /// not run background prefetches — every play goes through the streaming
+  /// resolver, and a full download before playback is a FAIL, not a success.
+  bool _forceTest = false;
+
+  /// The app's standing preference for the current video: streaming first.
+  /// There is no user-facing preference that can turn this off — the feed
+  /// always calls `resolveStream` before any full download — so this is a
+  /// constant, recorded here so the panel can show the three lines the
+  /// acceptance asks for (TEST / PREFERENCE / EFFECTIVE) side by side.
+  static const bool userStreamingPreference = true;
+
+  /// What the live player was actually handed: `STREAM_HTTP` (a loopback URL
+  /// served by the range proxy) or `LOCAL_FILE` (a path). Written by the feed
+  /// controller immediately before `player.activate`, from the source it is
+  /// about to open — never inferred afterwards.
+  String? _playerSourceType;
+
+  /// The exact URL the player opened in STREAM_HTTP mode.
+  String? _proxyUrl;
 
   int? _chatId;
   int? _messageId;
@@ -128,6 +157,8 @@ class StreamingDiagnostics extends ChangeNotifier {
   int? _downloadCompletedMillis;
   int? _firstBytesMillis;
   int? _first206Millis;
+  int? _firstRangeMillis;
+  int? _proxyStartedMillis;
 
   /// True between [startAcceptance] and the moment the verdict settles.
   bool _acceptanceRunning = false;
@@ -145,6 +176,9 @@ class StreamingDiagnostics extends ChangeNotifier {
 
   bool get enabled => _enabled;
   bool get streamingEnabled => _streamingEnabled;
+  bool get forceStreamingTest => _forceTest;
+  String? get playerSourceType => _playerSourceType;
+  String? get proxyUrl => _proxyUrl;
   int? get chatId => _chatId;
   int? get messageId => _messageId;
   int? get fileId => _fileId;
@@ -182,6 +216,8 @@ class StreamingDiagnostics extends ChangeNotifier {
   int? get firstPlaybackMillis => _firstPlaybackMillis;
   int? get downloadCompletedMillis => _downloadCompletedMillis;
   int? get first206Millis => _first206Millis;
+  int? get firstRangeMillis => _firstRangeMillis;
+  int? get proxyStartedMillis => _proxyStartedMillis;
 
   /// Whether TDLib had already finished when the first frame played.
   bool get firstPlaybackCompleted => _firstPlaybackCompleted;
@@ -240,10 +276,20 @@ class StreamingDiagnostics extends ChangeNotifier {
     if (atFirstPlayback >= totalAtFirstPlayback || _firstPlaybackCompleted) {
       return StreamingVerdict.fullDownloadBeforePlayback;
     }
+    // The play started while bytes were still missing, but the pipeline never
+    // entered the streaming branch (or handed the player a local path): that
+    // is "streaming did not start", not a confirmed stream and not an
+    // unanswerable question.
+    if (!_streamingEnabled || _playerSourceType == 'LOCAL_FILE') {
+      return StreamingVerdict.streamingNotStarted;
+    }
     // No 206 or no Range request means the player was never served from a
-    // partial file, whatever the source URL looked like.
+    // partial file, whatever the source URL looked like. In the forced test
+    // that is a definite failure, not an open question.
     if (!sawPartialContent || _rangeRequests == 0) {
-      return StreamingVerdict.unknown;
+      return _forceTest
+          ? StreamingVerdict.streamingNotStarted
+          : StreamingVerdict.unknown;
     }
     return StreamingVerdict.streamingActive;
   }
@@ -256,6 +302,27 @@ class StreamingDiagnostics extends ChangeNotifier {
   void setEnabled(bool value) {
     if (_enabled == value) return;
     _enabled = value;
+    notifyListeners();
+  }
+
+  /// Arms / disarms FORCE_STREAMING_TEST. The acceptance start button turns
+  /// this on; ending the run turns it off. See [_forceTest].
+  void setForceStreamingTest(bool value) {
+    if (_forceTest == value) return;
+    _forceTest = value;
+    notifyListeners();
+  }
+
+  /// Records what the player is about to open — called from the feed
+  /// controller immediately before `player.activate`, with the same source.
+  ///
+  /// `STREAM_HTTP` carries the loopback URL so the report can show the exact
+  /// address AVPlayer streamed from; `LOCAL_FILE` is a full-download play and
+  /// forces the verdict off `STREAMING_CONFIRMED`.
+  void notePlayerSource({required bool isStreaming, required String url}) {
+    _playerSourceType = isStreaming ? 'STREAM_HTTP' : 'LOCAL_FILE';
+    _proxyUrl = isStreaming ? url : null;
+    _note('playerSource=$_playerSourceType');
     notifyListeners();
   }
 
@@ -294,6 +361,10 @@ class StreamingDiagnostics extends ChangeNotifier {
     _timeControlStatus = 'unknown';
     _hasStartedPlaying = false;
     _playerError = null;
+    _playerSourceType = null;
+    _proxyUrl = null;
+    _firstRangeMillis = null;
+    _proxyStartedMillis = null;
     _fallback = false;
     _fallbackReason = null;
     _firstPlaybackDownloadedBytes = null;
@@ -331,6 +402,15 @@ class StreamingDiagnostics extends ChangeNotifier {
   /// only says which path was taken. [verdict] still waits for the data.
   void noteStreamingSelected() {
     _streamingEnabled = true;
+    notifyListeners();
+  }
+
+  /// The range proxy bound its port and the player URL exists. `url` is the
+  /// exact `http://127.0.0.1:port/<token>` the player will be handed.
+  void noteProxyStarted(String url) {
+    _proxyStartedMillis ??= _elapsed();
+    _proxyUrl = url;
+    _note('proxy started');
     notifyListeners();
   }
 
@@ -375,7 +455,11 @@ class StreamingDiagnostics extends ChangeNotifier {
   /// The player asked for a byte range. Straight from the proxy's request.
   void noteRangeRequest({required int from, int? to}) {
     _rangeRequests++;
+    _firstRangeMillis ??= _elapsed();
     _lastRange = '$from-${to ?? 'end'}';
+    // One line per request, in the shape the acceptance report asks for:
+    // `Range #1 bytes=0-2097151`.
+    _note('Range #$_rangeRequests bytes=$from-${to ?? 'end'}');
     notifyListeners();
   }
 
@@ -507,6 +591,14 @@ class StreamingDiagnostics extends ChangeNotifier {
 
   /// Lines for the settings diagnostics section. Raw counts, no decoration.
   List<String> panelLines() => <String>[
+        // The three lines that make "the test mode was actually on"
+        // verifiable on the screen itself — the gap that let a full download
+        // run pass itself off as a streaming run before.
+        'STREAMING TEST: ${_forceTest ? 'ON' : 'OFF'}',
+        'PREFERENCE STREAMING: ${userStreamingPreference ? 'ON' : 'OFF'}',
+        'EFFECTIVE STREAMING: ${_streamingEnabled ? 'ON' : 'OFF'}',
+        'playerSourceType=${_playerSourceType ?? '-'}',
+        if (_proxyUrl != null) 'proxyUrl=${redactText(_proxyUrl!)}',
         'streamingEnabled=${_streamingEnabled ? 'true' : 'false'}',
         'file=${_fileId ?? '-'} msg=${_messageId ?? '-'} chat=${_chatId ?? '-'}',
         'total=$_totalBytes B downloaded=$_downloadedBytes B '
@@ -545,7 +637,17 @@ class StreamingDiagnostics extends ChangeNotifier {
   /// when streaming was abandoned, `UNKNOWN` when the run never produced
   /// the data needed to tell.
   List<String> acceptanceLines() {
+    final verdict = this.verdict;
     final lines = <String>[verdict.code];
+    // Forced-test failure marker: the acceptance must not read a full download
+    // as a pass, whatever else the run produced.
+    if (_forceTest && verdict == StreamingVerdict.fullDownloadBeforePlayback) {
+      lines.add('STREAMING_TEST_FAILED: '
+          'FULL_DOWNLOAD_OCCURRED_BEFORE_PLAYBACK');
+    }
+    if (_fallback && _fallbackReason != null) {
+      lines.add('fallbackReason=$_fallbackReason');
+    }
     final playback = _firstPlaybackMillis;
     lines.add(playback == null
         ? 'firstPlayback=-'
@@ -553,16 +655,30 @@ class StreamingDiagnostics extends ChangeNotifier {
     final downloaded = _firstPlaybackDownloadedBytes;
     final total = _firstPlaybackTotalBytes;
     lines.add(downloaded == null || total == null || total <= 0
-        ? 'downloaded=-'
-        : 'downloaded=${formatBytes(downloaded)} / ${formatBytes(total)}');
+        ? 'downloadedAtFirstPlayback=-'
+        : 'downloadedAtFirstPlayback=${formatBytes(downloaded)}');
+    lines.add(total == null || total <= 0
+        ? 'total=-'
+        : 'total=${formatBytes(total)}');
     final completed = _downloadCompletedMillis;
     lines.add(completed == null
-        ? 'completion=-'
-        : 'completion=${_seconds(completed)}');
+        ? 'completedAt=-'
+        : 'completedAt=${_seconds(completed)}');
     final first206 = _first206Millis;
     lines.add(first206 == null
         ? 'first206=-'
         : 'first206=${_seconds(first206)}');
+    final firstRange = _firstRangeMillis;
+    lines.add(firstRange == null
+        ? 'firstRangeRequest=-'
+        : 'firstRangeRequest=${_seconds(firstRange)}');
+    final proxy = _proxyStartedMillis;
+    lines.add(proxy == null
+        ? 'proxyStarted=-'
+        : 'proxyStarted=${_seconds(proxy)}');
+    lines.add('effectiveStreaming=${_streamingEnabled ? 'true' : 'false'} '
+        'playerSourceType=${_playerSourceType ?? '-'}');
+    if (_proxyUrl != null) lines.add('proxyUrl=${redactText(_proxyUrl!)}');
     lines.add('206x$_partialContentCount rangeRequests=$_rangeRequests '
         'windowMoves=$_windowMoves stalls=$_stalls');
     return lines;
@@ -573,7 +689,11 @@ class StreamingDiagnostics extends ChangeNotifier {
   /// Machine-readable form for the diagnostics export.
   Map<String, Object?> toJson() => <String, Object?>{
         'enabled': _enabled,
+        'forceStreamingTest': _forceTest,
+        'preferenceStreaming': userStreamingPreference,
         'streamingEnabled': _streamingEnabled,
+        'playerSourceType': _playerSourceType,
+        'proxyUrl': _proxyUrl == null ? null : redactText(_proxyUrl!),
         'fileId': _fileId,
         'chatId': _chatId,
         'messageId': _messageId,
@@ -607,6 +727,8 @@ class StreamingDiagnostics extends ChangeNotifier {
           'totalBytes': _firstPlaybackTotalBytes,
           'completed': _firstPlaybackCompleted,
         },
+        'firstRangeMillis': _firstRangeMillis,
+        'proxyStartedMillis': _proxyStartedMillis,
         'verdict': verdict.code,
       };
 

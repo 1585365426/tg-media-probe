@@ -601,6 +601,10 @@ class VideoSourceResolver {
       proxy = (proxyFactory ?? ((w, p) => _defaultProxy(w, p, trace)))(watch, localPath);
       final url = await proxy.start();
       trace?.mark(PlaybackStage.streamingProxyStarted);
+      // The exact loopback URL the player will open — the acceptance report
+      // prints it next to playerSourceType so a device run shows *where* the
+      // bytes came from.
+      _diagnostics.noteProxyStarted(url.toString());
       // When the play ends (or the resolver is torn down) the watch dies with
       // the proxy: one subscription, one owner, no leak.
       proxy.onClose(watch.dispose);
