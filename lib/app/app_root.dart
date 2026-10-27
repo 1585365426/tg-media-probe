@@ -353,6 +353,11 @@ class AppShell extends StatefulWidget {
 class _AppShellState extends State<AppShell> {
   int _index = 0;
 
+  /// Published by the feed while a video is on screen. While true the shell
+  /// hides its bottom tab bar: immersive playback, the three tabs are chrome.
+  /// The feed clears it when it stops playing or when the user leaves the tab.
+  final ValueNotifier<bool> _feedImmersive = ValueNotifier<bool>(false);
+
   /// The shell does not own orientation any more.
   ///
   /// `_PortraitHost` holds portrait for every non-player route, and the feed
@@ -374,6 +379,17 @@ class _AppShellState extends State<AppShell> {
     });
   }
 
+  /// "Back" out of the immersive feed: with the tab bar hidden there is no
+  /// other way out of the feed tab, so the revealed top bar's back button
+  /// lands the user on the channel list.
+  void _exitFeed() => _select(0);
+
+  @override
+  void dispose() {
+    _feedImmersive.dispose();
+    super.dispose();
+  }
+
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
@@ -392,6 +408,8 @@ class _AppShellState extends State<AppShell> {
                   preferences: widget.preferences.value,
                   activeFiles: widget.activeFiles,
                   isActive: _index == 1,
+                  playbackImmersive: _feedImmersive,
+                  onExitPlayback: _exitFeed,
                 )
               : const SizedBox.shrink(),
           SettingsPage(
@@ -403,29 +421,39 @@ class _AppShellState extends State<AppShell> {
           ),
         ],
       ),
-      bottomNavigationBar: CupertinoTabBar(
-        currentIndex: _index,
-        onTap: _select,
-        backgroundColor: Theme.of(context).scaffoldBackgroundColor,
-        activeColor: scheme.primary,
-        inactiveColor: scheme.onSurfaceVariant,
-        items: const <BottomNavigationBarItem>[
-          BottomNavigationBarItem(
-            icon: Icon(CupertinoIcons.list_bullet),
-            activeIcon: Icon(CupertinoIcons.list_bullet),
-            label: '频道',
-          ),
-          BottomNavigationBarItem(
-            icon: Icon(CupertinoIcons.play_rectangle),
-            activeIcon: Icon(CupertinoIcons.play_rectangle),
-            label: '抖音',
-          ),
-          BottomNavigationBarItem(
-            icon: Icon(CupertinoIcons.gear),
-            activeIcon: Icon(CupertinoIcons.gear),
-            label: '设置',
-          ),
-        ],
+      bottomNavigationBar: ValueListenableBuilder<bool>(
+        valueListenable: _feedImmersive,
+        // The tab bar widget is built once and reused: only its visibility
+        // depends on the immersive flag, so the shell body (and the feed's
+        // state inside it) is never rebuilt for a visibility flip.
+        child: CupertinoTabBar(
+          currentIndex: _index,
+          onTap: _select,
+          backgroundColor: Theme.of(context).scaffoldBackgroundColor,
+          activeColor: scheme.primary,
+          inactiveColor: scheme.onSurfaceVariant,
+          items: const <BottomNavigationBarItem>[
+            BottomNavigationBarItem(
+              icon: Icon(CupertinoIcons.list_bullet),
+              activeIcon: Icon(CupertinoIcons.list_bullet),
+              label: '频道',
+            ),
+            BottomNavigationBarItem(
+              icon: Icon(CupertinoIcons.play_rectangle),
+              activeIcon: Icon(CupertinoIcons.play_rectangle),
+              label: '抖音',
+            ),
+            BottomNavigationBarItem(
+              icon: Icon(CupertinoIcons.gear),
+              activeIcon: Icon(CupertinoIcons.gear),
+              label: '设置',
+            ),
+          ],
+        ),
+        builder: (context, immersive, tabBar) {
+          final hidden = _index == 1 && immersive;
+          return hidden ? const SizedBox.shrink() : tabBar!;
+        },
       ),
     );
   }

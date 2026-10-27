@@ -492,7 +492,9 @@ class FeedController extends ChangeNotifier {
     _position = Duration.zero;
     _duration = Duration.zero;
     _bufferFraction = 0;
-    _controlVisible = false;
+    // Deliberately NOT resetting _controlVisible here: a swipe must inherit
+    // the current immersive state. Re-hiding on every page turn is what made
+    // the feed "flash" its overlays while swiping through videos.
     _error = null;
     await _activateCurrent();
   }
@@ -838,6 +840,9 @@ class FeedController extends ChangeNotifier {
     }
     _releasedForBackground = true;
     _stopPolling();
+    // Persist the playhead before the decoder goes away: the poll timer was
+    // the only writer, and stopping it above would drop the final position.
+    refreshProgress();
     await player.release();
   }
 
@@ -871,6 +876,9 @@ class FeedController extends ChangeNotifier {
   Future<void> shutdown() async {
     _gate.cancelAll();
     _stopPolling();
+    // Leaving the feed is the one guaranteed write: without it the last second
+    // of a video the user just watched would never reach the watch store.
+    refreshProgress();
     final record = current;
     if (record != null && record.fileId != 0) {
       unawaited(sources.cancel(record.fileId));
@@ -928,4 +936,49 @@ class FeedOverlayPlan {
   @override
   String toString() =>
       'FeedOverlayPlan(info=$showInfo, top=$showTopBar, controls=$showControls)';
+}
+
+/// Immersive-playback decisions, extracted so they can be tested without a
+/// widget tree.
+///
+/// The rule the product settled on: the video owns the whole screen while it
+/// is playing. Channel name, number entry, title, date, size, position and the
+/// synced count are all "chrome" and stay hidden until the user taps once.
+/// Errors and buffering are NOT chrome — they are the actual state of the
+/// playback and stay visible regardless.
+@immutable
+class FeedImmersivePlan {
+  const FeedImmersivePlan._();
+
+  /// True when the pager is showing items at all — the phase where overlays
+  /// make sense. Loading/empty screens replace the pager entirely, so there is
+  /// nothing for a tap to reveal.
+  static bool playbackActive({required FeedPhase phase, required int itemCount}) {
+    if (itemCount <= 0) return false;
+    return phase == FeedPhase.buffering ||
+        phase == FeedPhase.ready ||
+        // An error on top of a loaded list still shows the items behind it;
+        // the failure card is independent and always visible.
+        phase == FeedPhase.error;
+  }
+
+  /// Whether the top bar, the info block and the controls render. One tap
+  /// toggles [FeedController.controlVisible]; this only decides whether that
+  /// flag has anything to reveal.
+  static bool overlaysVisible({
+    required FeedPhase phase,
+    required int itemCount,
+    required bool controlVisible,
+  }) =>
+      controlVisible && playbackActive(phase: phase, itemCount: itemCount);
+
+  /// Whether the shell must hide its bottom tab bar: the feed tab is active
+  /// and a video is on screen. Revealing overlays with a tap does NOT bring
+  /// the tab bar back — the product explicitly wants the three main tabs to
+  /// stay hidden until the user leaves the feed.
+  static bool tabBarHidden({
+    required bool feedTabActive,
+    required bool playbackActive,
+  }) =>
+      feedTabActive && playbackActive;
 }

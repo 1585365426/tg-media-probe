@@ -43,6 +43,8 @@ class FeedPage extends StatefulWidget {
     this.orientation,
     this.coordinator,
     this.isActive = true,
+    this.playbackImmersive,
+    this.onExitPlayback,
   });
 
   final AppSession session;
@@ -68,6 +70,15 @@ class FeedPage extends StatefulWidget {
   /// False while the shell shows another tab. The feed releases its decoder
   /// instead of playing audio behind the settings page.
   final bool isActive;
+
+  /// Set to true while the feed is playing a video, so the shell can hide its
+  /// bottom tab bar (immersive playback). Null when nobody listens.
+  final ValueNotifier<bool>? playbackImmersive;
+
+  /// "Back" for the shell-embedded feed (no Navigator route to pop). The
+  /// shell wires this to switching back to the channel tab. Null when the page
+  /// has no in-app exit (tests).
+  final VoidCallback? onExitPlayback;
 
   @override
   State<FeedPage> createState() => _FeedPageState();
@@ -161,6 +172,7 @@ class _FeedPageState extends State<FeedPage> with WidgetsBindingObserver {
 
   void _onControllerChanged() {
     if (!mounted) return;
+    _syncImmersiveNotifier();
     setState(() {});
     // The controller's index is the truth; the PageView has to follow it.
     //
@@ -168,6 +180,24 @@ class _FeedPageState extends State<FeedPage> with WidgetsBindingObserver {
     // controller without touching the pager, so the page kept showing item 1
     // while the player was already on item 5 — reported as "点击播放的不是这一条".
     WidgetsBinding.instance.addPostFrameCallback((_) => _syncPagerToController());
+  }
+
+  /// Publishes "a video is on screen" to the shell, which hides its tab bar.
+  ///
+  /// Written on every controller change so phase transitions cannot miss it.
+  /// The value deliberately ignores [FeedController.controlVisible]: revealing
+  /// overlays with a tap is not "leaving playback", so the tab bar stays
+  /// hidden until the user actually leaves the feed.
+  void _syncImmersiveNotifier() {
+    final notifier = widget.playbackImmersive;
+    final controller = _controller;
+    if (notifier == null) return;
+    final value = widget.isActive &&
+        FeedImmersivePlan.playbackActive(
+          phase: controller?.phase ?? FeedPhase.idle,
+          itemCount: controller?.length ?? 0,
+        );
+    if (notifier.value != value) notifier.value = value;
   }
 
   void _syncPagerToController() {
@@ -196,6 +226,9 @@ class _FeedPageState extends State<FeedPage> with WidgetsBindingObserver {
     _controller?.handleLifecycle(
       widget.isActive ? AppLifecycleState.resumed : AppLifecycleState.paused,
     );
+    // The tab bar must come back the moment the feed tab stops being the
+    // visible one, even though the feed keeps its state in the IndexedStack.
+    _syncImmersiveNotifier();
   }
 
   @override
@@ -216,6 +249,9 @@ class _FeedPageState extends State<FeedPage> with WidgetsBindingObserver {
       controller.shutdown();
       controller.dispose();
     }
+    // The feed is gone: the shell must bring its tab bar back.
+    final notifier = widget.playbackImmersive;
+    if (notifier != null && notifier.value) notifier.value = false;
     _orientation.clear(OrientationCoordinator.feedOwner);
     _pager.dispose();
     super.dispose();
@@ -237,6 +273,14 @@ class _FeedPageState extends State<FeedPage> with WidgetsBindingObserver {
     final overlays = FeedOverlayPlan.forOrientation(
       MediaQuery.of(context).orientation,
     );
+    // Immersive by default: the video owns the screen. One tap on the video
+    // reveals the chrome (top bar, info, controls); the next tap hides it.
+    // Buffering and errors are not chrome and render independently.
+    final overlaysVisible = FeedImmersivePlan.overlaysVisible(
+      phase: controller.phase,
+      itemCount: controller.length,
+      controlVisible: controller.controlVisible,
+    );
     return Scaffold(
       backgroundColor: AppTheme.feedBackground,
       body: SafeArea(
@@ -244,9 +288,9 @@ class _FeedPageState extends State<FeedPage> with WidgetsBindingObserver {
           fit: StackFit.expand,
           children: <Widget>[
             _buildPager(controller),
-            if (overlays.showTopBar) _buildTopBar(),
-            if (overlays.showInfo) _buildInfo(controller),
-            if (overlays.showControls && controller.controlVisible)
+            if (overlays.showTopBar && overlaysVisible) _buildTopBar(),
+            if (overlays.showInfo && overlaysVisible) _buildInfo(controller),
+            if (overlays.showControls && overlaysVisible)
               _buildControls(controller),
             if (_rotationHint != null) _buildRotationHint(),
           ],
@@ -456,6 +500,20 @@ class _FeedPageState extends State<FeedPage> with WidgetsBindingObserver {
     );
   }
 
+  /// True when the top bar has a back affordance. A pushed route pops itself;
+  /// the shell-embedded feed (no route to pop) calls back into the shell so
+  /// the user is never trapped in an immersive feed with no tab bar.
+  bool get _canExit =>
+      widget.showBackButton || widget.onExitPlayback != null;
+
+  void _handleExit() {
+    if (widget.showBackButton) {
+      Navigator.of(context).maybePop();
+      return;
+    }
+    widget.onExitPlayback?.call();
+  }
+
   Widget _buildTopBar() {
     final directory = widget.session.directory;
     final channelTitle = _chatFilter == null
@@ -483,11 +541,11 @@ class _FeedPageState extends State<FeedPage> with WidgetsBindingObserver {
         ),
         child: Row(
           children: <Widget>[
-            if (widget.showBackButton)
+            if (_canExit)
               IconButton(
                 tooltip: '返回',
                 icon: const Icon(Icons.arrow_back_ios_new, color: Colors.white),
-                onPressed: () => Navigator.of(context).maybePop(),
+                onPressed: _handleExit,
               )
             else
               const SizedBox(width: 8),
