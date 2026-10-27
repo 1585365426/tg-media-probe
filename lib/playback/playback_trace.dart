@@ -49,6 +49,27 @@ enum PlaybackStage {
 
   /// The message was read again to fill in a missing file name or size.
   metadataFetched,
+
+  // ---- streaming (边下边播) events. Like [fileIdRefreshed] these are events,
+  // not points on the happy path, so they stay after the ordered stages.
+
+  /// The resolver chose the streaming path for this file (not a cache hit).
+  streamingModeSelected,
+
+  /// The local HTTP range proxy is listening.
+  streamingProxyStarted,
+
+  /// Enough bytes arrived for the player to be handed the stream.
+  startupBufferReached,
+
+  /// Streaming could not serve this video and the resolver fell back to a
+  /// full download. Records *why* streaming was abandoned, never a path.
+  streamingFallback,
+
+  /// TDLib reported the whole file on disk while the play was running.
+  /// Together with [startupBufferReached] this yields the two numbers the
+  /// product wants to see: "开始播放：X 秒 / 完整下载：Y 秒".
+  fileCompleted,
 }
 
 class PlaybackTrace {

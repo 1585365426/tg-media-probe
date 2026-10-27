@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:video_player/video_player.dart';
@@ -5,10 +6,22 @@ import 'package:video_player/video_player.dart';
 import 'player_slot.dart';
 
 class VideoPlayerFactory implements PlayerFactory {
-  const VideoPlayerFactory();
+  const VideoPlayerFactory({this.streamingInitTimeout = const Duration(seconds: 12)});
+
+  /// Bound only for stream sources: an MP4 whose moov sits at the end makes
+  /// AVPlayer request ranges far ahead of the download, and without a bound
+  /// the initialize would hang instead of triggering the full-download
+  /// fallback. Local files keep the unbounded (and fast) behaviour.
+  final Duration streamingInitTimeout;
 
   @override
-  PlayerHandle create(String path) => VideoPlayerHandle(path: path);
+  PlayerHandle create(String path) => VideoPlayerHandle(
+        path: path,
+        // Only a loopback stream URL gets the bound initialize; the check
+        // lives here so the handle itself stays a dumb lifecycle wrapper.
+        initializeTimeout:
+            path.startsWith('http') ? streamingInitTimeout : null,
+      );
 }
 
 /// `video_player`-backed player.
@@ -18,8 +31,22 @@ class VideoPlayerFactory implements PlayerFactory {
 /// Dart-held reference (so nothing can reach the AVPlayer afterwards) and call
 /// the plugin's dispose, which releases the underlying `AVPlayerItem`.
 class VideoPlayerHandle implements PlayerHandle, PlayerProgress, PlayerVolume, PlayerSeek {
-  VideoPlayerHandle({required this.path})
-      : _controller = VideoPlayerController.file(File(path));
+  /// [path] is either a local file path (complete cache) or a loopback
+  /// `http://127.0.0.1/...` URL (streaming through the local range proxy).
+  /// Same player, same lifecycle — only the source the AVURLAsset opens
+  /// differs, so no third-party player and no factory split is needed.
+  VideoPlayerHandle({required this.path, this.initializeTimeout})
+      : _controller = path.startsWith('http')
+            ? VideoPlayerController.networkUrl(Uri.parse(path))
+            : VideoPlayerController.file(File(path));
+
+  /// Bound while the source is a stream: an MP4 with its moov at the end makes
+  /// AVPlayer request ranges far ahead of the download, and the proxy answer
+  /// is "keep waiting" — an unbounded initialize would hang the page instead
+  /// of triggering the full-download fallback. Local files initialise fast
+  /// (AVAsset does not read the whole file), so they keep the no-timeout
+  /// behaviour the current fast path relies on.
+  final Duration? initializeTimeout;
 
   @override
   final String path;
@@ -68,7 +95,14 @@ class VideoPlayerHandle implements PlayerHandle, PlayerProgress, PlayerVolume, P
     if (controller == null) {
       throw StateError('VideoPlayerHandle used after dispose: $path');
     }
-    await controller.initialize();
+    final timeout = initializeTimeout;
+    if (timeout == null) {
+      await controller.initialize();
+    } else {
+      // A stream that cannot initialise in time is the moov-at-the-end case;
+      // the timeout is what converts a silent hang into a fallback decision.
+      await controller.initialize().timeout(timeout);
+    }
     controller.addListener(_onValueChanged);
     _listenerAttached = true;
   }

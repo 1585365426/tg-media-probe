@@ -151,7 +151,7 @@ class FeedController extends ChangeNotifier {
   String? _finishedKey;
 
   final List<MediaRecord> _items = <MediaRecord>[];
-  final LatestOnlySlot<String> _gate = LatestOnlySlot<String>();
+  final LatestOnlySlot<PlaySource> _gate = LatestOnlySlot<PlaySource>();
 
   /// Paths resolved ahead of time, keyed by fileId. Bounded: three entries is
   /// the current item plus its two neighbours.
@@ -483,6 +483,10 @@ class FeedController extends ChangeNotifier {
     // result belongs to the item the user just left.
     _gate.cancelAll();
     await player.release();
+    // The proxy (if any) serves exactly one play; the port must not outlive it.
+    final previousSource = _activeSource;
+    _activeSource = null;
+    await previousSource?.dispose();
     if (leaving != null && leaving.fileId != 0) {
       // Only the current item's transfer is allowed to run (§4.5).
       unawaited(sources.cancel(leaving.fileId));
@@ -520,9 +524,9 @@ class FeedController extends ChangeNotifier {
     // updates without blocking the play.
     unawaited(_fetchNameIfMissing(record));
 
-    String? path;
+    PlaySource? source;
     try {
-      path = await _gate.run(() async {
+      source = await _gate.run(() async {
         final cached = _pathCache.remove(record.fileId);
         if (cached != null) {
           // A prefetched path is not a promise: the pool entry may have been
@@ -530,10 +534,13 @@ class FeedController extends ChangeNotifier {
           // it to the player, otherwise the failure surfaces as a decode error.
           if (await sources.isUsable(cached)) {
             trace.mark(PlaybackStage.fileReady);
-            return cached;
+            return PlaySource.file(cached);
           }
         }
-        return sources.resolve(
+        // Streaming first: the play starts on the bytes that already exist
+        // and the download keeps running behind it. Every fallback decision
+        // below is made from what this call actually returned.
+        return sources.resolveStream(
           record.fileId,
           chatId: record.chatId,
           messageId: record.messageId,
@@ -567,17 +574,56 @@ class FeedController extends ChangeNotifier {
     }
 
     // Null means a newer navigation already started. Do not touch the player.
-    if (path == null || _disposed) return;
+    if (source == null || _disposed) return;
+
+    // One live source at a time: stop any proxy the previous activation left
+    // behind before opening another one.
+    await _activeSource?.dispose();
+    _activeSource = source;
+    if (source.isStreaming) {
+      // The player opens a loopback URL, but what must survive a cache clean
+      // is the TDLib pool file behind it — register that path, not the URL.
+      final localPath = source.path;
+      final registry = player.activeFiles;
+      registry?.markInUse(localPath, reason: 'streaming');
+      source.proxy?.onClose(() => registry?.release(localPath));
+    }
 
     try {
       trace.mark(PlaybackStage.playerCreated);
-      await player.activate(path);
+      await player.activate(source.url);
       trace.mark(PlaybackStage.playerInitialized);
     } on Object {
-      trace.errorCategory = 'player';
-      PlaybackTraceLog.instance.add(trace);
-      _fail('此视频无法解码');
-      return;
+      if (!source.isStreaming) {
+        trace.errorCategory = 'player';
+        PlaybackTraceLog.instance.add(trace);
+        _fail('此视频无法解码');
+        return;
+      }
+      // The stream could not be initialised (typically an MP4 whose moov sits
+      // at the end and the player timed out waiting for the tail ranges).
+      // Fall back to the full download — silently, no error screen, and the
+      // bytes already fetched keep the wait short.
+      trace.mark(PlaybackStage.streamingFallback);
+      await source.dispose();
+      _activeSource = null;
+      try {
+        final path = await sources.resolve(
+          record.fileId,
+          chatId: record.chatId,
+          messageId: record.messageId,
+          trace: trace,
+          onRecordRefreshed: _absorbRefreshed,
+        );
+        await player.activate(path);
+        trace.mark(PlaybackStage.playerInitialized);
+        _activeSource = PlaySource.file(path);
+      } on Object {
+        trace.errorCategory = 'player';
+        PlaybackTraceLog.instance.add(trace);
+        _fail('此视频无法解码');
+        return;
+      }
     }
     if (_disposed) return;
 
@@ -631,6 +677,11 @@ class FeedController extends ChangeNotifier {
   /// The trace of the most recent play, for the diagnostics export.
   PlaybackTrace? _lastTrace;
   PlaybackTrace? get lastTrace => _lastTrace;
+
+  /// The source the live player is reading — a file path or a loopback stream.
+  /// Owning it here is what guarantees the proxy dies with the play: page
+  /// turns, tab switches, backgrounding and shutdown all run [dispose] on it.
+  PlaySource? _activeSource;
 
   /// The mirror this feed pages, when it pages one. Null for a synthetic source
   /// (tests, previews), in which case nothing is persisted.
@@ -844,6 +895,11 @@ class FeedController extends ChangeNotifier {
     // the only writer, and stopping it above would drop the final position.
     refreshProgress();
     await player.release();
+    // The stream source dies with the visible play; resuming re-resolves and
+    // picks up wherever the download got to (cache hit if it finished).
+    final source = _activeSource;
+    _activeSource = null;
+    await source?.dispose();
   }
 
   void _startPolling() {
@@ -884,6 +940,9 @@ class FeedController extends ChangeNotifier {
       unawaited(sources.cancel(record.fileId));
     }
     await player.release();
+    final source = _activeSource;
+    _activeSource = null;
+    await source?.dispose();
   }
 
   @override

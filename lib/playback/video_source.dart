@@ -27,6 +27,7 @@ import '../data/media_record.dart';
 import '../td/td_client.dart';
 import 'media_metadata.dart';
 import 'playback_trace.dart';
+import 'stream_proxy.dart';
 import '../td/td_models.dart';
 import '../td/td_requests.dart';
 
@@ -119,6 +120,49 @@ class VideoSourceException implements Exception {
   String toString() => 'VideoSourceException: $message';
 }
 
+/// What [VideoSourceResolver.resolveStream] hands the player.
+///
+/// Two shapes, decided by data rather than by hope:
+/// * **file** — the whole video is already in the TDLib pool. The player opens
+///   the path directly, no proxy, exactly the old fast path.
+/// * **stream** — the video is still downloading. The player opens a
+///   `http://127.0.0.1/<token>` URL served by [StreamProxyServer], which maps
+///   HTTP Range requests onto the bytes TDLib has written so far and waits
+///   (bounded) for the rest. The download keeps running behind the play and
+///   ends as a complete cache entry.
+class PlaySource {
+  const PlaySource.file(this.path)
+      : url = path,
+        isStreaming = false,
+        proxy = null;
+
+  const PlaySource.stream(this.url, this.path, this.proxy)
+      : isStreaming = true;
+
+  /// What the player opens: a local path (file mode) or a loopback URL
+  /// (stream mode). Never a Telegram cloud URL.
+  final String url;
+
+  /// The local file backing the play — the TDLib pool entry. The cache
+  /// cleaner checks this path against the in-use registry.
+  final String path;
+
+  final bool isStreaming;
+
+  /// Non-null in stream mode. The owner must call [dispose] when the play
+  /// ends so the listener and its port are freed.
+  final StreamProxyServer? proxy;
+
+  Future<void> dispose() async {
+    await proxy?.stop();
+  }
+
+  @override
+  String toString() => isStreaming
+      ? 'PlaySource.stream(file=${path.hashCode})'
+      : 'PlaySource.file(${path.hashCode})';
+}
+
 /// The absolute ceiling was hit: the transfer was still being attempted when
 /// the task budget ran out. Not a network verdict — a big file on a slow link
 /// reaches this, and so does a stuck server.
@@ -196,6 +240,8 @@ class VideoSourceResolver {
       Duration(milliseconds: 900),
     ],
     this.progressInterval = const Duration(milliseconds: 120),
+    this.startupBufferBytes = StreamProxyServer.defaultStartupBufferBytes,
+    this.proxyFactory,
     Future<bool> Function(String path)? fileExists,
   }) : _fileExists = fileExists ?? _defaultFileExists;
 
@@ -238,7 +284,8 @@ class VideoSourceResolver {
 
   final Set<int> _cancelled = <int>{};
 
-  /// One resolve per file id at a time.
+  /// One resolve per file id at a time — shared by [resolve] and
+  /// [resolveStream].
   ///
   /// Two callers can race for the same item: the page starts the current video
   /// while the preload window is resolving its neighbour, and a rapid
@@ -249,13 +296,13 @@ class VideoSourceResolver {
   /// settles, whatever the outcome, so a failed resolve is never replayed from
   /// this map. A permanent failure has to be retried by the caller — and the
   /// caller may legitimately do so after the file id was refreshed.
-  final Map<int, Future<String>> _inflight = <int, Future<String>>{};
+  final Map<int, Future<PlaySource>> _inflight = <int, Future<PlaySource>>{};
 
-  /// Resolves [fileId] to an absolute path.
+  /// Resolves [fileId] to an absolute path (the full-download contract).
   ///
-  /// [chatId] / [messageId] enable metadata repair: when TDLib rejects the file
-  /// id, the message is read again and the fresh id is used. Without them the
-  /// failure is reported as-is.
+  /// Kept as the fallback path and the prefetch path; the feed's current video
+  /// uses [resolveStream]. The dedupe is shared, so a stream resolve that is
+  /// already running for this id is awaited rather than doubled.
   ///
   /// Throws [VideoSourceStalled] when no byte arrives, [VideoSourceTimeout]
   /// when the task ceiling is hit, and [VideoSourceException] for a TDLib error.
@@ -268,8 +315,59 @@ class VideoSourceResolver {
     void Function(MediaRecord fresh)? onRecordRefreshed,
   }) {
     final running = _inflight[fileId];
-    if (running != null) return running;
+    if (running != null) return running.then((source) => source.path);
     final future = _resolveWithRepair(
+      fileId,
+      chatId: chatId,
+      messageId: messageId,
+      onProgress: onProgress,
+      trace: trace,
+      onRecordRefreshed: onRecordRefreshed,
+    ).then((path) => PlaySource.file(path));
+    _inflight[fileId] = future;
+    return future
+        .whenComplete(() => _inflight.remove(fileId))
+        .then((source) => source.path);
+  }
+
+  /// How many resolves are in flight, for diagnostics and tests.
+  int get inflightCount => _inflight.length;
+
+  /// Minimum readable bytes before the streaming path hands the player its
+  /// URL. Parameterised, never hard-coded into the flow: 2 MB is the default
+  /// the numbers justify, and a test can shrink it to nothing.
+  final int startupBufferBytes;
+
+  /// Injectable proxy constructor so tests can pass a pre-built server
+  /// (bound to a controlled port) instead of letting production bind one.
+  final StreamProxyServer Function(
+    FileProgressWatch watch,
+    String localPath,
+  )? proxyFactory;
+
+  /// Resolves [fileId] for **playback**, choosing between three paths by data:
+  ///
+  /// * complete cache → [PlaySource.file] (no proxy, the old fast path);
+  /// * still downloading → [PlaySource.stream] backed by a loopback HTTP range
+  ///   proxy: the play starts once [startupBufferBytes] are on disk and the
+  ///   download keeps running behind it until `is_downloading_completed`;
+  /// * anything that makes streaming impossible (proxy cannot bind, size
+  ///   unknown, no local path) → the caller falls back to [resolve], which is
+  ///   the full-download wait with all of its watchdogs.
+  ///
+  /// Shares the [_inflight] dedupe with [resolve]: one `downloadFile` per file
+  /// id, whatever the entry point.
+  Future<PlaySource> resolveStream(
+    int fileId, {
+    int? chatId,
+    int? messageId,
+    void Function(VideoSourceUpdate update)? onProgress,
+    PlaybackTrace? trace,
+    void Function(MediaRecord fresh)? onRecordRefreshed,
+  }) {
+    final running = _inflight[fileId];
+    if (running != null) return running;
+    final future = _streamWithRepair(
       fileId,
       chatId: chatId,
       messageId: messageId,
@@ -281,8 +379,262 @@ class VideoSourceResolver {
     return future.whenComplete(() => _inflight.remove(fileId));
   }
 
-  /// How many resolves are in flight, for diagnostics and tests.
-  int get inflightCount => _inflight.length;
+  /// The streaming loop. Same repair/backoff shape as [_resolveWithRepair]:
+  /// a rejected file id is re-read from the message once, transient TDLib
+  /// errors get the bounded retry, everything else propagates to the caller.
+  Future<PlaySource> _streamWithRepair(
+    int fileId, {
+    int? chatId,
+    int? messageId,
+    void Function(VideoSourceUpdate update)? onProgress,
+    PlaybackTrace? trace,
+    void Function(MediaRecord fresh)? onRecordRefreshed,
+  }) async {
+    var activeId = fileId;
+    var retries = 0;
+    var repaired = false;
+
+    while (true) {
+      try {
+        return await _streamOnce(
+          activeId,
+          onProgress: onProgress,
+          trace: trace,
+        );
+      } on _MissingFile catch (e) {
+        final canRepair =
+            !repaired && metadata != null && chatId != null && messageId != null;
+        if (!canRepair) {
+          trace?.errorCategory = 'fileMissing';
+          throw VideoSourceException(
+            '文件已失效（TDLib 返回 ${e.message}），无法从消息重新获取',
+          );
+        }
+        repaired = true;
+        final fresh = await metadata!.fetch(chatId, messageId);
+        trace?.mark(PlaybackStage.metadataFetched);
+        if (fresh == null || fresh.fileId == 0) {
+          trace?.errorCategory = 'fileMissing';
+          throw VideoSourceException('文件已失效（TDLib 返回 ${e.message}），消息里也取不到新文件');
+        }
+        if (fresh.fileId != activeId) {
+          activeId = fresh.fileId;
+          trace?.mark(PlaybackStage.fileIdRefreshed, bytes: fresh.sizeBytes);
+          trace?.note = 'file_id 已从消息重新获取';
+          trace?.errorCategory = null;
+        }
+        onRecordRefreshed?.call(fresh);
+        continue;
+      } on VideoSourceStalled {
+        rethrow;
+      } on VideoSourceTimeout {
+        rethrow;
+      } on VideoSourceException catch (e) {
+        if (retries >= retryDelays.length || !_isTransient(e.message)) rethrow;
+        trace?.retries = ++retries;
+        onProgress?.call(const VideoSourceUpdate(stage: SourceStage.probing));
+        await Future<void>.delayed(retryDelays[retries - 1]);
+        continue;
+      }
+    }
+  }
+
+  /// One streaming attempt: stat, gate on a complete cache, otherwise start
+  /// the download and open the proxy once the startup buffer is on disk.
+  Future<PlaySource> _streamOnce(
+    int fileId, {
+    void Function(VideoSourceUpdate update)? onProgress,
+    PlaybackTrace? trace,
+  }) async {
+    _cancelled.remove(fileId);
+    trace?.mark(PlaybackStage.resolveStarted);
+    onProgress?.call(const VideoSourceUpdate(stage: SourceStage.probing));
+
+    final existing = await api.stat(fileId);
+    if (existing != null) {
+      trace?.mark(PlaybackStage.fileRecordKnown,
+          bytes: existing.downloadedSize);
+      if (existing.expectedSize > 0) trace?.expectedBytes = existing.expectedSize;
+    }
+    // Cache hit check is byte-identical to the full-download path: a complete
+    // record with wrong size or a vanished file is NOT a hit — those videos
+    // stream (or re-download), they never get a truncated player.
+    final sizeMatches = existing == null ||
+        existing.expectedSize <= 0 ||
+        existing.size >= existing.expectedSize;
+    if (existing != null &&
+        existing.isCompleted &&
+        existing.path.isNotEmpty &&
+        sizeMatches &&
+        await _fileExists(existing.path)) {
+      trace?.mark(PlaybackStage.fileReady, bytes: existing.size);
+      onProgress?.call(VideoSourceUpdate(
+        stage: SourceStage.ready,
+        downloadedBytes: existing.size,
+        expectedBytes: existing.size,
+        path: existing.path,
+      ));
+      return PlaySource.file(existing.path);
+    }
+
+    // A record without a size cannot be streamed honestly: there is no total
+    // to advertise in Content-Range. Fall back before touching the transfer.
+    if (existing != null && existing.expectedSize <= 0) {
+      trace?.mark(PlaybackStage.streamingModeSelected);
+      trace?.errorCategory = 'streamingUnavailable';
+      throw VideoSourceException('流式播放不可用（文件大小未知）');
+    }
+
+    trace?.mark(PlaybackStage.streamingModeSelected);
+    final watch = _LiveFileWatch(api.updates(), fileId, initial: existing);
+
+    StreamProxyServer? proxy;
+    try {
+      trace?.mark(PlaybackStage.downloadRequested);
+      // downloadFile answers as soon as TDLib accepts the transfer (a rejected
+      // file id fails here and feeds the repair loop); the bytes arrive
+      // through the update stream the watcher is already consuming.
+      await api.start(fileId);
+
+      // Startup gate: wait until the player can be handed a stream that will
+      // not immediately stall. min(buffer, whole file) — a 400 KB clip must
+      // not wait for an artificial 2 MB.
+      final expected = watch.expectedBytes;
+      final target = expected > 0 && expected < startupBufferBytes
+          ? expected
+          : startupBufferBytes;
+      if (watch.availableBytes < target) {
+        onProgress?.call(VideoSourceUpdate(
+          stage: SourceStage.fetching,
+          downloadedBytes: watch.availableBytes,
+          expectedBytes: watch.expectedBytes,
+        ));
+        await _waitForStartup(watch, target);
+      }
+      trace?.mark(PlaybackStage.startupBufferReached,
+          bytes: watch.availableBytes);
+
+      // The proxy reads the local file; by now TDLib has named it. If it has
+      // not, there is nothing to serve — the caller falls back.
+      final localPath = watch.path;
+      if (localPath.isEmpty) {
+        trace?.errorCategory = 'streamingUnavailable';
+        throw VideoSourceException('流式播放不可用（下载未产生本地文件）');
+      }
+
+      proxy = (proxyFactory ?? _defaultProxy)(watch, localPath);
+      final url = await proxy.start();
+      trace?.mark(PlaybackStage.streamingProxyStarted);
+      // When the play ends (or the resolver is torn down) the watch dies with
+      // the proxy: one subscription, one owner, no leak.
+      proxy.onClose(watch.dispose);
+
+      // Record when the background download finishes. This is the "完整下载：
+      // Y 秒" number; the play itself started at [startupBufferReached].
+      unawaited(() async {
+        try {
+              await watch.progress
+              .firstWhere((_) => watch.isComplete)
+              .timeout(const Duration(minutes: 30));
+          if (watch.isComplete) {
+            trace?.mark(PlaybackStage.fileCompleted,
+                bytes: watch.availableBytes);
+          }
+        } on Object {
+          // The completion marker is diagnostics, not playback: a closed
+          // stream or a timeout here must not disturb the play.
+        }
+      }());
+
+      onProgress?.call(VideoSourceUpdate(
+        stage: SourceStage.fetching,
+        downloadedBytes: watch.availableBytes,
+        expectedBytes: watch.expectedBytes,
+      ));
+      return PlaySource.stream(url.toString(), localPath, proxy);
+    } on Object catch (e) {
+      // Anything that went wrong after the download started leaves the
+      // watcher and the proxy behind; close them before the caller's fallback
+      // path starts a second transfer.
+      if (proxy != null) {
+        await proxy.stop();
+      } else {
+        await watch.dispose();
+      }
+      // A rejected file id must reach the repair loop as [_MissingFile], the
+      // same conversion the full-download path performs on its errors.
+      final text = '$e';
+      if (_looksMissing(text.toUpperCase())) throw _MissingFile(text);
+      rethrow;
+    }
+  }
+
+  StreamProxyServer _defaultProxy(
+    FileProgressWatch watch,
+    String localPath,
+  ) =>
+      StreamProxyServer(
+        watch: watch,
+        localPath: localPath,
+        startupBufferBytes: startupBufferBytes,
+        stallTimeout: stallTimeout,
+      );
+
+  /// Waits for the startup buffer with the same two rules as the transfer
+  /// wait: growth keeps the wait alive, silence for [stallTimeout] is the only
+  /// network verdict.
+  Future<void> _waitForStartup(FileProgressWatch watch, int target) async {
+    final start = watch.availableBytes;
+    final stall = Completer<void>();
+    final stallTimer = Timer(stallTimeout, () {
+      if (watch.availableBytes > start) return;
+      stall.complete();
+    });
+    late final StreamSubscription<int> sub;
+    sub = watch.progress.listen((_) {
+      if (watch.availableBytes >= target) {
+        if (!stall.isCompleted) stall.complete();
+      }
+    });
+    try {
+      while (watch.availableBytes < target && !watch.isComplete) {
+        // One pass of the stall timer per wait; growth re-arms it below.
+        await _waitForGrowthOnce(watch, target);
+      }
+    } finally {
+      stallTimer.cancel();
+      await sub.cancel();
+    }
+  }
+
+  Future<void> _waitForGrowthOnce(FileProgressWatch watch, int target) async {
+    final start = watch.availableBytes;
+    final growth = Completer<void>();
+    final stall = Completer<void>();
+    late final StreamSubscription<int> sub;
+    sub = watch.progress.listen((_) {
+      if (watch.availableBytes > start || watch.availableBytes >= target) {
+        if (!growth.isCompleted) growth.complete();
+      }
+    });
+    final stallTimer = Timer(stallTimeout, () {
+      if (watch.availableBytes > start) return;
+      if (!stall.isCompleted) stall.complete();
+    });
+    try {
+      await Future.any(<Future<void>>[growth.future, stall.future]);
+    } finally {
+      stallTimer.cancel();
+      await sub.cancel();
+    }
+    if (stall.isCompleted && watch.availableBytes <= start) {
+      throw VideoSourceStalled(
+        stallTimeout,
+        downloadedBytes: start,
+        expectedBytes: watch.expectedBytes,
+      );
+    }
+  }
 
   /// True when [path] is still on disk. Used before trusting a prefetched path:
   /// a prefetch can be minutes old, and the OS may have purged the pool.
@@ -588,6 +940,80 @@ class _MissingFile implements Exception {
 
   @override
   String toString() => '_MissingFile: $message';
+}
+
+/// The proxy's view of a download in progress: how many bytes are readable,
+/// how big the file will be, whether it is done.
+///
+/// Backed by the same `updateFile` stream the wait loop consumes, filtered to
+/// one file id. Progress without a local path is ignored on purpose — the
+/// proxy reads that exact file, so bytes without a path are numbers, not data.
+class _LiveFileWatch implements FileProgressWatch {
+  _LiveFileWatch(
+    Stream<FileState> updates,
+    int fileId, {
+    required FileState? initial,
+  }) {
+    if (initial != null && initial.path.isNotEmpty) {
+      path = initial.path;
+      available = initial.downloadedSize;
+    }
+    expected = initial?.expectedSize ?? 0;
+    complete = initial?.isCompleted == true && path.isNotEmpty;
+    _subscription = updates.listen(
+      (state) {
+        if (state.id != fileId) return;
+        if (state.path.isNotEmpty) path = state.path;
+        if (state.isCompleted) {
+          complete = true;
+          final done = state.downloadedSize > available
+              ? state.downloadedSize
+              : available;
+          available = done;
+          _changes.add(done);
+          return;
+        }
+        if (state.path.isEmpty) return;
+        if (state.expectedSize > expected) expected = state.expectedSize;
+        if (state.downloadedSize > available) {
+          available = state.downloadedSize;
+          _changes.add(available);
+        }
+      },
+      onDone: () {
+        if (!_changes.isClosed) _changes.close();
+      },
+      onError: (Object _) {
+        // The resolver's error paths own failure reporting; a broken update
+        // stream leaves the watch frozen, which the stall watchdog translates
+        // into the same network verdict as before.
+      },
+    );
+  }
+
+  /// The local file TDLib is writing. Empty until the first update carries it.
+  String path = '';
+
+  int available = 0;
+  int expected = 0;
+  bool complete = false;
+
+  final StreamController<int> _changes = StreamController<int>.broadcast();
+  late final StreamSubscription<FileState> _subscription;
+
+  @override
+  int get availableBytes => available;
+  @override
+  int get expectedBytes => expected;
+  @override
+  bool get isComplete => complete;
+  @override
+  Stream<int> get progress => _changes.stream;
+
+  Future<void> dispose() async {
+    await _subscription.cancel();
+    if (!_changes.isClosed) await _changes.close();
+  }
 }
 
 /// Internal signal used to close a completer nobody is waiting for any more.
