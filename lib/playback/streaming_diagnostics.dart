@@ -163,6 +163,14 @@ class StreamingDiagnostics extends ChangeNotifier {
   int? _messageId;
   int? _fileId;
 
+  /// The list item the user tapped, exactly as the local index stored it.
+  /// Kept apart from the TDLib file state: if the two disagree the app is
+  /// playing a different file than the tile shows, which is a real defect and
+  /// must be visible instead of being averaged into one number.
+  int? _recordFileId;
+  int? _recordMessageId;
+  int _recordSizeBytes = 0;
+
   int _totalBytes = 0;
   int _downloadedBytes = 0;
   int _headBytes = 0;
@@ -225,6 +233,18 @@ class StreamingDiagnostics extends ChangeNotifier {
   int? get chatId => _chatId;
   int? get messageId => _messageId;
   int? get fileId => _fileId;
+
+  /// Size the tapped list item claims, straight from the index record.
+  int get recordSizeBytes => _recordSizeBytes;
+  int? get recordFileId => _recordFileId;
+  int? get recordMessageId => _recordMessageId;
+
+  /// The tapped item and the file TDLib is serving are two different files.
+  /// Unknown sizes on either side are "not comparable", never a mismatch.
+  bool get recordSizeMismatch =>
+      _recordSizeBytes > 0 &&
+      _totalBytes > 0 &&
+      _recordSizeBytes != _totalBytes;
 
   int get totalBytes => _totalBytes;
   int get downloadedBytes => _downloadedBytes;
@@ -293,6 +313,13 @@ class StreamingDiagnostics extends ChangeNotifier {
 
   String _percentString() =>
       '${(downloadedPercent * 100).toStringAsFixed(1)}%';
+
+  /// `match=YES/NO/-` for the panel: `-` means one side has no size yet, so
+  /// the comparison would be a guess.
+  String _sizeMatchLabel() {
+    if (_recordSizeBytes <= 0 || _totalBytes <= 0) return 'match=-';
+    return recordSizeMismatch ? 'match=NO' : 'match=YES';
+  }
 
   /// The verdict, computed from the recorded facts only.
   ///
@@ -417,6 +444,23 @@ class StreamingDiagnostics extends ChangeNotifier {
     _playerSourceType = isStreaming ? 'STREAM_HTTP' : 'LOCAL_FILE';
     _proxyUrl = isStreaming ? url : null;
     _note('playerSource=$_playerSourceType');
+    notifyListeners();
+  }
+
+  /// The tapped list item, as the local index has it.
+  ///
+  /// Written by the feed controller before it resolves a play. It survives
+  /// [beginPlay] on purpose: the record describes what the user chose, the
+  /// play block describes what TDLib serves, and the whole point is to see
+  /// the two side by side.
+  void noteRecordSnapshot({
+    required int fileId,
+    required int messageId,
+    required int sizeBytes,
+  }) {
+    _recordFileId = fileId;
+    _recordMessageId = messageId;
+    _recordSizeBytes = sizeBytes;
     notifyListeners();
   }
 
@@ -735,6 +779,12 @@ class StreamingDiagnostics extends ChangeNotifier {
         if (_proxyUrl != null) 'proxyUrl=${redactText(_proxyUrl!)}',
         'streamingEnabled=${_streamingEnabled ? 'true' : 'false'}',
         'file=${_fileId ?? '-'} msg=${_messageId ?? '-'} chat=${_chatId ?? '-'}',
+        // Two sizes, always both: the tile's size and the size of the file
+        // TDLib is actually serving. `match=NO` means the play opened a
+        // different file than the tile advertised.
+        'record file=${_recordFileId ?? '-'} msg=${_recordMessageId ?? '-'} '
+            'size=$_recordSizeBytes B',
+        'tdlib total=$_totalBytes B ${_sizeMatchLabel()}',
         'total=$_totalBytes B downloaded=$_downloadedBytes B '
             '(${_percentString()})',
         'head=$_headBytes B downloadOffset=$_downloadOffset',
@@ -818,6 +868,18 @@ class StreamingDiagnostics extends ChangeNotifier {
     lines.add(total == null || total <= 0
         ? 'total=-'
         : 'total=${formatBytes(total)}');
+    lines.add(_recordSizeBytes <= 0
+        ? 'recordSize=-'
+        : 'recordSize=${formatBytes(_recordSizeBytes)} '
+            'recordFile=${_recordFileId ?? '-'}');
+    // The tile said one size, TDLib served another: the play opened a
+    // different file than the one tapped. Nothing else in this report can be
+    // read correctly until that is fixed, so it gets its own banner line.
+    if (recordSizeMismatch) {
+      lines.add('SIZE_MISMATCH: record=${formatBytes(_recordSizeBytes)} '
+          'file=${_recordFileId ?? '-'} / tdlib=${formatBytes(_totalBytes)} '
+          'file=${_fileId ?? '-'}');
+    }
     final completed = _downloadCompletedMillis;
     lines.add(completed == null
         ? 'completedAt=-'
@@ -855,6 +917,10 @@ class StreamingDiagnostics extends ChangeNotifier {
         'fileId': _fileId,
         'chatId': _chatId,
         'messageId': _messageId,
+        'recordFileId': _recordFileId,
+        'recordMessageId': _recordMessageId,
+        'recordSizeBytes': _recordSizeBytes,
+        'recordSizeMismatch': recordSizeMismatch,
         'totalBytes': _totalBytes,
         'downloadedBytes': _downloadedBytes,
         'downloadedPercent':

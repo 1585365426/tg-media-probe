@@ -950,6 +950,79 @@ void main() {
     });
   });
 
+  group('record vs file identity', () {
+    test('the tile size and the served file size are reported separately', () {
+      final diag = StreamingDiagnostics();
+      diag.noteRecordSnapshot(
+        fileId: 5478,
+        messageId: 4092592128,
+        sizeBytes: 3700000000,
+      );
+      diag.beginPlay(
+        fileId: 5478,
+        streaming: false,
+        messageId: 4092592128,
+        totalBytes: 3700000000,
+      );
+
+      final panel = diag.panelLines().join('\n');
+      expect(panel, contains('record file=5478'));
+      expect(panel, contains('size=3700000000 B'));
+      expect(panel, contains('match=YES'));
+      expect(diag.recordSizeMismatch, isFalse);
+      expect(diag.acceptanceLines().join('\n'), isNot(contains('SIZE_MISMATCH')));
+    });
+
+    test('a tile that claims 3.45 GB while a 1.38 GB file plays is flagged', () {
+      final diag = StreamingDiagnostics();
+      // The tapped item, as the index stored it.
+      diag.noteRecordSnapshot(
+        fileId: 9001,
+        messageId: 4092592128,
+        sizeBytes: 3700000000,
+      );
+      // The file TDLib actually served.
+      diag.beginPlay(
+        fileId: 5478,
+        streaming: false,
+        messageId: 4092592128,
+        totalBytes: 1482000000,
+      );
+
+      expect(diag.recordSizeMismatch, isTrue);
+      final panel = diag.panelLines().join('\n');
+      expect(panel, contains('match=NO'));
+      final report = diag.acceptanceLines().join('\n');
+      expect(report, contains('SIZE_MISMATCH'));
+      expect(report, contains('recordFile=9001'));
+      expect(report, contains('file=5478'));
+    });
+
+    test('the record survives the play reset — it describes the tap', () {
+      final diag = StreamingDiagnostics();
+      diag.noteRecordSnapshot(
+        fileId: 9001,
+        messageId: 42,
+        sizeBytes: 3700000000,
+      );
+      diag.beginPlay(fileId: 9001, streaming: false, totalBytes: 3700000000);
+      diag.beginPlay(fileId: 9001, streaming: false, totalBytes: 3700000000);
+
+      expect(diag.recordFileId, 9001);
+      expect(diag.recordMessageId, 42);
+      expect(diag.recordSizeBytes, 3700000000);
+    });
+
+    test('an unknown size on either side is not a mismatch', () {
+      final diag = StreamingDiagnostics();
+      diag.noteRecordSnapshot(fileId: 1, messageId: 2, sizeBytes: 0);
+      diag.beginPlay(fileId: 1, streaming: false, totalBytes: 1000);
+
+      expect(diag.recordSizeMismatch, isFalse);
+      expect(diag.panelLines().join('\n'), contains('match=-'));
+    });
+  });
+
   group('photo exclusion', () {
     test('messagePhoto produces no record and no download', () async {
       final record = MediaRecord.fromMessage(

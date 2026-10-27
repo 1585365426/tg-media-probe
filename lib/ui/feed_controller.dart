@@ -542,6 +542,16 @@ class FeedController extends ChangeNotifier {
     // updates without blocking the play.
     unawaited(_fetchNameIfMissing(record));
 
+    // What the user actually tapped: file id and the size the tile shows.
+    // Recorded before the play so the panel can prove whether the opened file
+    // is the tapped one — a 3.45 GB tile playing a 1.38 GB file is a defect,
+    // not a rounding difference.
+    _diagnostics.noteRecordSnapshot(
+      fileId: record.fileId,
+      messageId: record.messageId,
+      sizeBytes: record.sizeBytes,
+    );
+
     PlaySource? source;
     try {
       source = await _gate.run(() async {
