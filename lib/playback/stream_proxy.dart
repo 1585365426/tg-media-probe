@@ -639,6 +639,7 @@ class StreamProxyServer {
     var cursor = from;
     var written = 0;
     String? note;
+    var selfTruncated = false;
     RandomAccessFile? reader;
     try {
       reader = await file.open();
@@ -669,20 +670,25 @@ class StreamProxyServer {
         written += bytes.length;
         cursor += bytes.length;
       }
+    } on StreamProxyException catch (e) {
+      // The proxy itself gave up (a real stall, a vanished file). This is the
+      // only case that counts as a truncation in the report: the player must
+      // never see a short body because of a decision taken here.
+      selfTruncated = true;
+      note = 'PROXY_STALL ${_brief(e)}';
+      onEvent?.call('body ended at $cursor/$requestedTo: $note');
     } on Object catch (e) {
-      // Body already committed: a stall or a dead socket ends the exchange.
-      // The player retries with its own range — that is not our decision, but
-      // it is recorded as a truncation with the real numbers.
-      note = 'RANGE_TRUNCATED ${_brief(e)}';
+      // The client closed the connection (AVPlayer cancels ranges all the
+      // time). Recorded, not blamed on the proxy.
+      note = 'client closed ${_brief(e)}';
       onEvent?.call('body ended at $cursor/$requestedTo: $note');
     } finally {
       await reader?.close();
       if (isForward) _forwardResponses--;
     }
 
-    if (written < declared) {
+    if (selfTruncated) {
       _truncations++;
-      note ??= 'RANGE_TRUNCATED';
       onEvent?.call('RANGE_TRUNCATED #$index $written/$declared');
     }
 
@@ -876,7 +882,12 @@ class StreamProxyServer {
     if (watch.isComplete) return Future<void>.value();
     return _serial(() async {
       if (_detourActive) return; // a newer diversion already owns the window
-      await watch.resumeSequential();
+      try {
+        await watch.resumeSequential();
+      } on Object {
+        // The watch may already be disposed (play stopped, player closed):
+        // a failed restore must not surface as an unhandled async error.
+      }
     });
   }
 
