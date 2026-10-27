@@ -27,7 +27,9 @@ enum TGMediaStreamingPlugin {
     host.attach()
     // The view is only the `AVPlayerLayer`; every overlay and gesture stays in
     // Flutter, so the immersive feed looks exactly as before.
-    registrar.registerViewFactory(
+    // Swift renames the ObjC selector `registerViewFactory:withId:` to
+    // `register(_:withId:)`; the compiler rejects the ObjC spelling.
+    registrar.register(
       TGMediaPlayerViewFactory(host: host),
       withId: "tgmedia/player_view"
     )
