@@ -946,6 +946,7 @@ class FeedController extends ChangeNotifier {
       if (trace != null && !trace.has(PlaybackStage.streamingFallback)) {
         final path = await _fallbackFullDownload(record, trace, error);
         if (path != null && !_disposed) {
+          _diagnostics.notePlayerSource(isStreaming: false, url: path);
           await player.activate(path);
           _activeSource = PlaySource.file(path);
           _notify();
