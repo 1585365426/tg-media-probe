@@ -363,6 +363,7 @@ class StreamProxyServer {
   int _diversions = 0;
   int _dedupeHits = 0;
   int _truncations = 0;
+  int _forwardResponses = 0;
 
   /// Serialises window moves: two sockets must not fight over TDLib's single
   /// active download for the same file.
@@ -602,6 +603,12 @@ class StreamProxyServer {
       throw StreamProxyException('本地文件在播放中途消失');
     }
 
+    // Only responses past byte 0 ever justify a diversion. Counting them keeps
+    // a completed duplicate (AVPlayer asks for the same tail six times) from
+    // releasing the window while its twins are still reading.
+    final isForward = from > 0;
+    if (isForward) _forwardResponses++;
+
     final response = request.response;
     response.statusCode = HttpStatus.partialContent;
     // `identity` matters: a compressed body would change what a byte offset
@@ -670,6 +677,7 @@ class StreamProxyServer {
       onEvent?.call('body ended at $cursor/$requestedTo: $note');
     } finally {
       await reader?.close();
+      if (isForward) _forwardResponses--;
     }
 
     if (written < declared) {
@@ -705,10 +713,14 @@ class StreamProxyServer {
     }
 
     // The response that justified this diversion is over — finished or
-    // cancelled. Give the window back so the sequential download resumes and
-    // the other response can keep flowing.
-    if (_detourActive && from >= _detourFrom && from <= _detourTo) {
-      _abortDiversion('response #$index ended');
+    // cancelled. Release the window only when no sibling response is still
+    // reading the same range; otherwise the tail would re-steal the download
+    // from the head for every duplicate the player opens.
+    if (_detourActive &&
+        _forwardResponses == 0 &&
+        from >= _detourFrom &&
+        from <= _detourTo) {
+      _abortDiversion('no forward consumer left');
     }
   }
 
