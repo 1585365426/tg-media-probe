@@ -442,6 +442,16 @@ class VideoSourceResolver {
   int? _activePlayFileId;
   final Set<int> _prefetching = <int>{};
 
+  /// Files a preload has already asked TDLib for.
+  ///
+  /// `downloadFile` returns as soon as TDLib accepts; the transfer keeps
+  /// running afterwards. Without this set, a window that is no longer wanted
+  /// keeps pulling bandwidth — which is how a 152 MB neighbour was still
+  /// loading while the 720 MB video the user had just tapped was waiting for
+  /// its first byte. Cancelling them is the only way to stop a request that
+  /// was already accepted.
+  final Set<int> _warmed = <int>{};
+
   /// Resolves [fileId] to an absolute path (the full-download contract).
   ///
   /// Kept as the fallback path and the prefetch path; the feed's current video
@@ -699,11 +709,33 @@ class VideoSourceResolver {
     if (!_prefetching.add(fileId)) return true;
     try {
       await api.prefetch(fileId);
+      _warmed.add(fileId);
       return true;
     } on Object {
       return false;
     } finally {
       _prefetching.remove(fileId);
+    }
+  }
+
+  /// Stops warming files that are no longer in the preload window.
+  ///
+  /// [keep] is the new window. Anything warmed earlier that is not in it — and
+  /// is not the file being watched — is cancelled at the TDLib level, because
+  /// a `downloadFile` that was already accepted cannot be un-asked any other
+  /// way. The active file is never touched: its window belongs to the play.
+  Future<void> abandonWarm(Iterable<int> keep) async {
+    final wanted = keep.toSet();
+    final stale = _warmed
+        .where((id) => !wanted.contains(id) && id != _activePlayFileId)
+        .toList();
+    for (final id in stale) {
+      _warmed.remove(id);
+      try {
+        await api.cancel(id);
+      } on Object {
+        // A transfer that already finished is not an error.
+      }
     }
   }
 

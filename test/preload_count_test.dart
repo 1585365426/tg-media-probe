@@ -279,6 +279,11 @@ void main() {
       expect(newRequests.length,
           lessThanOrEqualTo(AppPreferences.maxPreloadCount));
       expect(c.current?.messageId, 95);
+      // The old requests were accepted by TDLib and keep downloading until
+      // someone cancels them — the "152 MB loaded first" report.
+      expect(transfer.cancelled, containsAll(<int>[900099, 900098, 900097]));
+      expect(transfer.cancelled, isNot(contains(900095)),
+          reason: '正在播放的文件不得被预加载的清理取消');
       c.shutdown();
     });
   });

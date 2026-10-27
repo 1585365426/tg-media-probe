@@ -1078,10 +1078,16 @@ class FeedController extends ChangeNotifier {
     final window = ++_prefetchGeneration;
     // What the warm window is, stated as ids: the isolation check compares it
     // against `activeFileId`, and a bare counter cannot answer that.
-    _diagnostics.notePreloadWindow(<int>[
+    final windowIds = <int>[
       for (var offset = 1; offset <= count; offset++)
         if (_index + offset < _items.length) _items[_index + offset].fileId,
-    ].where((id) => id != 0));
+    ].where((id) => id != 0).toList();
+    _diagnostics.notePreloadWindow(windowIds);
+    // A window that was accepted but is no longer wanted keeps downloading.
+    // That is the "152 MB loaded first" report: the neighbour's request was
+    // still running when the user opened a different video.
+    await sources.abandonWarm(windowIds);
+    if (!_owns(generation) || window != _prefetchGeneration) return;
     for (var offset = 1; offset <= count; offset++) {
       final next = _index + offset;
       if (next >= _items.length) return;
