@@ -64,6 +64,8 @@ class _Transfer implements FileTransferApi {
   @override
   Future<void> start(int fileId) async {}
   @override
+  Future<void> startRange(int fileId, {required int offset, required int limit}) async {}
+  @override
   Future<void> cancel(int fileId) async {}
   @override
   Stream<FileState> updates() => const Stream<FileState>.empty();

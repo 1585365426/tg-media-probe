@@ -94,6 +94,16 @@ class PlaybackTrace {
   /// How many times a transient TDLib failure was retried before the answer.
   int retries = 0;
 
+  /// Proxy request log: method/range/status/bytes and window moves, already
+  /// free of paths and secrets. Bounded — the export must stay readable, and
+  /// a runaway player cannot turn it into a log file.
+  final List<String> proxyEvents = <String>[];
+
+  void noteProxy(String event) {
+    if (proxyEvents.length >= 32) return;
+    proxyEvents.add(event);
+  }
+
   /// Free-form, already-redacted note for the diagnostics ("file_id 失效，
   /// 已从消息重新获取"). Never a path and never the message text.
   String? note;
@@ -168,6 +178,7 @@ class PlaybackTrace {
       if (errorCategory != null) 'error=$errorCategory',
       if (note != null) 'note=$note',
       ...stageLines(),
+      if (proxyEvents.isNotEmpty) 'proxy=[${proxyEvents.join(' | ')}]',
     ];
     return parts.join(' ');
   }

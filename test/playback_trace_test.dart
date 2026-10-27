@@ -81,6 +81,8 @@ class _Api implements FileTransferApi {
   int cancelCalls = 0;
 
   @override
+  Future<void> startRange(int fileId, {required int offset, required int limit}) async {}
+  @override
   Future<void> cancel(int fileId) async => cancelCalls++;
 
   @override

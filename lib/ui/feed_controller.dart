@@ -557,24 +557,40 @@ class FeedController extends ChangeNotifier {
         );
       });
     } on VideoSourceTimeout catch (e) {
-      // Only "no data arrived" is a network verdict. Hitting the absolute task
-      // ceiling on a large, steadily downloading file is not — reporting it as
-      // "网络不可用" is what made big videos look like a connection failure.
-      _fail(
-        e.message,
-        failure: e.isStall ? RequestFailure.offline : RequestFailure.generic,
-      );
-      return;
+      // Streaming could not deliver (stall or ceiling). The full-download
+      // path is the honest fallback: same bytes, no proxy, and the position
+      // and list stay exactly where they are. Only if that also fails does
+      // the user see an error.
+      final path = await _fallbackFullDownload(record, trace, e);
+      if (path == null) {
+        _fail(
+          e.message,
+          failure: e.isStall ? RequestFailure.offline : RequestFailure.generic,
+        );
+        return;
+      }
+      source = PlaySource.file(path);
     } on VideoSourceException catch (e) {
-      _fail(e.message, failure: classifyFailure(e));
-      return;
+      final path = await _fallbackFullDownload(record, trace, e);
+      if (path == null) {
+        _fail(e.message, failure: classifyFailure(e));
+        return;
+      }
+      source = PlaySource.file(path);
     } on Object catch (e) {
-      _fail('$e', failure: classifyFailure(e));
-      return;
+      final path = await _fallbackFullDownload(record, trace, e);
+      if (path == null) {
+        _fail('$e', failure: classifyFailure(e));
+        return;
+      }
+      source = PlaySource.file(path);
     }
 
     // Null means a newer navigation already started. Do not touch the player.
     if (source == null || _disposed) return;
+    // The fallback downloaded while the user may have swiped on: the item
+    // under the finger is the only one allowed to reach the player.
+    if (current == null || current!.messageId != record.messageId) return;
 
     // One live source at a time: stop any proxy the previous activation left
     // behind before opening another one.
@@ -635,6 +651,36 @@ class FeedController extends ChangeNotifier {
     await _restoreProgress(record);
     _notify();
     await _prefetchNext();
+  }
+
+  /// The streaming path gave up: fall back to the full download the old
+  /// pipeline used, with the same position/list guarantees. Returns null when
+  /// the fallback also failed — the caller then reports the *streaming*
+  /// error, which is the one that describes what actually happened.
+  Future<String?> _fallbackFullDownload(
+    MediaRecord record,
+    PlaybackTrace trace,
+    Object cause,
+  ) async {
+    trace.mark(PlaybackStage.streamingFallback);
+    trace.note = '流式失败，改用完整下载';
+    try {
+      return await sources.resolve(
+        record.fileId,
+        chatId: record.chatId,
+        messageId: record.messageId,
+        trace: trace,
+        onRecordRefreshed: _absorbRefreshed,
+        onProgress: (update) {
+          if (update.stage == SourceStage.fetching) {
+            _bufferFraction = update.fraction;
+            _notify();
+          }
+        },
+      );
+    } on Object {
+      return null;
+    }
   }
 
   /// Prepares up to [preloadCount] videos **after** the current one.
@@ -803,8 +849,43 @@ class FeedController extends ChangeNotifier {
       _position = (active as PlayerProgress).position;
       _duration = (active as PlayerProgress).duration;
     }
+    _checkDecoderError(active);
     _maybeRecordProgress();
     _notify();
+  }
+
+  /// A real decoder failure (AVPlayerItem.status == failed) is one recoverable
+  /// event: fall back to the full download once while the position and list
+  /// hold, and only surface an error when even that fails. `waitingToPlayAt-
+  /// SpecifiedRate` and a slow proxy wait never reach here — they are not
+  /// errors, and the buffering UI already covers them.
+  Future<void> _checkDecoderError(PlayerHandle? active) async {
+    final reporter = active is PlayerErrorReporter ? active as PlayerErrorReporter : null;
+    if (reporter == null) return;
+    final error = reporter.lastError;
+    if (error == null) return;
+    final errorText = error;
+    // The raw AVPlayer text can carry container paths; the trace only needs
+    // to know that the decoder failed, not where the file lived.
+    _lastTrace?.note = 'decoder error (${errorText.length} chars)';
+    final record = current;
+    if (record == null) return;
+    final source = _activeSource;
+    if (source != null && source.isStreaming) {
+      final trace = _lastTrace;
+      if (trace != null && !trace.has(PlaybackStage.streamingFallback)) {
+        final path = await _fallbackFullDownload(record, trace, error);
+        if (path != null && !_disposed) {
+          await player.activate(path);
+          _activeSource = PlaySource.file(path);
+          _notify();
+          return;
+        }
+      }
+    }
+    if (!_disposed && phase != FeedPhase.error) {
+      _fail('此视频无法解码', failure: RequestFailure.generic);
+    }
   }
 
   /// Jumps to the saved position for [record], if there is one worth using.

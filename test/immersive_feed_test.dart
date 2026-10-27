@@ -65,6 +65,8 @@ class _Transfer implements FileTransferApi {
   }
 
   @override
+  Future<void> startRange(int fileId, {required int offset, required int limit}) async {}
+  @override
   Future<void> cancel(int fileId) async {}
 
   @override

@@ -43,6 +43,16 @@ abstract class PlayerSeek {
   Future<void> seekTo(Duration position);
 }
 
+/// Optional capability: the player can report a real decoder error.
+///
+/// AVPlayer failures surface as [VideoPlayerValue.hasError] on the plugin
+/// side; without this interface the feed would keep polling a dead player and
+/// the user would only ever see a generic "读取失败".
+abstract class PlayerErrorReporter {
+  /// The last decoder error text, or null while the player is healthy.
+  String? get lastError;
+}
+
 class PlayerError implements Exception {
   PlayerError(this.path, this.cause);
 

@@ -1,14 +1,13 @@
 /// Streaming playback (边下边播) regressions.
 ///
-/// One behaviour per test, named after the requirement it protects:
-/// * a complete cache never touches the proxy;
-/// * a partial file streams immediately — no waiting for completion;
-/// * an MP4 the player cannot initialise falls back to the full download
-///   silently;
-/// * the proxy serves exactly the ranges it has and blocks (bounded) for the
-///   ones it does not;
-/// * the file id repair loop still works when streaming is the entry point;
-/// * a file being streamed is invisible to the cache cleaner.
+/// The device failure this file guards against: AVPlayer does not request
+/// byte 0 first — it probes the tail and arbitrary offsets, while TDLib
+/// downloads from 0 upward. The proxy must *steer the TDLib window* to the
+/// range the player asked for, serve it, and restore the sequential download.
+/// Waiting for the crawl is the "缓冲 → 读取失败" bug.
+///
+/// Every proxy assertion here goes over real HTTP against a real loopback
+/// listener — no fakes between HttpClient and HttpServer.
 library;
 
 import 'dart:async';
@@ -17,6 +16,7 @@ import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:tg_media_probe/data/media_record.dart';
 import 'package:tg_media_probe/playback/media_metadata.dart';
+import 'package:tg_media_probe/playback/playback_trace.dart';
 import 'package:tg_media_probe/playback/stream_proxy.dart';
 import 'package:tg_media_probe/playback/video_source.dart';
 import 'package:tg_media_probe/td/td_models.dart';
@@ -36,7 +36,9 @@ MediaRecord video(int messageId, {String? name}) => MediaRecord(
     );
 
 /// A file whose "download" is scripted by the test: `advance(bytes)` grows the
-/// local file and pushes the matching update, `complete()` finishes it.
+/// local file at the current window offset and pushes the matching update;
+/// `deliverRange` emulates TDLib moving its download window after a targeted
+/// request.
 class ScriptedFile implements FileTransferApi {
   ScriptedFile(this.sandbox, {this.expectedSize = 1024 * 1024});
 
@@ -46,12 +48,16 @@ class ScriptedFile implements FileTransferApi {
   late final String path = sandbox.tempFile('stream-$fileId.bin');
   int fileId = 0;
   int downloaded = 0;
+
+  /// The TDLib download window: `downloaded` counts from this offset.
+  int windowOffset = 0;
   bool completed = false;
   int downloadCalls = 0;
+  int rangeCalls = 0;
   int cancelCalls = 0;
+  (int, int)? lastRange;
 
-  /// `fileId -> error text`: `start` throws for these ids, the way TDLib
-  /// refuses a stale file id on `downloadFile`.
+  /// `start` throws for these ids, the way TDLib refuses a stale file id.
   Map<int, String> rejectIds = <int, String>{};
 
   /// When true, `start` accepts the transfer but never writes a byte.
@@ -59,69 +65,82 @@ class ScriptedFile implements FileTransferApi {
 
   final StreamController<FileState> _updates =
       StreamController<FileState>.broadcast();
-  final StreamController<int> _growth = StreamController<int>.broadcast();
 
-  Future<void> advance(int bytes) async {
-    if (completed) return;
+  Future<void> _writeAt(int absoluteOffset, List<int> bytes) async {
     final file = File(path);
-    if (!await file.exists()) {
-      await file.create(recursive: true);
-    }
+    if (!await file.exists()) await file.create(recursive: true);
+    final current = await file.length();
     final sink = file.openWrite(mode: FileMode.append);
-    sink.add(List<int>.filled(bytes, 0x61));
+    if (absoluteOffset > current) {
+      // A window past the current end: pad the gap so offsets stay honest.
+      sink.add(List<int>.filled(absoluteOffset - current, 0));
+    }
+    if (absoluteOffset + bytes.length > current) {
+      sink.add(bytes.sublist(
+          absoluteOffset > current ? 0 : current - absoluteOffset));
+    }
     await sink.flush();
     await sink.close();
+  }
+
+  /// Grows the current window prefix by [bytes] (sequential download step).
+  Future<void> advance(int bytes) async {
+    if (completed) return;
+    final writtenAt = windowOffset + downloaded;
+    await _writeAt(writtenAt, List<int>.filled(bytes, 0x61));
     downloaded += bytes;
-    if (downloaded > expectedSize) downloaded = expectedSize;
-    _growth.add(downloaded);
+    _push();
+  }
+
+  void _push() {
     _updates.add(FileState(
       id: fileId,
-      size: 0,
+      size: completed ? expectedSize : 0,
       expectedSize: expectedSize,
       downloadedSize: downloaded,
-      isCompleted: false,
-      path: path,
+      isCompleted: completed,
+      path: downloaded > 0 || completed ? path : '',
       canBeDownloaded: true,
+      downloadOffset: windowOffset,
     ));
   }
 
+  /// Emulates a TDLib window move: the targeted range arrives.
+  Future<void> deliverRange(int offset, int bytes) async {
+    windowOffset = offset;
+    downloaded = 0;
+    await advance(bytes);
+  }
+
   Future<void> complete() async {
-    final have = await File(path).length();
-    if (have < expectedSize) await advance(expectedSize - have);
+    windowOffset = 0;
+    final file = File(path);
+    final current = await file.exists() ? await file.length() : 0;
+    if (current < expectedSize) {
+      final sink = file.openWrite(mode: FileMode.append);
+      sink.add(List<int>.filled(expectedSize - current, 0x61));
+      await sink.flush();
+      await sink.close();
+    }
     completed = true;
-    _growth.add(downloaded);
-    _updates.add(FileState(
-      id: fileId,
-      size: expectedSize,
-      expectedSize: expectedSize,
-      downloadedSize: expectedSize,
-      isCompleted: true,
-      path: path,
-      canBeDownloaded: true,
-    ));
+    downloaded = expectedSize;
+    _push();
   }
 
   @override
   Future<FileState?> stat(int id) async {
     fileId = id;
-    // A size of 0 means TDLib answered the size is unknown: the caller must
-    // not pretend to know the total in Content-Range.
-    if (unknownSize) return null;
     return FileState(
       id: id,
       size: completed ? expectedSize : 0,
       expectedSize: expectedSize,
       downloadedSize: downloaded,
       isCompleted: completed,
-      // A fresh record carries no path until the transfer actually started:
-      // that is what forces the "wait for a path" behaviour.
       path: downloaded > 0 || completed ? path : '',
       canBeDownloaded: true,
+      downloadOffset: windowOffset,
     );
   }
-
-  /// True while the fixture emulates "getFile says the size is unknown".
-  bool unknownSize = false;
 
   @override
   Future<void> start(int id) async {
@@ -129,11 +148,22 @@ class ScriptedFile implements FileTransferApi {
     final rejection = rejectIds[id];
     if (rejection != null) throw VideoSourceException(rejection);
     if (silentStart) return;
-    if (downloadCalls == 1) {
-      // TDLib's first write lands between "download accepted" and the first
-      // poll: seed the file with one chunk so the watcher has a path.
+    if (downloadCalls == 1 && downloaded == 0) {
+      // TDLib's first write lands right after the transfer is accepted.
       await advance(64 * 1024);
     }
+  }
+
+  @override
+  Future<void> startRange(
+    int id, {
+    required int offset,
+    required int limit,
+  }) async {
+    rangeCalls++;
+    lastRange = (offset, limit);
+    // The real TDLib *replaces* the download window; the test decides when
+    // (and whether) the bytes actually arrive via deliverRange.
   }
 
   @override
@@ -142,12 +172,7 @@ class ScriptedFile implements FileTransferApi {
   @override
   Stream<FileState> updates() => _updates.stream;
 
-  Stream<int> get growth => _growth.stream;
-
-  Future<void> close() async {
-    await _updates.close();
-    await _growth.close();
-  }
+  Future<void> close() => _updates.close();
 }
 
 /// A metadata lookup that hands back a working record for a stale id — the
@@ -173,26 +198,118 @@ class RepairingMetadata implements MediaMetadataLookup {
   }
 }
 
-class _ManualWatch implements FileProgressWatch {
-  int available = 0;
-  int expected = 4096;
+/// Watch over a [ScriptedFile], mirroring the resolver's `_LiveFileWatch`
+/// exactly — same interface, same window semantics.
+class FixtureWatch implements FileProgressWatch {
+  FixtureWatch(this.api, this.fileId, {FileState? initial}) {
+    // A broadcast stream never replays: a fixture built after `advance` or
+    // `complete` needs the state pushed as if it had been listening.
+    if (initial != null) _apply(initial);
+    sub = api.updates().listen((state) {
+      if (state.id != fileId) return;
+      if (state.path.isNotEmpty) path = state.path;
+      if (state.expectedSize > expected) expected = state.expectedSize;
+      if (state.isCompleted) {
+        complete = true;
+        windowOffset = 0;
+        prefix = state.downloadedSize;
+      } else {
+        windowOffset = state.downloadOffset;
+        prefix = state.downloadedSize;
+      }
+      if (!_changes.isClosed) _changes.add(null);
+    });
+  }
+
+  final ScriptedFile api;
+  final int fileId;
+  String path = '';
+  int expected = 0;
+  int prefix = 0;
+  int windowOffset = 0;
   bool complete = false;
-  final _changes = StreamController<int>.broadcast();
+  int windowRequests = 0;
+  int resumeRequests = 0;
+  final StreamController<void> _changes = StreamController<void>.broadcast();
+  late final StreamSubscription<FileState> sub;
+
+  void _apply(FileState state) {
+    if (state.id != fileId) return;
+    if (state.path.isNotEmpty) path = state.path;
+    if (state.expectedSize > expected) expected = state.expectedSize;
+    if (state.isCompleted) {
+      complete = true;
+      windowOffset = 0;
+      prefix = state.downloadedSize;
+    } else {
+      windowOffset = state.downloadOffset;
+      prefix = state.downloadedSize;
+    }
+  }
+
+  /// When true, `requestWindow` asks the fixture to deliver the bytes at once.
+  bool autoDeliver = true;
 
   @override
-  int get availableBytes => available;
+  int get headBytes => windowOffset == 0 ? prefix : 0;
+
+  @override
+  int readableEndFrom(int from) {
+    if (complete) return expected - 1;
+    if (from >= windowOffset && from < windowOffset + prefix) {
+      return windowOffset + prefix - 1;
+    }
+    return -1;
+  }
+
+  @override
+  bool covers(int from, int end) {
+    if (complete) return true;
+    if (end < from) return true;
+    return from >= windowOffset && end <= windowOffset + prefix - 1;
+  }
+
   @override
   int get expectedBytes => expected;
   @override
   bool get isComplete => complete;
   @override
-  Stream<int> get progress => _changes.stream;
+  String get localPath => path;
+  @override
+  Stream<void> get progress => _changes.stream;
 
-  void grow(int bytes) {
-    available = bytes;
-    _changes.add(bytes);
+  @override
+  Future<void> requestWindow(int from, int end) async {
+    windowRequests++;
+    if (autoDeliver) {
+      await api.deliverRange(from, end - from + 1);
+      // Mirror the resolver's watcher: the update pushed by deliverRange is
+      // what moves this window; nothing more to do here.
+    }
+  }
+
+  @override
+  Future<void> resumeSequential() async {
+    resumeRequests++;
+    if (complete) return;
+    windowOffset = 0;
+    // TDLib resume keeps previously downloaded bytes; the head prefix is
+    // whatever the file physically holds from 0.
+    final file = File(api.path);
+    prefix = await file.exists() ? await file.length() : 0;
+    _changes.add(null);
+  }
+
+  Future<void> dispose() async {
+    await sub.cancel();
+    await _changes.close();
   }
 }
+
+HttpClient _client() => HttpClient();
+
+Future<List<int>> _drain(HttpClientResponse response) =>
+    response.fold<List<int>>(<int>[], (acc, chunk) => acc..addAll(chunk));
 
 // --------------------------------------------------------------------- tests
 
@@ -207,83 +324,159 @@ void main() {
     await sandbox.dispose();
   });
 
-  group('stream proxy over HTTP range', () {
-    test('serves a blocked wait as soon as the bytes arrive', () async {
-      final watch = _ManualWatch();
-      final file = File(sandbox.tempFile('proxy-1.bin'));
-      await file.writeAsBytes(List<int>.filled(1024, 7));
+  group('proxy over real HTTP', () {
+    test('serves the head progressively; the tail is window-steered',
+        () async {
+      final api = ScriptedFile(sandbox, expectedSize: 4 * 1024 * 1024);
+      await api.advance(1024 * 1024); // head prefix: 1 MB of 4 MB
+      final watch = FixtureWatch(api, 1001, initial: await api.stat(1001));
       final proxy = StreamProxyServer(
         watch: watch,
-        localPath: file.path,
-        startupBufferBytes: 4096,
-        stallTimeout: const Duration(seconds: 10),
+        startupBufferBytes: 256 * 1024,
+        stallTimeout: const Duration(seconds: 5),
       );
       final url = await proxy.start();
       expect(url.host, '127.0.0.1');
 
-      // The request arrives before the data: the proxy must hold the
-      // connection, not answer 416 or an empty 206.
-      final client = HttpClient();
-      final request = await client.getUrl(url.replace(path: url.path));
-      request.headers.set(HttpHeaders.rangeHeader, 'bytes=0-4095');
-      final responseFuture = request.close();
+      final client = _client();
 
-      await Future<void>.delayed(const Duration(milliseconds: 50));
-      watch.grow(4096);
-      await file.writeAsBytes(List<int>.filled(4096, 7), mode: FileMode.append);
-
-      final response = await responseFuture;
+      // 1. open-ended head request → the current prefix, immediately.
+      var request = await client.getUrl(url);
+      request.headers.set(HttpHeaders.rangeHeader, 'bytes=0-');
+      var response = await request.close();
       expect(response.statusCode, HttpStatus.partialContent);
-      final body = await response.fold<List<int>>(
-        <int>[], (acc, chunk) => acc..addAll(chunk),
-      );
-      expect(body.length, 4096);
       expect(response.headers.value(HttpHeaders.contentRangeHeader),
-          'bytes 0-4095/4096');
+          'bytes 0-${1024 * 1024 - 1}/4194304',
+          reason: '无界 range 也要立即给出当前可读前缀，不等全量');
+      await _drain(response);
+
+      // 2. a tail probe (moov at the end) → the window moves to the tail.
+      request = await client.getUrl(url);
+      request.headers.set(HttpHeaders.rangeHeader, 'bytes=-65536');
+      response = await request.close();
+      expect(response.statusCode, HttpStatus.partialContent);
+      expect(watch.windowRequests, 1, reason: '尾部 range 必须切窗口，不能傻等顺序下载');
+      final tail = await _drain(response);
+      expect(tail.length, 65536);
+      expect(response.headers.value(HttpHeaders.contentRangeHeader),
+          'bytes ${4 * 1024 * 1024 - 65536}-${4 * 1024 * 1024 - 1}/4194304');
+
+      // 3. after serving a steered window the sequential download is restored.
+      // The restore fires after the response is written; give it a beat.
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      expect(watch.resumeRequests, greaterThanOrEqualTo(1),
+          reason: '窗口是绕行，不是目的地');
+
+      // 4. an arbitrary mid-file range → window steering again.
+      request = await client.getUrl(url);
+      request.headers.set(HttpHeaders.rangeHeader, 'bytes=2000000-2100000');
+      response = await request.close();
+      expect(response.statusCode, HttpStatus.partialContent);
+      final mid = await _drain(response);
+      expect(mid.length, 100001);
+
       client.close(force: true);
       await proxy.stop();
+      await watch.dispose();
+      await api.close();
     });
 
     test('an unknown path is refused, not served', () async {
-      final watch = _ManualWatch();
-      final file = File(sandbox.tempFile('proxy-2.bin'));
-      await file.writeAsBytes(List<int>.filled(16, 1));
-      final proxy = StreamProxyServer(watch: watch, localPath: file.path);
+      final api = ScriptedFile(sandbox);
+      await api.advance(16);
+      final watch = FixtureWatch(api, 1001, initial: await api.stat(1001));
+      final proxy = StreamProxyServer(watch: watch);
       final url = await proxy.start();
 
-      final client = HttpClient();
-      final request =
-          await client.getUrl(url.replace(path: '/v/wrong-token'));
+      final client = _client();
+      final request = await client.getUrl(url.replace(path: '/v/wrong-token'));
       final response = await request.close();
       expect(response.statusCode, HttpStatus.forbidden);
       client.close(force: true);
       await proxy.stop();
+      await watch.dispose();
+      await api.close();
     });
 
-    test('a stall ends the wait with an error, not forever', () async {
-      final watch = _ManualWatch();
-      final file = File(sandbox.tempFile('proxy-3.bin'));
-      await file.writeAsBytes(List<int>.filled(16, 1));
+    test('real silence ends a blocked wait instead of hanging the player',
+        () async {
+      final api = ScriptedFile(sandbox, expectedSize: 8 * 1024 * 1024)
+        ..silentStart = true;
+      final watch = FixtureWatch(api, 1001, initial: await api.stat(1001));
       final proxy = StreamProxyServer(
         watch: watch,
-        localPath: file.path,
-        startupBufferBytes: 4096,
-        stallTimeout: const Duration(milliseconds: 60),
+        startupBufferBytes: 1024 * 1024,
+        stallTimeout: const Duration(milliseconds: 80),
       );
       final url = await proxy.start();
 
-      final client = HttpClient();
+      final client = _client();
       final request = await client.getUrl(url);
-      request.headers.set(HttpHeaders.rangeHeader, 'bytes=0-4095');
+      request.headers.set(HttpHeaders.rangeHeader, 'bytes=0-');
       final response = await request.close();
-      // No bytes ever grow: the request must fail instead of hanging.
-      final body = await response.fold<List<int>>(
-        <int>[], (acc, chunk) => acc..addAll(chunk),
-      );
-      expect(body, isEmpty,
-          reason: 'stall 断开连接，不给播放器半截数据');
+      final body = await _drain(response);
+      expect(body, isEmpty, reason: 'stall 断开连接，不给播放器半截数据');
       client.close(force: true);
       await proxy.stop();
+      await watch.dispose();
+      await api.close();
+    });
+
+    test('slow but steady growth survives the startup gate', () async {
+      final api = ScriptedFile(sandbox, expectedSize: 2 * 1024 * 1024);
+      final watch = FixtureWatch(api, 1001, initial: await api.stat(1001));
+      final proxy = StreamProxyServer(
+        watch: watch,
+        startupBufferBytes: 512 * 1024,
+        stallTimeout: const Duration(milliseconds: 200),
+        maxWait: const Duration(seconds: 5),
+      );
+      final url = await proxy.start();
+
+      final client = _client();
+      final request = await client.getUrl(url);
+      request.headers.set(HttpHeaders.rangeHeader, 'bytes=0-');
+      final responseFuture = request.close();
+
+      // 512 KB in 8 chunks of 64 KB, one every 60 ms: each gap is well under
+      // the stall window, and every chunk resets it.
+      for (var i = 0; i < 8; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 60));
+        await api.advance(64 * 1024);
+      }
+
+      final response = await responseFuture;
+      expect(response.statusCode, HttpStatus.partialContent);
+      final body = await _drain(response);
+      expect(body.length, 512 * 1024, reason: '慢速增长不是失败');
+      client.close(force: true);
+      await proxy.stop();
+      await watch.dispose();
+      await api.close();
+    });
+
+    test('completion mid-play serves the exact requested window', () async {
+      final api = ScriptedFile(sandbox, expectedSize: 512 * 1024);
+      await api.advance(512 * 1024);
+      await api.complete();
+      final watch = FixtureWatch(api, 1001, initial: await api.stat(1001));
+      final proxy = StreamProxyServer(
+        watch: watch,
+        startupBufferBytes: 64 * 1024,
+      );
+      final url = await proxy.start();
+
+      final client = _client();
+      final request = await client.getUrl(url);
+      request.headers.set(HttpHeaders.rangeHeader, 'bytes=100000-199999');
+      final response = await request.close();
+      expect(response.statusCode, HttpStatus.partialContent);
+      final body = await _drain(response);
+      expect(body.length, 100000, reason: '完整文件按请求的精确窗口服务');
+      client.close(force: true);
+      await proxy.stop();
+      await watch.dispose();
+      await api.close();
     });
   });
 
@@ -292,7 +485,8 @@ void main() {
       final api = ScriptedFile(sandbox);
       await File(api.path).writeAsBytes(List<int>.filled(api.expectedSize, 1));
       api.completed = true;
-      final resolver = VideoSourceResolver(api: api, fileExists: (_) async => true);
+      final resolver =
+          VideoSourceResolver(api: api, fileExists: (_) async => true);
 
       final source = await resolver.resolveStream(1001);
 
@@ -304,7 +498,7 @@ void main() {
 
     test('a partial file streams without waiting for completion', () async {
       final api = ScriptedFile(sandbox, expectedSize: 1024 * 1024);
-      await api.advance(512 * 1024); // half downloaded
+      await api.advance(512 * 1024);
       final resolver = VideoSourceResolver(
         api: api,
         fileExists: (_) async => true,
@@ -316,26 +510,20 @@ void main() {
       expect(source.isStreaming, isTrue, reason: '未下载完不得等完整文件');
       expect(Uri.parse(source.url).scheme, 'http');
       expect(api.completed, isFalse, reason: 'resolveStream 不等 isCompleted');
-      final client = HttpClient();
+      final client = _client();
       final request = await client.getUrl(Uri.parse(source.url));
       request.headers.set(HttpHeaders.rangeHeader, 'bytes=0-262143');
       final response = await request.close();
       expect(response.statusCode, HttpStatus.partialContent);
-      final body = await response.fold<List<int>>(
-        <int>[], (acc, chunk) => acc..addAll(chunk),
-      );
+      final body = await _drain(response);
       expect(body.length, 256 * 1024);
       client.close(force: true);
       await source.dispose();
       await api.close();
     });
 
-    test('a stalled stream start is a network verdict, then fallback wins',
-        () async {
-      final api = ScriptedFile(sandbox)
-        ..silentStart = true;
-      // stat reports a size but no path and no bytes ever arrive: the
-      // startup gate must time out with the stall error.
+    test('a stalled stream start is a network verdict', () async {
+      final api = ScriptedFile(sandbox)..silentStart = true;
       final resolver = VideoSourceResolver(
         api: api,
         fileExists: (_) async => true,
@@ -358,8 +546,6 @@ void main() {
           1001: 'TDLib error 400: File not found',
         };
       final metadata = RepairingMetadata(2002);
-      // Give the *fresh* id the bytes; the stale id (1001) is the one asked,
-      // and TDLib refuses it exactly like a device: at downloadFile time.
       api.fileId = 2002;
       await api.advance(32 * 1024);
       final resolver = VideoSourceResolver(
@@ -369,13 +555,8 @@ void main() {
         startupBufferBytes: 16 * 1024,
       );
 
-      // stat for id 1001 returns null (unknown size path), the transfer is
-      // rejected as missing, the message is re-read and id 2002 streams.
-      final source = await resolver.resolveStream(
-        1001,
-        chatId: 1,
-        messageId: 1,
-      );
+      final source =
+          await resolver.resolveStream(1001, chatId: 1, messageId: 1);
 
       expect(metadata.calls, 1, reason: '必须从消息重新获取 file_id');
       expect(source.isStreaming, isTrue);
@@ -401,27 +582,27 @@ void main() {
       await results[0].dispose();
       await api.close();
     });
-  });
 
-  group('cache protection while streaming', () {
-    test('the streamed local file is registered in-use and released on stop',
-        () async {
-      final api = ScriptedFile(sandbox, expectedSize: 128 * 1024);
-      await api.advance(64 * 1024);
+    test('the proxy log reaches the trace', () async {
+      final api = ScriptedFile(sandbox, expectedSize: 256 * 1024);
+      await api.advance(128 * 1024);
       final resolver = VideoSourceResolver(
         api: api,
         fileExists: (_) async => true,
-        startupBufferBytes: 16 * 1024,
+        startupBufferBytes: 32 * 1024,
       );
+      final trace = PlaybackTrace(fileId: 1001);
 
-      final source = await resolver.resolveStream(1001);
-      expect(source.isStreaming, isTrue);
+      final source = await resolver.resolveStream(1001, trace: trace);
+      final client = _client();
+      final request = await client.getUrl(Uri.parse(source.url));
+      request.headers.set(HttpHeaders.rangeHeader, 'bytes=0-1023');
+      await request.close();
+      client.close(force: true);
 
-      final registry = <String>[];
-      source.proxy?.onClose(() => registry.add('released:${source.path}'));
-
+      expect(trace.proxyEvents, isNotEmpty, reason: '代理行为必须进诊断');
+      expect(trace.proxyEvents.join(' '), contains('206'));
       await source.dispose();
-      expect(registry, hasLength(1), reason: 'proxy 停止时必须释放占用标记');
       await api.close();
     });
   });

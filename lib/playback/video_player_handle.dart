@@ -30,7 +30,8 @@ class VideoPlayerFactory implements PlayerFactory {
 /// four things the task book asks for: pause, detach the listener, null out the
 /// Dart-held reference (so nothing can reach the AVPlayer afterwards) and call
 /// the plugin's dispose, which releases the underlying `AVPlayerItem`.
-class VideoPlayerHandle implements PlayerHandle, PlayerProgress, PlayerVolume, PlayerSeek {
+class VideoPlayerHandle
+    implements PlayerHandle, PlayerProgress, PlayerVolume, PlayerSeek, PlayerErrorReporter {
   /// [path] is either a local file path (complete cache) or a loopback
   /// `http://127.0.0.1/...` URL (streaming through the local range proxy).
   /// Same player, same lifecycle — only the source the AVURLAsset opens
@@ -88,6 +89,9 @@ class VideoPlayerHandle implements PlayerHandle, PlayerProgress, PlayerVolume, P
 
   @override
   bool get isPlaying => _controller?.value.isPlaying ?? false;
+
+  @override
+  String? get lastError => _error;
 
   @override
   Future<void> load() async {

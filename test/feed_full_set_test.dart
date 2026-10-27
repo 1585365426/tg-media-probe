@@ -81,6 +81,8 @@ class _FakeTransfer implements FileTransferApi {
   Future<void> start(int fileId) async {}
 
   @override
+  Future<void> startRange(int fileId, {required int offset, required int limit}) async {}
+  @override
   Future<void> cancel(int fileId) async {}
 
   @override

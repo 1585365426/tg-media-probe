@@ -204,6 +204,7 @@ class FileState {
     required this.isCompleted,
     required this.path,
     required this.canBeDownloaded,
+    this.downloadOffset = 0,
   });
 
   final int id;
@@ -213,6 +214,12 @@ class FileState {
   final bool isCompleted;
   final String path;
   final bool canBeDownloaded;
+
+  /// TDLib downloads a *window*: `downloaded_size` is the prefix already on
+  /// disk counted from `download_offset`, not from byte 0. A streaming proxy
+  /// that ignores this reads the wrong absolute range after any targeted
+  /// (offset/limit) download replaces the sequential one.
+  final int downloadOffset;
 
   static FileState fromJson(Map<String, Object?> json) {
     final local = _asMap(json['local']);
@@ -224,6 +231,7 @@ class FileState {
       isCompleted: _asBool(local['is_downloading_completed']),
       path: _asString(local['path']) ?? '',
       canBeDownloaded: _asBool(local['can_be_downloaded']),
+      downloadOffset: _asInt(local['download_offset']) ?? 0,
     );
   }
 }

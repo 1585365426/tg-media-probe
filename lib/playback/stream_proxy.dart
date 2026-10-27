@@ -5,78 +5,109 @@
 /// directly is read through a size snapshot — the player hits EOF the moment
 /// playback crosses the bytes that existed when it opened the file. A proxy
 /// controls the response boundary itself: it answers Range requests from the
-/// bytes TDLib has already written, and blocks on the bytes that have not
-/// arrived yet while the download keeps running behind it.
+/// bytes TDLib has already written, and fetches (bounded) the bytes that have
+/// not arrived yet while the download keeps running behind it.
+///
+/// The device failure this file was rebuilt around: AVPlayer does not just
+/// request byte 0. Its first requests are frequently at the *tail* of the
+/// file (moov probing) or at arbitrary offsets, while TDLib downloads from 0
+/// upward. Waiting for the sequential download to reach a tail range is what
+/// produced "缓冲 → 读取失败" on the phone. The proxy therefore *steers* the
+/// TDLib download window ([FileProgressWatch.requestWindow]) to the range the
+/// player actually asked for, serves it, and then restores the sequential
+/// download so the full-cache goal keeps advancing.
 ///
 /// Threat model for the listener: it binds 127.0.0.1 only, the URL carries a
 /// per-play random token, and unknown paths are closed immediately. Nothing is
 /// exposed to the network and the Telegram cloud URL is never revealed to the
 /// player.
-///
-/// Data source: the proxy never talks to TDLib itself. It reads the local file
-/// and watches a progress feed ([FileProgressWatch]) that the resolver owns —
-/// the same `updateFile` stream the wait loop already consumes. Keeping the
-/// proxy TDLib-free is what makes it testable with a plain temp file.
 library;
 
 import 'dart:async';
 import 'dart:io';
 import 'dart:math';
 
-/// How the proxy learns that more bytes arrived.
+/// How the proxy sees and steers the TDLib download.
 ///
-/// Implemented by the resolver over its existing `updateFile` subscription;
-/// abstracted here so tests drive byte arrival directly.
+/// TDLib keeps ONE active download per file; `downloaded_size` is the prefix
+/// already on disk counted from `download_offset` (td_api.tl, localFile). The
+/// watcher exposes that window model and lets the proxy move the window.
 abstract class FileProgressWatch {
-  /// Current absolute byte offset that is safe to read from the file.
-  int get availableBytes;
+  /// Absolute prefix from byte 0 readable right now. 0 while the window sits
+  /// elsewhere; grows again once the sequential download is restored (TDLib
+  /// resumes over the bytes already in the local file).
+  int get headBytes;
 
-  /// Fires whenever [availableBytes] grows. Never fires for a shrink.
-  Stream<int> get progress;
+  /// The last byte (inclusive) readable in one contiguous run starting at
+  /// [from], or -1 when [from] itself is not on disk. Honours the current
+  /// TDLib window, not just the head prefix.
+  int readableEndFrom(int from);
+
+  /// True when every byte of [from]..[end] (inclusive) is on disk right now,
+  /// or when the whole file is complete.
+  bool covers(int from, int end);
 
   /// Total size once known, 0 while unknown.
   int get expectedBytes;
 
   /// True once TDLib reports the whole file is on disk.
   bool get isComplete;
+
+  /// The local file backing the play. The proxy reads it directly.
+  String get localPath;
+
+  /// Moves the TDLib download window to cover [from]..[end]. Replaces the
+  /// running sequential download — that is the point: serve what the player
+  /// asked for *now* instead of waiting for the crawl.
+  Future<void> requestWindow(int from, int end);
+
+  /// Restores the sequential head download (offset 0, no limit) after a
+  /// targeted window was served.
+  Future<void> resumeSequential();
+
+  /// Fires on every TDLib state change for this file — growth, window moves,
+  /// completion. Never fires for nothing, so "no events" is a real stall.
+  Stream<void> get progress;
 }
 
 /// One served play. Owns the listener for a single file id.
 class StreamProxyServer {
   StreamProxyServer({
     required this.watch,
-    required this.localPath,
     this.startupBufferBytes = defaultStartupBufferBytes,
     this.maxWait = const Duration(seconds: 90),
     this.stallTimeout = const Duration(seconds: 20),
+    this.onEvent,
     HttpServer? injectedServer,
     Random? random,
   })  : _server = injectedServer,
         _random = random ?? Random.secure();
 
-
-  /// Bytes that must be readable before the first response byte leaves.
-  ///
-  /// Two megabytes covers a typical moov plus a couple of seconds of video at
-  /// any sane bitrate. A value larger than the file means "wait for the whole
-  /// file" — the resolver clamps it, so small videos never over-buffer.
+  /// Bytes that must sit at the head of the file before the first response
+  /// byte leaves. Two megabytes covers a typical moov plus a couple of
+  /// seconds of video at any sane bitrate. A value larger than the file means
+  /// "wait for the whole file" — the proxy clamps, so small videos never
+  /// over-buffer.
   static const int defaultStartupBufferBytes = 2 * 1024 * 1024;
-
-  final FileProgressWatch watch;
-  final String localPath;
-
-  /// Minimum readable bytes before the first response byte is written.
-  final int startupBufferBytes;
 
   /// Ceiling for one blocked wait. Bounded on purpose: "waiting forever for a
   /// byte that will never come" must end in an error the caller can fall back
   /// on, not a spinner.
   final Duration maxWait;
 
-  /// No byte growth for this long ends the wait: same semantics as the
-  /// resolver's stall watchdog, and it is the only wait that maps to a network
-  /// verdict.
+  /// No TDLib event at all for this long ends a wait: the only network
+  /// verdict in this file. Steady growth keeps resetting it — a slow download
+  /// is not a failure.
   final Duration stallTimeout;
+
+  /// Diagnostics feed, already free of paths and secrets: method, range,
+  /// status, byte counts. Wired into [PlaybackTrace] by the resolver.
+  final void Function(String event)? onEvent;
+
+  final FileProgressWatch watch;
+
+  /// Minimum readable head bytes before the first response byte is written.
+  final int startupBufferBytes;
 
   final HttpServer? _server;
   final Random _random;
@@ -85,25 +116,24 @@ class StreamProxyServer {
   String? _token;
   bool _started = false;
   int _requests = 0;
-  int _rangeRequests = 0;
-  int _waits = 0;
-  int _fallbacks = 0;
+  int _served = 0;
+  int _windowSwitches = 0;
+  int _stalls = 0;
 
-  /// Bind result: the URL the player should open, or null when the listener
-  /// could not be started (caller falls back to a full download).
+  /// Bind result: the URL the player should open.
   Uri? _url;
   Uri? get url => _url;
 
   bool get isRunning => _started;
   int get requestCount => _requests;
-  int get rangeRequestCount => _rangeRequests;
-  int get waitCount => _waits;
-  int get fallbackCount => _fallbacks;
+  int get servedCount => _served;
+  int get windowSwitches => _windowSwitches;
+  int get stallCount => _stalls;
 
   final List<void Function()> _onClose = <void Function()>[];
 
   /// Registers a callback for when the proxy stops serving (used to release
-  /// the active-file mark).
+  /// the active-file mark and dispose the watcher).
   void onClose(void Function() callback) => _onClose.add(callback);
 
   /// Binds the listener. Returns the playback URL.
@@ -131,6 +161,7 @@ class StreamProxyServer {
         cancelOnError: false,
       );
       _started = true;
+      onEvent?.call('proxy started port=${server.port}');
       return _url!;
     } on Object catch (e) {
       throw StreamProxyException('本地播放代理启动失败: $e');
@@ -150,16 +181,19 @@ class StreamProxyServer {
     // Unknown path = wrong port scan or a stale player URL. Close, don't 404:
     // a 404 body is still a response to something that should never have asked.
     if (request.uri.path != '/v/$_token') {
-      _fallbacks++;
+      onEvent?.call('req forbidden path');
       await _reject(request, HttpStatus.forbidden);
       return;
     }
     try {
       await _serveRange(request);
-    } on Object {
-      // The client socket is dead (user skipped the video mid-transfer) or the
-      // file vanished. Nothing useful can be written; just end the response.
+    } on Object catch (e) {
+      _stalls++;
+      onEvent?.call('req fail: ${_brief(e)}');
+      // The client socket is dead (user skipped the video mid-transfer) or
+      // the wait died. Nothing useful can be written; end the response.
       try {
+        request.response.statusCode = HttpStatus.serviceUnavailable;
         await request.response.close();
       } on Object {
         // ignored: the socket is already gone
@@ -172,51 +206,72 @@ class StreamProxyServer {
     await request.response.close();
   }
 
+  int _totalSize() {
+    if (watch.isComplete) {
+      try {
+        return File(watch.localPath).lengthSync();
+      } on Object {
+        return watch.expectedBytes;
+      }
+    }
+    return watch.expectedBytes > 0 ? watch.expectedBytes : 0;
+  }
+
   Future<void> _serveRange(HttpRequest request) async {
     final total = _totalSize();
-    // A HEAD (AVPlayer probes format support first) answers without a body.
+
     if (request.method == 'HEAD') {
       request.response.statusCode = HttpStatus.ok;
+      request.response.headers
+        ..set(HttpHeaders.acceptRangesHeader, 'bytes')
+        ..set(HttpHeaders.contentTypeHeader, 'video/mp4');
       if (total > 0) {
-        request.response.headers
-          ..set(HttpHeaders.acceptRangesHeader, 'bytes')
-          ..set(HttpHeaders.contentLengthHeader, total);
+        request.response.headers.contentLength = total;
       }
+      onEvent?.call('head total=$total');
       await request.response.close();
       return;
     }
 
     var from = 0;
-    int? to;
+    int? to; // inclusive; null = open-ended
     final rangeHeader = request.headers.value(HttpHeaders.rangeHeader);
     if (rangeHeader != null) {
-      _rangeRequests++;
       final parsed = _parseRange(rangeHeader, total);
       if (parsed == null) {
-        // Malformed range: AVPlayer never sends one, but answering 200 with the
-        // whole stream is the spec-correct degrade and keeps the player alive.
-        from = 0;
-        to = null;
+        // Malformed range: answer 200 with the whole stream — the spec-correct
+        // degrade — rather than a 416 the player may not recover from.
+        onEvent?.call('range malformed, serving 200');
       } else {
         from = parsed.$1;
         to = parsed.$2;
       }
     }
+    onEvent?.call('req range=$from-${to ?? 'end'} head=${watch.headBytes}');
 
-    // Wait until the requested range is servable. The first request always
-    // starts at 0, so this is where the startup buffer gate lives.
-    await _waitUntilReadable(from, to);
+    // Prepare: startup gate for the first bytes, window steering for a range
+    // the sequential download has not reached yet.
+    await _prepare(from, to, total);
 
-    final available = watch.availableBytes;
-    if (available <= from) {
-      // The wait returned but the range start is still beyond the data. This
-      // happens when the stall watchdog fired: report the gap instead of an
-      // empty 206, which AVPlayer would read as a truncated file.
+    // What can be served *right now*:
+    // * complete file → the exact requested window;
+    // * range inside the current head/window → that window;
+    // * open-ended sequential request (bytes=0- / bytes=n-) → everything from
+    //   `from` to the current readable end. AVPlayer accepts a partial 206 and
+    //   asks for the next range when it needs it — that is the progressive
+    //   contract this proxy plays into, and waiting for the FULL open-ended
+    //   range here is exactly the "缓冲到 100% 才播" failure.
+    final complete = watch.isComplete;
+    final readableEnd = complete
+        ? (total > 0 ? total - 1 : watch.expectedBytes - 1)
+        : watch.readableEndFrom(from);
+    if (readableEnd < from) {
+      // The window move did not deliver: refuse with the real numbers instead
+      // of an empty 206 the player would read as a truncated file.
       throw StreamProxyException(
-          '本地还没有播放器请求的数据（需要 $from，已有 $available）');
+          '请求的数据未就绪（需要 $from，可读 ${readableEnd + 1}）');
     }
-
-    final end = (to != null && to < available - 1) ? to : available - 1;
+    final end = (to != null) ? min(to, readableEnd) : readableEnd;
     final length = end - from + 1;
 
     final response = request.response;
@@ -227,96 +282,101 @@ class StreamProxyServer {
       ..set(HttpHeaders.contentRangeHeader, 'bytes $from-$end/$total');
     response.contentLength = length;
 
-    // Stream exactly the requested window from the file. `openRead` skips the
-    // OS copy: bytes flow disk → socket without buffering the range in memory.
-    final file = File(localPath);
+    final file = File(watch.localPath);
     if (!await file.exists()) {
       throw StreamProxyException('本地文件在播放中途消失');
     }
+    _served++;
+    onEvent?.call('serve 206 $from-$end/$total ${length}B');
     await response.addStream(file.openRead(from, end + 1));
     await response.close();
-  }
 
-  int _totalSize() {
-    final complete = watch.isComplete;
-    if (complete) {
-      final actual = File(localPath).lengthSync();
-      return actual;
+    // A targeted window is a detour, not the destination: put the sequential
+    // download back so the play keeps building toward a complete cache.
+    if (from >= watch.headBytes && !complete) {
+      unawaited(watch.resumeSequential());
     }
-    final expected = watch.expectedBytes;
-    return expected > 0 ? expected : 0;
   }
 
-  /// Blocks until [from] (and the tail of a closed range, when cheap) is
-  /// readable, or throws when the wait dies.
+  /// Makes the requested range servable, or throws with the real numbers.
   ///
-  /// The gate: startup requests wait for the startup buffer, mid-play requests
-  /// wait only for their own range start. Progress growth keeps the wait alive
-  /// — that is the whole "still downloading is not a failure" rule.
-  Future<void> _waitUntilReadable(int from, int? to) async {
-    // Small videos must not wait for an artificial buffer: the gate is
-    // min(startupBuffer, whole file).
-    final expected = watch.expectedBytes;
-    var target = from;
-    if (from == 0 && expected > 0) {
-      target = _min(startupBufferBytes, expected);
-    } else if (from == 0) {
-      target = startupBufferBytes;
-    }
-    // A closed range whose end is inside the startup window is gated by the
-    // range end, not the buffer: the player asked for exactly that metadata.
-    if (to != null && to >= from && to - from < startupBufferBytes) {
-      target = to;
+  /// Three cases, deliberately distinct:
+  /// 1. first paint (`from == 0`, nothing served yet) → startup gate;
+  /// 2. inside the head prefix → nothing to do, serve progressively;
+  /// 3. beyond the head (tail probe, arbitrary seek) → steer the TDLib window
+  ///    to exactly that range and wait for it. **This is the fix for the
+  ///    device failure** — the old proxy just waited for the sequential
+  ///    download to crawl to a tail range, which it never does in time.
+  Future<void> _prepare(int from, int? to, int total) async {
+    final gate = total > 0 ? min(total, startupBufferBytes) : startupBufferBytes;
+    if (from == 0 && _served == 0 && watch.headBytes < gate) {
+      onEvent?.call('gate wait ${gate}B (head=${watch.headBytes})');
+      await _waitFor(() => watch.headBytes >= gate || watch.isComplete,
+          label: 'startup');
+      onEvent?.call('gate ok ${watch.headBytes}B');
     }
 
-    var waited = false;
-    while (watch.availableBytes <= target && !watch.isComplete) {
-      waited = true;
-      _waits++;
-      await _waitForGrowth();
-    }
-    // A complete file can serve any range regardless of the gate.
-    if (waited && !watch.isComplete && watch.availableBytes <= target) {
-      throw StreamProxyException('等待播放数据超时');
-    }
+    if (watch.isComplete) return;
+    // Anything the head prefix already covers is servable right away.
+    if (from < watch.headBytes) return;
+
+    final needEnd = to ?? (total > 0 ? total - 1 : from);
+    if (watch.covers(from, min(needEnd, _readableCeiling(total)))) return;
+
+    // Steer the download to the range the player actually wants.
+    final end = min(needEnd, max(0, total - 1));
+    _windowSwitches++;
+    onEvent?.call('window→$from-$end (head=${watch.headBytes})');
+    await watch.requestWindow(from, end);
+    await _waitFor(
+      () => watch.covers(from, min(end, _readableCeiling(total))) ||
+          watch.isComplete,
+      label: 'window $from-$end',
+    );
   }
 
-  /// One wait: until new bytes arrive, the transfer stalls, or the ceiling is
-  /// hit. Growth resets the stall timer; silence for [stallTimeout] is the only
-  /// network verdict in this file.
-  Future<void> _waitForGrowth() async {
-    final start = watch.availableBytes;
-    final growth = watch.progress;
+  int _readableCeiling(int total) => total > 0 ? total - 1 : 1 << 40;
+
+  /// Waits until [ready] is true. **Every TDLib event resets the stall
+  /// timer** — a slow but moving download never trips it; only real silence
+  /// (no updateFile at all for [stallTimeout]) does.
+  Future<void> _waitFor(bool Function() ready, {required String label}) async {
     final stall = Completer<void>();
     final ceiling = Completer<void>();
-    final stallTimer = Timer(stallTimeout, () {
-      if (watch.availableBytes > start) return;
-      stall.complete();
-    });
-    final ceilingTimer = Timer(maxWait, ceiling.complete);
-    late final StreamSubscription<int> sub;
-    sub = growth.listen((_) {
-      if (watch.availableBytes > start) {
+    Timer? stallTimer;
+    void arm() {
+      stallTimer?.cancel();
+      stallTimer = Timer(stallTimeout, () {
+        if (!ready() && !stall.isCompleted) stall.complete();
+      });
+    }
+
+    arm();
+    late final StreamSubscription<void> sub;
+    sub = watch.progress.listen((_) {
+      if (ready()) {
         if (!stall.isCompleted) stall.complete();
+      } else {
+        arm(); // 有动静：慢，但不是失败
       }
+    });
+    final ceilingTimer = Timer(maxWait, () {
+      if (!ceiling.isCompleted) ceiling.complete();
     });
     try {
       await Future.any(<Future<void>>[stall.future, ceiling.future]);
     } finally {
-      stallTimer.cancel();
+      stallTimer?.cancel();
       ceilingTimer.cancel();
       await sub.cancel();
     }
-    if (ceiling.isCompleted && !stall.isCompleted) {
-      throw StreamProxyException('等待播放数据超时（任务上限）');
-    }
-    if (stall.isCompleted && watch.availableBytes <= start) {
-      throw StreamProxyException('等待播放数据超时（无新数据）');
+    if (!ready()) {
+      onEvent?.call('wait fail $label');
+      throw StreamProxyException(
+          '等待播放数据超时（$label，可读 ${watch.headBytes}B）');
     }
   }
 
-  /// `bytes=a-b`, `bytes=a-`, `bytes=-suffix`. Returns (from, to) with `to`
-  /// inclusive, or null when the header cannot be honoured.
   (int, int?)? _parseRange(String header, int total) {
     final match = RegExp(r'^bytes=(\d*)-(\d*)').firstMatch(header.trim());
     if (match == null) return null;
@@ -324,13 +384,11 @@ class StreamProxyServer {
     final b = match.group(2)!;
     if (a.isEmpty && b.isEmpty) return null;
     if (a.isEmpty) {
-      // suffix range: last N bytes. TDLib growth makes these awkward; the
-      // player uses them for moov-at-end probes. Serving from max(0, total-N)
-      // keeps the probe alive and the fallback path covers the rest.
+      // suffix range: last N bytes — the moov-at-the-end probe. The window
+      // steering above is what serves it in time.
       final suffix = int.parse(b);
       if (total <= 0) return null;
-      final from = max(0, total - suffix);
-      return (from, null);
+      return (max(0, total - suffix), null);
     }
     final from = int.parse(a);
     final to = b.isEmpty ? null : int.parse(b);
@@ -360,6 +418,11 @@ class StreamProxyServer {
       }
     }
   }
+
+  static String _brief(Object e) {
+    final text = '$e';
+    return text.length > 80 ? text.substring(0, 80) : text;
+  }
 }
 
 class StreamProxyException implements Exception {
@@ -370,5 +433,3 @@ class StreamProxyException implements Exception {
   @override
   String toString() => 'StreamProxyException: $message';
 }
-
-int _min(int a, int b) => a < b ? a : b;
