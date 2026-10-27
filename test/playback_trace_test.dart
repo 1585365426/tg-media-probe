@@ -10,6 +10,10 @@ import 'package:tg_media_probe/playback/video_source.dart';
 import 'package:tg_media_probe/td/td_models.dart';
 
 class _Api implements FileTransferApi {
+  @override
+  Future<void> prefetch(int fileId) =>
+      startRange(fileId, offset: 0, limit: 0);
+
   _Api({
     this.completedSize,
     this.expectedSize = 1000,

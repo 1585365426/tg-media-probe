@@ -22,6 +22,10 @@ import UIKit
     OrientationChannel.register(messenger: messenger)
     VideoMetaChannel.register(messenger: messenger)
     BiometricChannel.register(messenger: messenger)
+    // Streaming V2: AVAssetResourceLoader + AVPlayer bridge. Registered on the
+    // application registrar so it exists before the first frame — the resource
+    // loader can be asked for bytes the moment a player is created.
+    TGMediaStreamingPlugin.register(with: engineBridge.applicationRegistrar)
   }
 
   /// UIKit consults the app delegate before any view controller. Flutter's

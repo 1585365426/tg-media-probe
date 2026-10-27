@@ -157,6 +157,10 @@ class FakeTracker {
 }
 
 class FakeTransferApi implements FileTransferApi {
+  @override
+  Future<void> prefetch(int fileId) =>
+      startRange(fileId, offset: 0, limit: 0);
+
   FakeTransferApi({this.autoComplete = true});
 
   /// When true, `start()` completes the transfer on the next microtask.
@@ -218,8 +222,13 @@ class FakeTransferApi implements FileTransferApi {
     }
   }
 
+  /// The warm start (prefetch) sends offset 0 / limit 0 through here. It is a
+  /// real TDLib request and nothing else: no completion update, no path, so a
+  /// preload can never turn into "ready to play".
   @override
-  Future<void> startRange(int fileId, {required int offset, required int limit}) async {}
+  Future<void> startRange(int fileId, {required int offset, required int limit}) async {
+    startedIds.add(fileId);
+  }
   @override
   Future<void> cancel(int fileId) async {
     cancelled.add(fileId);

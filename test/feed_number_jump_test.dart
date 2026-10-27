@@ -52,6 +52,10 @@ class _Factory implements PlayerFactory {
 
 class _Transfer implements FileTransferApi {
   @override
+  Future<void> prefetch(int fileId) =>
+      startRange(fileId, offset: 0, limit: 0);
+
+  @override
   Future<FileState?> stat(int fileId) async => FileState(
         id: fileId,
         size: 1024,

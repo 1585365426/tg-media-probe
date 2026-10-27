@@ -18,6 +18,7 @@ import '../app/app_preferences.dart';
 import '../app/app_session.dart';
 import '../platform/orientation_controller.dart';
 import '../platform/orientation_coordinator.dart';
+import '../playback/native_streaming.dart';
 import '../playback/player_slot.dart';
 import '../playback/video_player_handle.dart';
 import '../playback/video_source.dart';
@@ -430,11 +431,15 @@ class _FeedPageState extends State<FeedPage> with WidgetsBindingObserver {
   Widget _buildPage(FeedController controller, int index) {
     final isCurrent = index == controller.index;
     final handle = controller.player.active;
+    // Streaming V2 renders through the native `AVPlayerLayer`; the feed keeps
+    // owning every gesture, overlay and page transition around it.
+    final native = handle is NativeStreamPlayerHandle ? handle : null;
     final controllerValue = handle is VideoPlayerHandle
         ? handle.controller?.value
         : null;
-    final initialized =
-        isCurrent && controllerValue != null && controllerValue.isInitialized;
+    final initialized = isCurrent &&
+        (native != null ||
+            (controllerValue != null && controllerValue.isInitialized));
 
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
@@ -445,7 +450,9 @@ class _FeedPageState extends State<FeedPage> with WidgetsBindingObserver {
       child: ColoredBox(
         color: AppTheme.feedBackground,
         child: initialized
-            ? _buildVideoSurface(controllerValue)
+            ? (native != null
+                ? NativePlayerView(sessionId: native.sessionId)
+                : _buildVideoSurface(controllerValue!))
             : _buildBuffering(controller, isCurrent),
       ),
     );

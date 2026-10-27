@@ -43,6 +43,10 @@ MediaRecord video(
 
 /// A transfer that emits exactly the updates it is told to, with real delays.
 class ScriptedTransfer implements FileTransferApi {
+  @override
+  Future<void> prefetch(int fileId) =>
+      startRange(fileId, offset: 0, limit: 0);
+
   ScriptedTransfer({
     this.expectedSize = 4096,
     this.chunkBytes = 0,

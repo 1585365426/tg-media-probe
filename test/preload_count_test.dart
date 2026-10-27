@@ -57,6 +57,10 @@ class _Factory implements PlayerFactory {
 
 /// Counts transfers and lets a test pick which file ids fail or are instant.
 class _Transfer implements FileTransferApi {
+  @override
+  Future<void> prefetch(int fileId) =>
+      startRange(fileId, offset: 0, limit: 0);
+
   _Transfer({this.localIds = const <int>{}, this.failIds = const <int>{}});
 
   final Set<int> localIds;
@@ -100,7 +104,12 @@ class _Transfer implements FileTransferApi {
   }
 
   @override
-  Future<void> startRange(int fileId, {required int offset, required int limit}) async {}
+  Future<void> startRange(int fileId, {required int offset, required int limit}) async {
+    if (failIds.contains(fileId)) {
+      throw VideoSourceException('TDLib error 400: FILE_ID_INVALID');
+    }
+    started.add(fileId);
+  }
   @override
   Future<void> cancel(int fileId) async => cancelled.add(fileId);
 

@@ -158,6 +158,18 @@ class StreamingDiagnostics extends ChangeNotifier {
   /// about to open — never inferred afterwards.
   String? _playerSourceType;
 
+  // ---- Streaming V2 (AVAssetResourceLoader) -------------------------------
+  //
+  // Counted separately from the V1 HTTP numbers on purpose. A V2 run has no
+  // 206 and no Content-Range, and reading its result through the V1 counters
+  // would report "streaming never started" for a perfectly good play.
+  int _rlSessions = 0;
+  int _rlRequests = 0;
+  int _rlResponds = 0;
+  int _rlBytes = 0;
+  int _rlStalls = 0;
+  String? _rlContentInfo;
+
   /// The exact URL the player opened in STREAM_HTTP mode.
   String? _proxyUrl;
 
@@ -181,8 +193,55 @@ class StreamingDiagnostics extends ChangeNotifier {
   /// Exchanges where the player asked for more bytes than it received.
   int _truncatedCount = 0;
 
+  /// Exchanges whose body carried fewer bytes than their `Content-Length`,
+  /// for any reason (stall or client close).
+  int _incompleteCount = 0;
+
+  /// Exchanges whose `Content-Length` did not match the span the request
+  /// asked for. This must stay 0: it is the "headers lie" defect.
+  int _headerMismatchCount = 0;
+
   /// Requests that asked for bytes away from 0 — a moov probe or a seek.
   int _forwardRangeRequests = 0;
+
+  /// Which play these numbers belong to.
+  ///
+  /// Incremented by [beginPlay]; every resolver-side writer passes the value
+  /// it captured when its play started. A watcher, proxy or parser left over
+  /// from a superseded play can therefore never write into the live block —
+  /// that leak is what once showed "300 MB → 302 MB" growth for a 23 MB video.
+  int _generation = 0;
+
+  /// The current play generation. Everything recorded against an older one is
+  /// dropped, and the resource loader uses the same number to refuse a byte
+  /// from a video the user already left.
+  int get generation => _generation;
+
+  /// `clicked → active → player`, the three identities every device report
+  /// has to be able to compare. `clicked` is the list item, `active` the
+  /// record the controller claimed, `player` what was handed to the player.
+  int? _clickedFileId;
+  int? _activeFileId;
+  int? _playerFileId;
+  int? _clickedChatId;
+  int? _clickedMessageId;
+  int? _activeChatId;
+  int? _activeMessageId;
+
+  int? get clickedFileId => _clickedFileId;
+  int? get activeFileId => _activeFileId;
+  int? get playerFileId => _playerFileId;
+
+  /// True when the tapped video, the claimed video and the played video are
+  /// the same file. Null-safe: while fewer than three are known it returns
+  /// true (nothing has contradicted anything yet), and the report prints `-`.
+  bool get identityOk {
+    final ids = <int?>[_clickedFileId, _activeFileId, _playerFileId]
+        .whereType<int>()
+        .where((id) => id != 0)
+        .toSet();
+    return ids.length <= 1;
+  }
 
   /// Where the `moov` atom sits, scanned from the bytes on disk.
   MoovPosition _moov = MoovPosition.unknown;
@@ -270,6 +329,12 @@ class StreamingDiagnostics extends ChangeNotifier {
 
   List<ProxyExchange> get exchanges => List<ProxyExchange>.unmodifiable(_exchanges);
   int get truncatedCount => _truncatedCount;
+
+  /// 206 bodies that carried fewer bytes than their `Content-Length`.
+  int get incompleteCount => _incompleteCount;
+
+  /// 206 headers whose `Content-Length` did not match `Content-Range`.
+  int get headerMismatchCount => _headerMismatchCount;
   int get forwardRangeRequests => _forwardRangeRequests;
   MoovPosition get moov => _moov;
   int? get playerCreatedMillis => _playerCreatedMillis;
@@ -293,6 +358,14 @@ class StreamingDiagnostics extends ChangeNotifier {
   int get partialContentCount => _partialContentCount;
   bool get sawPartialContent => _partialContentCount > 0;
   int get windowMoves => _windowMoves;
+
+  /// Streaming V2 counters, as the native loader reported them.
+  int get resourceLoaderRequests => _rlRequests;
+  int get resourceLoaderResponds => _rlResponds;
+  int get resourceLoaderBytes => _rlBytes;
+  int get resourceLoaderStalls => _rlStalls;
+  int get resourceLoaderSessions => _rlSessions;
+  String? get resourceLoaderContentInfo => _rlContentInfo;
   int get stalls => _stalls;
   String? get lastStallReason => _lastStallReason;
 
@@ -370,7 +443,9 @@ class StreamingDiagnostics extends ChangeNotifier {
     // proxy and never served a byte is a decision made before the pipeline
     // started, and the report has to say NOT_STARTED with a reason — calling
     // it STREAMING_FALLBACK was exactly the mislabel the device report caught.
-    final attempted = _proxyStartedMillis != null || _rangeRequests > 0;
+    final attempted = _proxyStartedMillis != null ||
+        _rangeRequests > 0 ||
+        _rlRequests > 0;
     if (_fallback && !attempted) return StreamingVerdict.streamingNotStarted;
     if (_fallback) return StreamingVerdict.fallbackUsed;
     final atFirstPlayback = _firstPlaybackDownloadedBytes;
@@ -396,10 +471,18 @@ class StreamingDiagnostics extends ChangeNotifier {
     if (!_streamingEnabled || _playerSourceType == 'LOCAL_FILE') {
       return StreamingVerdict.streamingNotStarted;
     }
-    // No 206 or no Range request means the player was never served from a
-    // partial file, whatever the source URL looked like. In the forced test
-    // that is a definite failure, not an open question.
-    if (!sawPartialContent || _rangeRequests == 0) {
+    // V2 has no status line: what proves the player was served from a partial
+    // file is a data request that really carried bytes.
+    final servedV2 = _rlRequests > 0 && _rlBytes > 0;
+    if (!sawPartialContent && !servedV2) {
+      return _forceTestAtPlay
+          ? StreamingVerdict.streamingNotStarted
+          : StreamingVerdict.unknown;
+    }
+    // A V2 play that answered nothing at all is not evidence of anything, even
+    // if the transport was chosen.
+    if (servedV2) return StreamingVerdict.streamingActive;
+    if (_rangeRequests == 0) {
       return _forceTestAtPlay
           ? StreamingVerdict.streamingNotStarted
           : StreamingVerdict.unknown;
@@ -448,8 +531,9 @@ class StreamingDiagnostics extends ChangeNotifier {
     bool? fileComplete,
     String? decision,
     String? reason,
+    int? generation,
   }) {
-    if (_sealedResult) return;
+    if (_sealedResult || _stale(generation)) return;
     if (preference != null) _decisionPreference = preference;
     if (force != null) _decisionForce = force;
     if (candidate != null) _decisionCandidate = candidate;
@@ -470,12 +554,89 @@ class StreamingDiagnostics extends ChangeNotifier {
   /// `STREAM_HTTP` carries the loopback URL so the report can show the exact
   /// address AVPlayer streamed from; `LOCAL_FILE` is a full-download play and
   /// forces the verdict off `STREAMING_CONFIRMED`.
-  void notePlayerSource({required bool isStreaming, required String url}) {
-    if (_sealedResult) return;
-    _playerSourceType = isStreaming ? 'STREAM_HTTP' : 'LOCAL_FILE';
-    _proxyUrl = isStreaming ? url : null;
+  void notePlayerSource({
+    required bool isStreaming,
+    required String url,
+    int? generation,
+    String? sourceLabel,
+  }) {
+    if (_sealedResult || _stale(generation)) return;
+    if (sourceLabel != null) {
+      // A V2 play names its own transport (`RESOURCE_LOADER`); the two
+      // booleans above can only say "some kind of stream", which is no longer
+      // enough to tell which transport served the bytes.
+      _playerSourceType = sourceLabel;
+      _proxyUrl = sourceLabel == 'RESOURCE_LOADER' ? url : null;
+    } else {
+      _playerSourceType = isStreaming ? 'STREAM_HTTP' : 'LOCAL_FILE';
+      _proxyUrl = isStreaming ? url : null;
+    }
     _note('playerSource=$_playerSourceType');
     notifyListeners();
+  }
+
+  /// Streaming V2: the resource loader exists for this play.
+  void noteResourceLoaderSession({int? generation}) {
+    if (_sealedResult || _stale(generation)) return;
+    _rlSessions++;
+    _note('RL session #$_rlSessions');
+    notifyListeners();
+  }
+
+  /// Streaming V2: the content information block AVFoundation was given.
+  void noteResourceLoaderContentInfo({
+    required int total,
+    required String contentType,
+    required bool byteRangeAccessSupported,
+    required bool entireLengthOnDemand,
+    int? generation,
+  }) {
+    if (_sealedResult || _stale(generation)) return;
+    _rlContentInfo = 'total=$total type=$contentType '
+        'byteRange=$byteRangeAccessSupported onDemand=$entireLengthOnDemand';
+    _note('RL contentInfo $_rlContentInfo');
+    notifyListeners();
+  }
+
+  /// Streaming V2: one `AVAssetResourceLoadingDataRequest`.
+  void noteResourceLoaderRequest({
+    required int offset,
+    required int length,
+    int? generation,
+  }) {
+    if (_sealedResult || _stale(generation)) return;
+    _rlRequests++;
+    _note('RL request #$_rlRequests offset=$offset len=$length');
+    notifyListeners();
+  }
+
+  /// Streaming V2: bytes that really went to the player.
+  void noteResourceLoaderRespond({
+    required int bytes,
+    required int offset,
+    int? generation,
+  }) {
+    if (_sealedResult || _stale(generation)) return;
+    _rlResponds++;
+    _rlBytes += bytes;
+    _note('RL respond #$_rlResponds offset=$offset bytes=$bytes '
+        'total=$_rlBytes');
+    notifyListeners();
+  }
+
+  /// Streaming V2: a data request gave up, with the reason the supply gave.
+  void noteResourceLoaderStall(String reason, {int? generation}) {
+    if (_sealedResult || _stale(generation)) return;
+    _rlStalls++;
+    _note('RL stall #$_rlStalls $reason');
+    notifyListeners();
+  }
+
+  /// Streaming V2 free-form event (session open/close, steering, off-by-default
+  /// platform refusal). Kept as text because it is read by a human on a device.
+  void noteResourceLoader(String text, {int? generation}) {
+    if (_sealedResult || _stale(generation)) return;
+    _note('RL $text');
   }
 
   /// The tapped list item, as the local index has it.
@@ -495,24 +656,55 @@ class StreamingDiagnostics extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// One stage of the play pipeline, tagged with the ids it belongs to.
+  ///
+  /// The six stages a device report needs — CLICKED / ACTIVE / RESOLVE /
+  /// PROXY / PLAYER / PRELOAD — all write the same three ids, so a run can
+  /// prove `clickedFileId == activeFileId == playerFileId` instead of
+  /// assuming it. A mismatch is a defect, not a display quirk.
+  void noteStage(
+    String stage, {
+    int? chatId,
+    int? messageId,
+    int? fileId,
+    int? generation,
+  }) {
+    if (_sealedResult || _stale(generation)) return;
+    if (stage == 'CLICKED') {
+      _clickedFileId = fileId;
+      _clickedChatId = chatId;
+      _clickedMessageId = messageId;
+    } else if (stage == 'ACTIVE') {
+      _activeFileId = fileId;
+      _activeChatId = chatId;
+      _activeMessageId = messageId;
+    } else if (stage == 'PLAYER') {
+      _playerFileId = fileId;
+    }
+    _note('$stage chat=${chatId ?? '-'} msg=${messageId ?? '-'} '
+        'file=${fileId ?? '-'}');
+  }
+
   /// The full HTTP exchange, as the proxy really wrote it.
   ///
   /// Counters stay with [noteRangeRequest] / [noteResponse] — this one keeps
   /// the per-request detail the acceptance asks for: what was asked, what was
   /// declared, how many bytes actually went into the socket.
-  void noteExchange(ProxyExchange exchange) {
-    if (_sealedResult) return;
+  void noteExchange(ProxyExchange exchange, {int? generation}) {
+    if (_sealedResult || _stale(generation)) return;
     _exchanges.add(exchange);
     if (_exchanges.length > _maxExchanges) _exchanges.removeAt(0);
     if (exchange.truncated) _truncatedCount++;
+    if (!exchange.bodyComplete) _incompleteCount++;
+    if (!exchange.lengthMatchesRequest) _headerMismatchCount++;
     if (exchange.isForwardRange) _forwardRangeRequests++;
     _note('http ${exchange.describe()}');
     notifyListeners();
   }
 
   /// Where `moov` sits, scanned from the bytes on disk by the resolver.
-  void noteMoov(MoovPosition position) {
-    if (_sealedResult) return;
+  void noteMoov(MoovPosition position, {int? generation}) {
+    if (_sealedResult || _stale(generation)) return;
     if (_moov == position) return;
     _moov = position;
     _note('moov=${position.name}');
@@ -520,24 +712,24 @@ class StreamingDiagnostics extends ChangeNotifier {
   }
 
   /// The player object was constructed for this play.
-  void notePlayerCreated() {
-    if (_sealedResult) return;
+  void notePlayerCreated({int? generation}) {
+    if (_sealedResult || _stale(generation)) return;
     _playerCreatedMillis ??= _elapsed();
     _note('player created');
     notifyListeners();
   }
 
   /// `initialize()` returned: AVPlayerItem reached readyToPlay.
-  void notePlayerReady() {
-    if (_sealedResult) return;
+  void notePlayerReady({int? generation}) {
+    if (_sealedResult || _stale(generation)) return;
     _playerReadyMillis ??= _elapsed();
     _note('player ready');
     notifyListeners();
   }
 
   /// `initialize()` failed or timed out. [reason] is the player's own message.
-  void notePlayerFailed(String reason) {
-    if (_sealedResult) return;
+  void notePlayerFailed(String reason, {int? generation}) {
+    if (_sealedResult || _stale(generation)) return;
     _playerFailedMillis ??= _elapsed();
     _playerFailedText ??= _sanitize(reason);
     _note('player failed: $_playerFailedText');
@@ -548,7 +740,7 @@ class StreamingDiagnostics extends ChangeNotifier {
   ///
   /// [streaming] is the resolver's decision, recorded as such — it is *not*
   /// treated as proof (see [verdict]).
-  void beginPlay({
+  int beginPlay({
     required int fileId,
     required bool streaming,
     int? chatId,
@@ -558,7 +750,10 @@ class StreamingDiagnostics extends ChangeNotifier {
     // A settled acceptance result is frozen: browsing afterwards must not
     // replace the verdict the run produced (this was the "ghost panel" hole
     // in reverse — a later LOCAL_FILE play overwriting a real run).
-    if (_sealedResult) return;
+    if (_sealedResult) return _generation;
+    // New play, new generation: every callback from the previous one is now
+    // stale by construction, whatever it was still holding.
+    _generation++;
     _forceTestAtPlay = _forceTest;
     _streamingEnabled = streaming;
     _fileId = fileId;
@@ -599,7 +794,15 @@ class StreamingDiagnostics extends ChangeNotifier {
     _first206Millis = null;
     _exchanges.clear();
     _truncatedCount = 0;
+    _incompleteCount = 0;
+    _headerMismatchCount = 0;
     _forwardRangeRequests = 0;
+    _rlSessions = 0;
+    _rlRequests = 0;
+    _rlResponds = 0;
+    _rlBytes = 0;
+    _rlStalls = 0;
+    _rlContentInfo = null;
     _moov = MoovPosition.unknown;
     _playerCreatedMillis = null;
     _playerReadyMillis = null;
@@ -617,6 +820,7 @@ class StreamingDiagnostics extends ChangeNotifier {
     _growth.clear();
     _events.clear();
     notifyListeners();
+    return _generation;
   }
 
   /// Arms a fresh acceptance run: clears every piece of evidence so the next
@@ -645,16 +849,16 @@ class StreamingDiagnostics extends ChangeNotifier {
 
   /// The resolver picked the streaming branch. **Recorded, not trusted**: it
   /// only says which path was taken. [verdict] still waits for the data.
-  void noteStreamingSelected() {
-    if (_sealedResult) return;
+  void noteStreamingSelected({int? generation}) {
+    if (_sealedResult || _stale(generation)) return;
     _streamingEnabled = true;
     notifyListeners();
   }
 
   /// The range proxy bound its port and the player URL exists. `url` is the
   /// exact `http://127.0.0.1:port/<token>` the player will be handed.
-  void noteProxyStarted(String url) {
-    if (_sealedResult) return;
+  void noteProxyStarted(String url, {int? generation}) {
+    if (_sealedResult || _stale(generation)) return;
     _proxyStartedMillis ??= _elapsed();
     _proxyUrl = url;
     _note('proxy started');
@@ -668,8 +872,9 @@ class StreamingDiagnostics extends ChangeNotifier {
     required int downloadOffset,
     required bool completed,
     bool isDownloading = true,
+    int? generation,
   }) {
-    if (_sealedResult) return;
+    if (_sealedResult || _stale(generation)) return;
     _downloadedBytes = downloadedBytes;
     if (totalBytes > 0) _totalBytes = totalBytes;
     _downloadOffset = downloadOffset;
@@ -691,18 +896,19 @@ class StreamingDiagnostics extends ChangeNotifier {
 
   /// Same as [updateTransfer], straight from a parsed [FileState] — the shape
   /// `updateFile` already gives, so the caller cannot misread the window.
-  void updateTransferFromState(FileState state) {
+  void updateTransferFromState(FileState state, {int? generation}) {
     updateTransfer(
       downloadedBytes: state.downloadedSize,
       totalBytes: state.expectedSize,
       downloadOffset: state.downloadOffset,
       completed: state.isCompleted,
+      generation: generation,
     );
   }
 
   /// The player asked for a byte range. Straight from the proxy's request.
-  void noteRangeRequest({required int from, int? to}) {
-    if (_sealedResult) return;
+  void noteRangeRequest({required int from, int? to, int? generation}) {
+    if (_sealedResult || _stale(generation)) return;
     _rangeRequests++;
     _firstRangeMillis ??= _elapsed();
     _lastRange = '$from-${to ?? 'end'}';
@@ -719,8 +925,9 @@ class StreamingDiagnostics extends ChangeNotifier {
     required int end,
     required int total,
     required int length,
+    int? generation,
   }) {
-    if (_sealedResult) return;
+    if (_sealedResult || _stale(generation)) return;
     _lastStatus = status;
     if (status == 206) {
       _partialContentCount++;
@@ -731,8 +938,8 @@ class StreamingDiagnostics extends ChangeNotifier {
   }
 
   /// The proxy moved the TDLib download window to serve a distant range.
-  void noteWindowMove(int start, int end) {
-    if (_sealedResult) return;
+  void noteWindowMove(int start, int end, {int? generation}) {
+    if (_sealedResult || _stale(generation)) return;
     _windowMoves++;
     _windowStart = start;
     _windowEnd = end;
@@ -740,8 +947,8 @@ class StreamingDiagnostics extends ChangeNotifier {
   }
 
   /// No TDLib progress for a whole quiet window: a real stall, not slowness.
-  void noteStall(String reason) {
-    if (_sealedResult) return;
+  void noteStall(String reason, {int? generation}) {
+    if (_sealedResult || _stale(generation)) return;
     _stalls++;
     _lastStallReason = reason;
     _note('stall $reason');
@@ -751,8 +958,8 @@ class StreamingDiagnostics extends ChangeNotifier {
   ///
   /// The reason is redacted here: it can carry a TDLib message with a container
   /// path, and this text is what reaches the diagnostics export.
-  void noteFallback(String reason) {
-    if (_sealedResult) return;
+  void noteFallback(String reason, {int? generation}) {
+    if (_sealedResult || _stale(generation)) return;
     _fallback = true;
     _fallbackReason = redactText(reason);
     _streamingEnabled = false;
@@ -760,8 +967,8 @@ class StreamingDiagnostics extends ChangeNotifier {
   }
 
   /// TDLib reported the whole file on disk.
-  void noteCompleted({int? totalBytes}) {
-    if (_sealedResult) return;
+  void noteCompleted({int? totalBytes, int? generation}) {
+    if (_sealedResult || _stale(generation)) return;
     if (!_isDownloadingCompleted) {
       _isDownloadingCompleted = true;
       _downloadCompletedMillis = _elapsed();
@@ -784,8 +991,9 @@ class StreamingDiagnostics extends ChangeNotifier {
     required bool isPlaying,
     required bool isBuffering,
     String? error,
+    int? generation,
   }) {
-    if (_sealedResult) return;
+    if (_sealedResult || _stale(generation)) return;
     _playerTime = position;
     _playerDuration = duration;
     _playerError = error;
@@ -845,6 +1053,12 @@ class StreamingDiagnostics extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// True when [generation] belongs to a play that is no longer the current
+  /// one. `null` means an unguarded caller (the feed controller, which has
+  /// its own generation gate) and is accepted.
+  bool _stale(int? generation) =>
+      generation != null && generation != _generation;
+
   /// Lines for the settings diagnostics section. Raw counts, no decoration.
   List<String> panelLines() => <String>[
         // The three lines that make "the test mode was actually on"
@@ -873,6 +1087,10 @@ class StreamingDiagnostics extends ChangeNotifier {
         'record file=${_recordFileId ?? '-'} msg=${_recordMessageId ?? '-'} '
             'size=$_recordSizeBytes B',
         'tdlib total=$_totalBytes B ${_sizeMatchLabel()}',
+        'identity clicked=${_clickedFileId ?? '-'} '
+            'active=${_activeFileId ?? '-'} '
+            'player=${_playerFileId ?? '-'} '
+            '${identityOk ? 'OK' : 'BUG'}',
         'total=$_totalBytes B downloaded=$_downloadedBytes B '
             '(${_percentString()})',
         'head=$_headBytes B downloadOffset=$_downloadOffset',
@@ -883,6 +1101,9 @@ class StreamingDiagnostics extends ChangeNotifier {
             'status=${_lastStatus ?? '-'} 206x$_partialContentCount',
         'range truncated=$_truncatedCount forward=$_forwardRangeRequests '
             'moov=${_moov.name}',
+        if (_playerSourceType == 'RESOURCE_LOADER' || _rlRequests > 0)
+          'v2 sessions=$_rlSessions req=$_rlRequests resp=$_rlResponds '
+              'bytes=$_rlBytes stalls=$_rlStalls',
         // One line per exchange, newest last: what the player asked for, what
         // the proxy declared, and how many bytes really went out.
         for (final exchange in _exchanges.reversed.take(4))
@@ -1005,7 +1226,38 @@ class StreamingDiagnostics extends ChangeNotifier {
         lines.add('  ${exchange.describe()}');
       }
     }
+    // Which transport served the bytes. V2 runs through
+    // AVAssetResourceLoader on a `tgmedia://` URL and never opens a socket;
+    // V1 runs over the loopback HTTP proxy. A report that cannot name the
+    // transport cannot be read correctly.
+    if (_playerSourceType == 'RESOURCE_LOADER') {
+      lines.add('STREAMING V2');
+      lines.add('source=AVASSET_RESOURCE_LOADER scheme=tgmedia');
+      lines.add('resourceLoaderRequests=$_rlRequests '
+          'responds=$_rlResponds respondBytes=$_rlBytes stalls=$_rlStalls');
+      if (_rlContentInfo != null) lines.add('contentInfo=$_rlContentInfo');
+    } else if (_playerSourceType == 'STREAM_HTTP') {
+      lines.add('STREAMING V1');
+      lines.add('source=STREAM_HTTP scheme=http');
+    }
     lines.add('RANGE_TRUNCATED=$_truncatedCount');
+    // Header/body agreement, counted from the exchanges the proxy really
+    // performed: a 206 that declared more bytes than it carried is the
+    // failure mode that reads as "无法连接服务器" on the device.
+    lines.add('HTTP_BODY_INCOMPLETE=$_incompleteCount '
+        'HTTP_HEADER_MISMATCH=$_headerMismatchCount');
+    // The identity chain. Three different videos in this block is the
+    // "点 A 播 B" defect, stated as data instead of a suspicion.
+    lines.add('CLICKED file=${_clickedFileId ?? '-'} '
+        'chat=${_clickedChatId ?? '-'} msg=${_clickedMessageId ?? '-'}');
+    lines.add('ACTIVE file=${_activeFileId ?? '-'} '
+        'chat=${_activeChatId ?? '-'} msg=${_activeMessageId ?? '-'}');
+    lines.add('PLAYER file=${_playerFileId ?? '-'} '
+        'chat=${_activeChatId ?? '-'} msg=${_activeMessageId ?? '-'}');
+    lines.add(identityOk
+        ? 'IDENTITY=OK'
+        : 'IDENTITY=BUG: clicked=${_clickedFileId ?? '-'} '
+            'active=${_activeFileId ?? '-'} player=${_playerFileId ?? '-'}');
     lines.add(_forwardRangeRequests == 0
         ? 'tailRequests=0 NO_TAIL_REQUEST'
         : 'tailRequests=$_forwardRangeRequests');
@@ -1073,6 +1325,22 @@ class StreamingDiagnostics extends ChangeNotifier {
         'verdict': verdict.code,
         'moov': _moov.name,
         'truncatedRanges': _truncatedCount,
+        'resourceLoader': <String, Object?>{
+          'sessions': _rlSessions,
+          'requests': _rlRequests,
+          'responds': _rlResponds,
+          'bytes': _rlBytes,
+          'stalls': _rlStalls,
+          'contentInfo': _rlContentInfo,
+        },
+        'incompleteBodies': _incompleteCount,
+        'headerMismatches': _headerMismatchCount,
+        'identity': <String, Object?>{
+          'clicked': _clickedFileId,
+          'active': _activeFileId,
+          'player': _playerFileId,
+          'ok': identityOk,
+        },
         'forwardRangeRequests': _forwardRangeRequests,
         'playerTimeline': <String, Object?>{
           'createdMillis': _playerCreatedMillis,

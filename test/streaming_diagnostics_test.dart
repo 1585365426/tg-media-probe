@@ -23,6 +23,10 @@ import 'support/sandbox.dart';
 /// A scripted TDLib file: the test decides when bytes appear and where the
 /// download window is.
 class ScriptedApi implements FileTransferApi {
+  @override
+  Future<void> prefetch(int fileId) =>
+      startRange(fileId, offset: 0, limit: 0);
+
   ScriptedApi(this.sandbox, {this.expectedSize = 4 * 1024 * 1024});
 
   final TestSandbox sandbox;

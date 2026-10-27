@@ -37,6 +37,10 @@ MediaRecord video(int messageId) => MediaRecord(
     );
 
 class _Transfer implements FileTransferApi {
+  @override
+  Future<void> prefetch(int fileId) =>
+      startRange(fileId, offset: 0, limit: 0);
+
   final StreamController<FileState> _updates =
       StreamController<FileState>.broadcast();
 

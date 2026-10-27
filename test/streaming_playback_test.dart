@@ -41,6 +41,10 @@ MediaRecord video(int messageId, {String? name}) => MediaRecord(
 /// `deliverRange` emulates TDLib moving its download window after a targeted
 /// request.
 class ScriptedFile implements FileTransferApi {
+  @override
+  Future<void> prefetch(int fileId) =>
+      startRange(fileId, offset: 0, limit: 0);
+
   ScriptedFile(this.sandbox, {this.expectedSize = 1024 * 1024});
 
   final TestSandbox sandbox;
@@ -299,6 +303,7 @@ class FixtureWatch implements FileProgressWatch {
     if (!_changes.isClosed) _changes.add(null);
   }
 
+  @override
   Future<void> dispose() async {
     await sub.cancel();
     await _changes.close();

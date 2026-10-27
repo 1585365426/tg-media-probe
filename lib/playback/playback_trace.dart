@@ -56,8 +56,14 @@ enum PlaybackStage {
   /// The resolver chose the streaming path for this file (not a cache hit).
   streamingModeSelected,
 
-  /// The local HTTP range proxy is listening.
+  /// The local HTTP range proxy is listening (V1).
   streamingProxyStarted,
+
+  /// The `AVAssetResourceLoader` session exists and the player is about to
+  /// open a `tgmedia://` URL (V2). Sits next to [streamingProxyStarted]
+  /// because it answers the same question — "which transport is serving the
+  /// bytes" — for the other transport.
+  resourceLoaderStarted,
 
   /// Enough bytes arrived for the player to be handed the stream.
   startupBufferReached,
@@ -96,6 +102,7 @@ String stageLabel(PlaybackStage stage) => switch (stage) {
       PlaybackStage.fileRecordKnown => 'fileRecordKnown',
       PlaybackStage.streamingModeSelected => 'streamingModeSelected',
       PlaybackStage.streamingProxyStarted => 'proxyStarted',
+      PlaybackStage.resourceLoaderStarted => 'resourceLoaderStarted',
       PlaybackStage.firstRangeRequest => 'firstRangeRequest',
       PlaybackStage.first206Response => 'first206Response',
       PlaybackStage.downloadRequested => 'tdlibDownloadStarted',

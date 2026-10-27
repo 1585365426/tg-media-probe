@@ -145,6 +145,10 @@ abstract class FileProgressWatch {
   /// Fires on every TDLib state change for this file — growth, window moves,
   /// completion. Never fires for nothing, so "no events" is a real stall.
   Stream<void> get progress;
+
+  /// Releases the update subscription. Called by whoever owns the transport:
+  /// the proxy's close hook, or the resource-loader session.
+  Future<void> dispose();
 }
 
 /// One HTTP exchange, recorded so a device report can show what the player
@@ -225,6 +229,23 @@ class ProxyExchange {
   bool get truncated =>
       status == HttpStatus.partialContent && writtenBytes < requestedLength;
 
+  /// The `Content-Length` written equals the length the request asked for
+  /// (clamped to the real total).
+  ///
+  /// This is the header-level contract: a 206 whose `Content-Range` names
+  /// `0-24316496` but whose `Content-Length` says 14680064 is a lie the
+  /// player cannot recover from, and it is the one thing the device report
+  /// must never have to guess about.
+  bool get lengthMatchesRequest =>
+      status != HttpStatus.partialContent || declaredLength == requestedLength;
+
+  /// The body really carried every byte the header declared.
+  ///
+  /// `false` means the exchange ended early — the client hung up (normal) or
+  /// the proxy gave up on a stall (a defect, and [note] says which).
+  bool get bodyComplete =>
+      status != HttpStatus.partialContent || writtenBytes == declaredLength;
+
   /// The player asked for bytes away from 0 — a moov probe or a seek.
   bool get isForwardRange => (requestedFrom ?? 0) > 0;
 
@@ -238,10 +259,13 @@ class ProxyExchange {
     final asked = rangeHeader == '-' ? 'no range' : 'req=$rangeHeader';
     final noteText = note == null ? '' : ' note=$note';
     final truncatedText = truncated ? ' TRUNCATED' : '';
+    final headerText = lengthMatchesRequest ? '' : ' HEADER_MISMATCH';
+    final bodyText = bodyComplete ? '' : ' INCOMPLETE';
     return '#$index $asked → $status '
         'want=$requestedLength '
         'served=$servedFrom-$servedTo/$total '
-        'len=$declaredLength wrote=$writtenBytes$truncatedText '
+        'len=$declaredLength wrote=$writtenBytes'
+        '$truncatedText$headerText$bodyText '
         'type=$contentType enc=$contentEncoding$noteText';
   }
 }
@@ -363,6 +387,7 @@ class StreamProxyServer {
   int _diversions = 0;
   int _dedupeHits = 0;
   int _truncations = 0;
+  int _incomplete = 0;
   int _forwardResponses = 0;
 
   /// Serialises window moves: two sockets must not fight over TDLib's single
@@ -399,6 +424,11 @@ class StreamProxyServer {
 
   /// Responses that ended before their declared Content-Length.
   int get truncationCount => _truncations;
+
+  /// Every 206 whose body carried fewer bytes than its `Content-Length` —
+  /// including the ones the *client* closed. Zero is the only acceptable
+  /// number at the end of a completed play.
+  int get incompleteCount => _incomplete;
 
   /// True while a target window owns the TDLib download. Other responses must
   /// wait for it instead of reading that silence as a dead network.
@@ -692,6 +722,10 @@ class StreamProxyServer {
       _truncations++;
       onEvent?.call('RANGE_TRUNCATED #$index $written/$declared');
     }
+    // Every short body, whatever ended it. `truncations` blames the proxy,
+    // this counts the defect the player actually feels: a 206 that declared
+    // more bytes than it carried.
+    if (written < declared) _incomplete++;
 
     final servedTo = written == 0 ? from - 1 : from + written - 1;
     onExchange?.call(ProxyExchange(
@@ -748,7 +782,15 @@ class StreamProxyServer {
   ///    arrive on its own;
   /// 2. far ahead (a tail probe, a seek) → open a diversion;
   /// 3. a diversion already owns the window → wait for it, do not fight it.
-  Future<void> _ensureReadable(int cursor, int total) async {
+  ///
+  /// [waitFirst] is false for a body that is already committed: it steers the
+  /// window in the background and returns at once, so a slow tail cannot hold
+  /// the response headers hostage. The next gap in the body loop re-runs this.
+  Future<void> _ensureReadable(
+    int cursor,
+    int total, {
+    bool waitFirst = true,
+  }) async {
     for (var attempt = 0; attempt < 3; attempt++) {
       if (watch.isComplete) return;
       if (watch.readableEndFrom(cursor) >= cursor) return;
@@ -757,6 +799,7 @@ class StreamProxyServer {
         // way, so just wait for them. Blocking on the diversion's completion
         // here would freeze a consumer that could still be writing.
         if (cursor >= _detourFrom && cursor <= _detourTo) return;
+        if (!waitFirst) return;
         final finished = _detourFinished;
         if (finished != null && !finished.isCompleted) {
           onEvent?.call('wait diversion cursor=$cursor');
@@ -768,7 +811,7 @@ class StreamProxyServer {
         await _restoreSequential();
         return;
       }
-      await _openDiversion(cursor, total);
+      await _openDiversion(cursor, total, waitFirst: waitFirst);
       return;
     }
   }
@@ -776,7 +819,11 @@ class StreamProxyServer {
   String _keyFor(int from, int to) => '$from-$to';
 
   /// Opens (or joins) a target window for [cursor]..end-of-window.
-  Future<void> _openDiversion(int cursor, int total) async {
+  Future<void> _openDiversion(
+    int cursor,
+    int total, {
+    bool waitFirst = true,
+  }) async {
     for (var attempt = 0; attempt < 3; attempt++) {
       final from = cursor & ~1023; // TDLib chunks on 1 KB boundaries
       final end = min(total - 1, from + windowBytes - 1);
@@ -789,10 +836,14 @@ class StreamProxyServer {
           _dedupeHits++;
           onEvent?.call('diversion dedupe $key');
           final first = _detourFirstByte;
-          if (first != null && !first.isCompleted) await first.future;
+          if (waitFirst && first != null && !first.isCompleted) {
+            await first.future;
+          }
           return;
         }
-        // A different range owns the window; queue behind it and re-apply.
+        // A different range owns the window. A committed body returns and
+        // retries on its next gap; a pre-header wait queues behind it.
+        if (!waitFirst) return;
         final finished = _detourFinished;
         if (finished != null) await finished.future;
         continue;
@@ -812,7 +863,7 @@ class StreamProxyServer {
 
       final first = _detourFirstByte!;
       unawaited(_runDiversion(from, end, _detourGeneration));
-      await first.future;
+      if (waitFirst) await first.future;
       return;
     }
   }
@@ -896,10 +947,20 @@ class StreamProxyServer {
   }
 
   /// Makes the first byte of `from` servable, or throws with the real numbers.
+  ///
+  /// Only a request that starts at byte 0 waits here. A request for bytes past
+  /// the head — a moov-at-the-end probe, a seek — is committed immediately:
+  /// `Content-Range` and the total are already known, and holding the 206 back
+  /// until TDLib crawls several megabytes of tail is what turned "the tail is
+  /// slow" into "player initialisation failed". The body loop applies the same
+  /// stall rules to those bytes as to any other gap.
   Future<void> _prepare(int from, int to, int total) async {
     final requestLength = to - from + 1;
     final gate = max(1, min(min(total, startupBufferBytes), requestLength));
-    if (from == 0 && _served == 0 && watch.headBytes < gate) {
+    if (from == 0 &&
+        _served == 0 &&
+        !watch.isComplete &&
+        watch.headBytes < gate) {
       onEvent?.call('gate wait ${gate}B (head=${watch.headBytes})');
       final ok = await _awaitSignal(
         () => watch.headBytes >= gate || watch.isComplete,
@@ -914,7 +975,9 @@ class StreamProxyServer {
     if (watch.isComplete) return;
     if (watch.readableEndFrom(from) >= from) return;
 
-    await _ensureReadable(from, total);
+    await _ensureReadable(from, total, waitFirst: from == 0);
+    if (from != 0) return;
+
     final ok = await _awaitSignal(
       () => watch.isComplete || watch.readableEndFrom(from) >= from,
       label: 'first byte $from',
@@ -938,6 +1001,11 @@ class StreamProxyServer {
     final ok = await _awaitSignal(
       () => watch.isComplete || watch.readableEndFrom(cursor) >= cursor,
       label: 'body $cursor',
+      // The headers are already committed: the only honest exit is TDLib
+      // silence. A wall-clock cap here would end a body that is still
+      // arriving and turn "slow network" into a short 206 — the exact
+      // header/body mismatch this class exists to prevent.
+      ceiling: false,
     );
     if (!ok) {
       throw StreamProxyException(

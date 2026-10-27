@@ -26,6 +26,7 @@ import '../data/media_record.dart';
 import '../data/video_number_lookup.dart';
 import '../playback/media_metadata.dart';
 import '../playback/playback_trace.dart';
+import '../playback/native_streaming.dart';
 import '../playback/player_slot.dart';
 import '../playback/video_source.dart';
 import '../playback/watch_store.dart';
@@ -170,11 +171,6 @@ class FeedController extends ChangeNotifier {
   final List<MediaRecord> _items = <MediaRecord>[];
   final LatestOnlySlot<PlaySource> _gate = LatestOnlySlot<PlaySource>();
 
-  /// Paths resolved ahead of time, keyed by fileId. Bounded: three entries is
-  /// the current item plus its two neighbours.
-  final Map<int, String> _pathCache = <int, String>{};
-  static const int _pathCacheLimit = 3;
-
   int _index = -1;
   FeedPhase _phase = FeedPhase.idle;
   String? _error;
@@ -281,7 +277,8 @@ class FeedController extends ChangeNotifier {
     _gate.cancelAll();
     _items.clear();
     _index = -1;
-    _pathCache.clear();
+    // A new list invalidates every play in flight, not just the gate tokens.
+    _generation++;
     _error = null;
     _failure = RequestFailure.none;
     _phase = FeedPhase.loading;
@@ -313,21 +310,22 @@ class FeedController extends ChangeNotifier {
   /// A play failure is a transfer problem, not an index problem, so only the
   /// current item is activated again.
   Future<void> retry() async {
-    if (_items.isEmpty) {
+    if (_items.isEmpty || _index < 0 || _index >= _items.length) {
       await load();
       return;
     }
-    if (_index < 0 || _index >= _items.length) {
-      await load();
-      return;
-    }
+    final record = _items[_index];
     _error = null;
     _failure = RequestFailure.none;
     _bufferFraction = 0;
-    _pathCache.clear();
-    // The cached path is the most likely stale input in a retry; the resolver
-    // checks it again, but dropping it here keeps the retry honest.
-    await _activateCurrent();
+
+    // A retry is a new play: same item, new generation, and the previous
+    // player/proxy pair is released before the new one is resolved.
+    final generation = _claim(record);
+    _gate.cancelAll();
+    await player.release();
+    await _disposeActiveSource();
+    await _activate(record, generation);
   }
 
   /// Rebuilds the list from the first page. Only for an explicit
@@ -495,21 +493,15 @@ class FeedController extends ChangeNotifier {
   Future<void> _moveTo(int target) async {
     if (target < 0 || target >= _items.length) return;
     final leaving = current;
+    final record = _items[target];
 
-    // Invalidate any resolution in flight before touching the player: its
-    // result belongs to the item the user just left.
-    _gate.cancelAll();
-    await player.release();
-    // The proxy (if any) serves exactly one play; the port must not outlive it.
-    final previousSource = _activeSource;
-    _activeSource = null;
-    await previousSource?.dispose();
-    if (leaving != null && leaving.fileId != 0) {
-      // Only the current item's transfer is allowed to run (§4.5).
-      unawaited(sources.cancel(leaving.fileId));
-    }
-
+    // Claim the player *before* the first await: the index and the generation
+    // change together, so an activation of the item being left can never
+    // resume later and still believe it is the current one. This is the exact
+    // hole that let video B install itself while the user was opening A.
     _index = target;
+    final generation = _claim(record);
+    _gate.cancelAll();
     _position = Duration.zero;
     _duration = Duration.zero;
     _bufferFraction = 0;
@@ -517,15 +509,104 @@ class FeedController extends ChangeNotifier {
     // the current immersive state. Re-hiding on every page turn is what made
     // the feed "flash" its overlays while swiping through videos.
     _error = null;
-    await _activateCurrent();
+    _phase = FeedPhase.buffering;
+    _notify();
+    _noteClick(record);
+
+    // One player, one proxy: the previous pair is torn down before anything
+    // new is resolved. A new activation never disposes a source it did not
+    // create — that cross-disposal closed the live proxy's port mid-play and
+    // surfaced on device as "无法连接服务器".
+    await player.release();
+    await _disposeActiveSource();
+    if (leaving != null &&
+        leaving.fileId != 0 &&
+        leaving.fileId != record.fileId) {
+      // Only the current item's transfer is allowed to run (§4.5).
+      unawaited(sources.cancel(leaving.fileId));
+    }
+
+    await _activate(record, generation);
+  }
+
+  // ---- play generation -------------------------------------------------
+  //
+  // Every activation runs under a generation token. Anything async — a
+  // resolve, a fallback download, a player initialisation, a diagnostics
+  // callback — re-checks the token before it touches the player, the proxy,
+  // the index or the panel. A mismatch means the user already moved on, and
+  // the result is dropped instead of installed.
+
+  int _generation = 0;
+
+  /// Who owns the player right now, by identity rather than by index.
+  int _activeChatId = 0;
+  int _activeMessageId = 0;
+  int _activeFileId = 0;
+
+  /// The current play generation (diagnostics and tests read this).
+  int get playGeneration => _generation;
+
+  /// The file id the player was claimed for.
+  int get activeFileId => _activeFileId;
+
+  /// Claims the player for [record]; everything older is now stale.
+  int _claim(MediaRecord record) {
+    _generation++;
+    _activeChatId = record.chatId;
+    _activeMessageId = record.messageId;
+    _activeFileId = record.fileId;
+    return _generation;
+  }
+
+  /// True while [generation] is still the play the user is watching.
+  bool _owns(int generation) => !_disposed && generation == _generation;
+
+  /// True when [generation] is current *and* the feed still points at the
+  /// same video. Both halves matter: the index can move before the generation
+  /// (a swipe) and the generation before the index (a deep link).
+  bool _ownsRecord(int generation, MediaRecord record) =>
+      _owns(generation) &&
+      record.chatId == _activeChatId &&
+      record.messageId == _activeMessageId &&
+      record.fileId == _activeFileId;
+
+  void _noteClick(MediaRecord record) {
+    _diagnostics.noteStage(
+      'CLICKED',
+      chatId: record.chatId,
+      messageId: record.messageId,
+      fileId: record.fileId,
+    );
+  }
+
+  /// Releases whatever the live player is reading. The field is nulled first,
+  /// so two activations can never both own — or both dispose — one source.
+  Future<void> _disposeActiveSource() async {
+    final source = _activeSource;
+    _activeSource = null;
+    if (source != null) _releaseActiveFile(source);
+    await source?.dispose();
   }
 
   Future<void> _activateCurrent() async {
     final record = current;
     if (record == null) return;
+    await _activate(record, _claim(record));
+  }
 
+  Future<void> _activate(MediaRecord record, int generation) async {
+    if (!_ownsRecord(generation, record)) return;
+
+    _fallbackOccurred = false;
     _phase = FeedPhase.buffering;
     _notify();
+    _diagnostics.noteStage(
+      'ACTIVE',
+      chatId: record.chatId,
+      messageId: record.messageId,
+      fileId: record.fileId,
+    );
 
     final trace = PlaybackTrace(
       fileId: record.fileId,
@@ -534,7 +615,6 @@ class FeedController extends ChangeNotifier {
     );
     trace.mark(PlaybackStage.selected);
     _lastTrace = trace;
-    _fallbackOccurred = false;
 
     // The index stores whatever `messageVideo.video.file_name` held when the
     // message was mirrored, and for channel videos that is frequently empty.
@@ -554,64 +634,17 @@ class FeedController extends ChangeNotifier {
 
     PlaySource? source;
     try {
-      source = await _gate.run(() async {
-        // FORCE_STREAMING_TEST: the prefetch cache is a full-download result
-        // — playing from it would silently bypass resolveStream and the proxy
-        // entirely. Under the forced run every play must enter the streaming
-        // resolver, so the cache is ignored, not merely deprioritised.
-        final cached = _diagnostics.forceStreamingTest
-            ? null
-            : _pathCache.remove(record.fileId);
-        if (cached != null) {
-          // A prefetched path is not a promise: the pool entry may have been
-          // purged between the prefetch and this swipe. Verify before handing
-          // it to the player, otherwise the failure surfaces as a decode error.
-          if (await sources.isUsable(cached)) {
-            trace.mark(PlaybackStage.fileReady);
-            // The cache path is the only play that used to skip the
-            // diagnostics reset, so after a swipe the panel kept showing the
-            // *previous* video's numbers (the "1.38 GB" ghost). Every play
-            // must open its own evidence block: reset, then name the source
-            // — a local file — exactly like the other paths do.
-            _diagnostics.beginPlay(
-              fileId: record.fileId,
-              streaming: false,
-              chatId: record.chatId,
-              messageId: record.messageId,
-            );
-            _diagnostics.notePlayerSource(isStreaming: false, url: cached);
-            return PlaySource.file(cached);
-          }
-        }
-        // Streaming first: the play starts on the bytes that already exist
-        // and the download keeps running behind it. Every fallback decision
-        // below is made from what this call actually returned.
-        return sources.resolveStream(
-          record.fileId,
-          chatId: record.chatId,
-          messageId: record.messageId,
-          // The served Content-Type comes from the message's own mime type;
-          // guessing mp4 for a webm is another way to make AVPlayer refuse.
-          mimeType: record.mimeType,
-          trace: trace,
-          // TDLib rejected the stored file id (or the message carried a file
-          // name the mirror never had): keep the repaired record.
-          onRecordRefreshed: _absorbRefreshed,
-          onProgress: (update) {
-            if (update.stage == SourceStage.fetching) {
-              _bufferFraction = update.fraction;
-              _notify();
-            }
-          },
-        );
-      });
+      source = await _gate.run(
+        () => _resolvePlaySource(record, generation, trace),
+      );
     } on VideoSourceTimeout catch (e) {
       // Streaming could not deliver (stall or ceiling). The full-download
-      // path is the honest fallback: same bytes, no proxy, and the position
-      // and list stay exactly where they are. Only if that also fails does
-      // the user see an error.
-      final path = await _fallbackFullDownload(record, trace, e);
+      // path is the honest fallback: same bytes, no transport, and the
+      // position and list stay exactly where they are. Only if that also fails
+      // does the user see an error.
+      final path = await _fallbackFullDownload(record, trace, e, generation);
       if (path == null) {
+        if (!_ownsRecord(generation, record)) return;
         _fail(
           e.message,
           failure: e.isStall ? RequestFailure.offline : RequestFailure.generic,
@@ -620,108 +653,316 @@ class FeedController extends ChangeNotifier {
       }
       source = PlaySource.file(path);
     } on VideoSourceException catch (e) {
-      final path = await _fallbackFullDownload(record, trace, e);
+      final path = await _fallbackFullDownload(record, trace, e, generation);
       if (path == null) {
+        if (!_ownsRecord(generation, record)) return;
         _fail(e.message, failure: classifyFailure(e));
         return;
       }
       source = PlaySource.file(path);
     } on Object catch (e) {
-      final path = await _fallbackFullDownload(record, trace, e);
+      final path = await _fallbackFullDownload(record, trace, e, generation);
       if (path == null) {
+        if (!_ownsRecord(generation, record)) return;
         _fail('$e', failure: classifyFailure(e));
         return;
       }
       source = PlaySource.file(path);
     }
 
-    // Null means a newer navigation already started. Do not touch the player.
-    if (source == null || _disposed) return;
-    // The fallback downloaded while the user may have swiped on: the item
-    // under the finger is the only one allowed to reach the player.
-    if (current == null || current!.messageId != record.messageId) return;
-
-    // One live source at a time: stop any proxy the previous activation left
-    // behind before opening another one.
-    await _activeSource?.dispose();
-    _activeSource = source;
-    if (source.isStreaming) {
-      // The player opens a loopback URL, but what must survive a cache clean
-      // is the TDLib pool file behind it — register that path, not the URL.
-      final localPath = source.path;
-      final registry = player.activeFiles;
-      registry?.markInUse(localPath, reason: 'streaming');
-      source.proxy?.onClose(() => registry?.release(localPath));
-    }
-
-    try {
-      trace.mark(PlaybackStage.playerCreated);
-      // Record what the player is *about to open*, from the source itself.
-      // STREAM_HTTP + the proxy URL is the streaming evidence; LOCAL_FILE
-      // here forces the verdict off STREAMING_CONFIRMED.
-      _diagnostics.notePlayerSource(
-        isStreaming: source.isStreaming,
-        url: source.url,
-      );
-      _diagnostics.notePlayerCreated();
-      await player.activate(source.url);
-      _diagnostics.notePlayerReady();
-      trace.mark(PlaybackStage.playerInitialized);
-    } on Object catch (e) {
-      if (!source.isStreaming) {
-        _diagnostics.notePlayerFailed('$e');
-        trace.errorCategory = 'player';
-        PlaybackTraceLog.instance.add(trace);
-        _fail('此视频无法解码');
-        return;
-      }
-      // The stream could not be initialised (typically an MP4 whose moov sits
-      // at the end and the player timed out waiting for the tail ranges).
-      // Fall back to the full download — silently, no error screen, and the
-      // bytes already fetched keep the wait short.
-      trace.mark(PlaybackStage.streamingFallback);
-      // The player's own message is the only thing that says *why* the item
-      // never became ready — keep it verbatim instead of a generic line.
-      _diagnostics.notePlayerFailed('$e');
-      _diagnostics.noteFallback('播放器初始化失败');
-      _diagnostics.noteDecision(
-        proxyAvailable: true,
-        decision: 'FALLBACK',
-        reason: 'stream_initialization_failed',
-      );
-      _fallbackOccurred = true;
+    // Null means a newer navigation already started — or this one was
+    // superseded while the fallback was downloading. Either way the source
+    // belongs to a video the user is no longer watching: drop it, do not
+    // install it, and above all do not dispose the *current* one.
+    if (source == null) return;
+    if (!_ownsRecord(generation, record)) {
       await source.dispose();
-      _activeSource = null;
-      try {
-        final path = await sources.resolve(
-          record.fileId,
-          chatId: record.chatId,
-          messageId: record.messageId,
-          trace: trace,
-          onRecordRefreshed: _absorbRefreshed,
-          forPlayback: true,
-        );
-        _diagnostics.notePlayerSource(isStreaming: false, url: path);
-        await player.activate(path);
-        trace.mark(PlaybackStage.playerInitialized);
-        _activeSource = PlaySource.file(path);
-      } on Object {
-        trace.errorCategory = 'player';
-        PlaybackTraceLog.instance.add(trace);
-        _fail('此视频无法解码');
+      return;
+    }
+
+    // Install from the top of the transport chain downwards:
+    // V2 (resource loader) → V1 (loopback proxy) → local file. A transport
+    // that never produced a ready player is disposed before the next one is
+    // tried, so the slot never holds two sources and the user never sees a
+    // "无法连接服务器" from a transport that was already replaced.
+    var current = source;
+    // The chain is a ladder, not a loop: a local file that fails to decode must
+    // not send the play back down into another full download.
+    var fullDownloadTried = false;
+    while (true) {
+      _activeSource = current;
+      _registerActiveFile(current, record);
+      final installed = await _installPlayer(current, record, generation, trace);
+      if (installed) break;
+      final failed = current;
+      if (_activeSource == failed) _activeSource = null;
+      await failed.dispose();
+      _releaseActiveFile(failed);
+      if (!_ownsRecord(generation, record)) return;
+      // Not routed through `_gate`: that slot is typed to `PlaySource`, and
+      // this step legitimately ends with "no source left". Staleness is
+      // already covered by the generation check right below.
+      final next = await _nextTransportAfter(
+        failed,
+        record,
+        generation,
+        trace,
+        fullDownloadTried: fullDownloadTried,
+      );
+      if (!_ownsRecord(generation, record)) {
+        await next?.dispose();
         return;
       }
+      if (next == null) return;
+      if (!next.isStreaming) fullDownloadTried = true;
+      current = next;
     }
-    if (_disposed) return;
+    source = current;
+    if (!_ownsRecord(generation, record)) return;
 
     PlaybackTraceLog.instance.add(trace);
     await _applyVolume();
+    if (!_ownsRecord(generation, record)) return;
     _phase = FeedPhase.ready;
     _bufferFraction = 0;
     _startPolling();
     await _restoreProgress(record);
+    if (!_ownsRecord(generation, record)) return;
     _notify();
-    await _prefetchNext();
+    // Preload runs *after* the play owns the player, is never awaited, and can
+    // never produce a PlaySource — see [_prefetchNext].
+    unawaited(_prefetchNext(generation));
+  }
+
+  /// Resolves the play through the transport chain.
+  ///
+  /// V2 first: `AVAssetResourceLoader` answers AVFoundation directly, with no
+  /// socket, no HTTP status line and no connection lifetime to get wrong.
+  /// V1 is not removed — a platform without the bridge, or a session the
+  /// native side refused, drops to the loopback proxy for the *same* record,
+  /// which is a transport change and not a play failure.
+  Future<PlaySource> _resolvePlaySource(
+    MediaRecord record,
+    int generation,
+    PlaybackTrace trace,
+  ) async {
+    _diagnostics.noteStage(
+      'RESOLVE',
+      chatId: record.chatId,
+      messageId: record.messageId,
+      fileId: record.fileId,
+    );
+
+    void onProgress(VideoSourceUpdate update) {
+      if (update.stage != SourceStage.fetching) return;
+      if (!_owns(generation)) return;
+      _bufferFraction = update.fraction;
+      _notify();
+    }
+
+    if (StreamingV2.supported) {
+      try {
+        return await sources.resolveStreamV2(
+          record.fileId,
+          chatId: record.chatId,
+          messageId: record.messageId,
+          mimeType: record.mimeType,
+          trace: trace,
+          onRecordRefreshed: _absorbRefreshed,
+          onProgress: onProgress,
+        );
+      } on VideoSourceTimeout {
+        // The transfer itself is not moving; V1 would wait on the same bytes.
+        rethrow;
+      } on VideoSourceException {
+        rethrow;
+      } on Object catch (e) {
+        // No bridge, a refused session, or a native error: the transport is
+        // unavailable, the video is not. Say so and use V1.
+        _diagnostics.noteResourceLoader(
+          'v2 unavailable: $e',
+          generation: generation,
+        );
+        _diagnostics.noteDecision(
+          candidate: true,
+          decision: 'STREAM',
+          reason: 'v2_unavailable_using_v1',
+          generation: generation,
+        );
+      }
+    }
+
+    return sources.resolveStream(
+      record.fileId,
+      chatId: record.chatId,
+      messageId: record.messageId,
+      // The served Content-Type comes from the message's own mime type;
+      // guessing mp4 for a webm is another way to make AVPlayer refuse.
+      mimeType: record.mimeType,
+      trace: trace,
+      // TDLib rejected the stored file id (or the message carried a file name
+      // the mirror never had): keep the repaired record.
+      onRecordRefreshed: _absorbRefreshed,
+      onProgress: onProgress,
+    );
+  }
+
+  /// Hands [source]'s URL to the player and waits for it to become ready.
+  ///
+  /// Returns false when the player never initialised — the caller then moves
+  /// one step down the transport chain instead of showing an error.
+  Future<bool> _installPlayer(
+    PlaySource source,
+    MediaRecord record,
+    int generation,
+    PlaybackTrace trace,
+  ) async {
+    try {
+      trace.mark(PlaybackStage.playerCreated);
+      // Record what the player is *about to open*, from the source itself. A
+      // V2 play names its own transport; STREAM_HTTP / LOCAL_FILE would make
+      // the report claim a socket that was never opened.
+      _diagnostics.notePlayerSource(
+        isStreaming: source.isStreaming,
+        url: source.url,
+        generation: generation,
+        sourceLabel: source.isResourceLoader ? StreamingV2.sourceLabel : null,
+      );
+      _diagnostics.noteStage(
+        'PLAYER',
+        chatId: record.chatId,
+        messageId: record.messageId,
+        fileId: record.fileId,
+      );
+      _diagnostics.notePlayerCreated(generation: generation);
+      await player.activate(source.url);
+      if (!_ownsRecord(generation, record)) return false;
+      _diagnostics.notePlayerReady(generation: generation);
+      trace.mark(PlaybackStage.playerInitialized);
+      return true;
+    } on Object catch (e) {
+      // A stale activation failing is not the current video's failure.
+      if (!_ownsRecord(generation, record)) return false;
+      // The player's own message is the only thing that says *why* the item
+      // never became ready — keep it verbatim instead of a generic line.
+      _diagnostics.notePlayerFailed('$e', generation: generation);
+      _diagnostics.noteDecision(
+        proxyAvailable: source.isStreaming,
+        decision: 'FALLBACK',
+        reason: 'player_initialization_failed',
+        generation: generation,
+      );
+      trace.note = source.isResourceLoader
+          ? 'V2 播放器初始化失败'
+          : (source.isStreaming ? 'V1 播放器初始化失败' : '本地文件播放失败');
+      return false;
+    }
+  }
+
+  /// One step down the transport chain: V2 → V1 → full download → error.
+  Future<PlaySource?> _nextTransportAfter(
+    PlaySource failed,
+    MediaRecord record,
+    int generation,
+    PlaybackTrace trace, {
+    bool fullDownloadTried = false,
+  }) async {
+    // A local file that will not decode is the end of the chain: the bytes are
+    // all there and the player still refused them.
+    if (!failed.isStreaming) {
+      if (_ownsRecord(generation, record) && phase != FeedPhase.error) {
+        _fail('此视频无法解码');
+      }
+      return null;
+    }
+    if (failed.isResourceLoader && !fullDownloadTried) {
+      // A resource-loader play that never became ready is one transport's
+      // failure, not the video's: the loopback proxy reads the same growing
+      // file through a completely different path, so it is worth one attempt
+      // before giving up on streaming entirely.
+      _diagnostics.noteResourceLoader(
+        'v2 player failed, retrying with V1',
+        generation: generation,
+      );
+      try {
+        final v1 = await sources.resolveStream(
+          record.fileId,
+          chatId: record.chatId,
+          messageId: record.messageId,
+          mimeType: record.mimeType,
+          trace: trace,
+          onRecordRefreshed: _absorbRefreshed,
+          onProgress: (update) {
+            if (update.stage != SourceStage.fetching) return;
+            if (!_owns(generation)) return;
+            _bufferFraction = update.fraction;
+            _notify();
+          },
+        );
+        if (!_ownsRecord(generation, record)) {
+          await v1.dispose();
+          return null;
+        }
+        _diagnostics.noteDecision(
+          proxyAvailable: true,
+          decision: 'STREAM',
+          reason: 'v1_after_v2_player_failure',
+          generation: generation,
+        );
+        return v1;
+      } on Object catch (e) {
+        _diagnostics.noteFallback('V1 也失败：$e');
+      }
+    }
+
+    if (fullDownloadTried) {
+      if (_ownsRecord(generation, record) && phase != FeedPhase.error) {
+        _fail('此视频无法解码');
+      }
+      return null;
+    }
+
+    // Nothing streamable is left: the whole file, then the error screen.
+    final path = await _fallbackFullDownload(
+      record,
+      trace,
+      'player_initialization_failed',
+      generation,
+    );
+    if (path == null) {
+      if (_ownsRecord(generation, record)) _fail('此视频无法解码');
+      return null;
+    }
+    if (!_ownsRecord(generation, record)) return null;
+    return PlaySource.file(path);
+  }
+
+  /// Marks the growing file behind a stream as in-use and names the transport
+  /// in the diagnostics timeline.
+  void _registerActiveFile(PlaySource source, MediaRecord record) {
+    if (!source.isStreaming) return;
+    _diagnostics.noteStage(
+      source.isResourceLoader ? 'RESOURCE_LOADER' : 'PROXY',
+      chatId: record.chatId,
+      messageId: record.messageId,
+      fileId: record.fileId,
+    );
+    final registry = player.activeFiles;
+    if (registry == null) return;
+    // What must survive a cache clean is the TDLib pool file behind the URL.
+    registry.markInUse(source.path, reason: 'streaming');
+    source.proxy?.onClose(() => registry.release(source.path));
+  }
+
+  /// Releases the in-use mark a stream added.
+  ///
+  /// V1 releases through the proxy's close callback; V2 has no port to close,
+  /// so the release has to happen where the source is torn down — otherwise
+  /// every streamed video would stay "in use" for the rest of the session and
+  /// the cache cleaner would never reclaim it.
+  void _releaseActiveFile(PlaySource source) {
+    if (!source.isStreaming) return;
+    if (source.isResourceLoader) player.activeFiles?.release(source.path);
   }
 
   /// The streaming path gave up: fall back to the full download the old
@@ -732,6 +973,7 @@ class FeedController extends ChangeNotifier {
     MediaRecord record,
     PlaybackTrace trace,
     Object cause,
+    int generation,
   ) async {
     trace.mark(PlaybackStage.streamingFallback);
     trace.note = '流式失败，改用完整下载';
@@ -752,10 +994,12 @@ class FeedController extends ChangeNotifier {
         onRecordRefreshed: _absorbRefreshed,
         forPlayback: true,
         onProgress: (update) {
-          if (update.stage == SourceStage.fetching) {
-            _bufferFraction = update.fraction;
-            _notify();
-          }
+          if (update.stage != SourceStage.fetching) return;
+          // A fallback that the user already left must not keep painting the
+          // buffering ring on a different video.
+          if (!_ownsRecord(generation, record)) return;
+          _bufferFraction = update.fraction;
+          _notify();
         },
       );
     } on Object {
@@ -763,44 +1007,46 @@ class FeedController extends ChangeNotifier {
     }
   }
 
-  /// Prepares up to [preloadCount] videos **after** the current one.
+  /// Warms the next [preloadCount] items — a transfer each, nothing else.
   ///
-  /// Sequential on purpose: the current item already owns one transfer, and
-  /// firing three at once would push the one being watched behind them. The
-  /// window is capped by [AppPreferences.maxPreloadCount] and by the path cache
-  /// size, so this can never turn into "download the channel".
-  Future<void> _prefetchNext() async {
-    // FORCE_STREAMING_TEST: a background full download steals bandwidth from
-    // the play under test and fills the path cache that the forced run must
-    // ignore. During acceptance the feed prefetches nothing.
+  /// This used to *resolve* each neighbour through the full-download path,
+  /// await the whole download, and cache the resulting path. Three things
+  /// followed from that, all reported from the device: the activation future
+  /// stayed pending for minutes (so a stale activation could resume later),
+  /// clicking the prefetched item joined that same future and played a
+  /// LOCAL_FILE, and the prefetch's own watchdog could cancel the transfer the
+  /// user was watching. A warm start cannot do any of that: it returns as soon
+  /// as TDLib accepts the request and produces no [PlaySource].
+  Future<void> _prefetchNext(int generation) async {
+    // FORCE_STREAMING_TEST: a background download steals bandwidth from the
+    // play under test. During acceptance the feed prefetches nothing.
     if (_diagnostics.forceStreamingTest) return;
     final count = preloadCount.clamp(0, AppPreferences.maxPreloadCount);
     if (count <= 0) return;
-    final generation = ++_prefetchGeneration;
+    final window = ++_prefetchGeneration;
     for (var offset = 1; offset <= count; offset++) {
       final next = _index + offset;
       if (next >= _items.length) return;
-      if (generation != _prefetchGeneration) return; // superseded
+      if (_disposed || !_owns(generation) || window != _prefetchGeneration) {
+        return; // superseded
+      }
       final record = _items[next];
-      if (record.fileId == 0 || _pathCache.containsKey(record.fileId)) continue;
-      try {
-        final path = await sources.resolve(
-          record.fileId,
-          chatId: record.chatId,
-          messageId: record.messageId,
-          onRecordRefreshed: _absorbRefreshed,
-        );
-        if (_disposed || generation != _prefetchGeneration) return;
-        _pathCache[record.fileId] = path;
-        while (_pathCache.length > _pathCacheLimit) {
-          _pathCache.remove(_pathCache.keys.first);
-        }
+      if (record.fileId == 0) continue;
+      if (record.fileId == _activeFileId) continue; // never steer the play
+      _diagnostics.noteStage(
+        'PRELOAD',
+        chatId: record.chatId,
+        messageId: record.messageId,
+        fileId: record.fileId,
+      );
+      final ok = await sources.prefetch(record.fileId);
+      if (ok) {
         _prefetchCompleted++;
-      } on Object {
-        // A failed prefetch is invisible by design: the item will be resolved
-        // again (with a visible error) when the user actually reaches it.
+      } else {
         _prefetchFailed++;
       }
+      // A failed warm start is invisible by design: the item is resolved again
+      // (with a visible error) when the user actually reaches it.
     }
   }
 
@@ -982,20 +1228,30 @@ class FeedController extends ChangeNotifier {
     _lastTrace?.note = 'decoder error (${errorText.length} chars)';
     final record = current;
     if (record == null) return;
+    // The recovery below awaits a whole fallback download. The video the user
+    // is watching when it finishes may be a different one, so the generation
+    // is taken now and re-checked before anything is installed.
+    final generation = _generation;
     final source = _activeSource;
     if (source != null && source.isStreaming) {
       final trace = _lastTrace;
       if (trace != null && !trace.has(PlaybackStage.streamingFallback)) {
-        final path = await _fallbackFullDownload(record, trace, error);
-        if (path != null && !_disposed) {
+        final path =
+            await _fallbackFullDownload(record, trace, error, generation);
+        if (path != null && _ownsRecord(generation, record)) {
           _diagnostics.notePlayerSource(isStreaming: false, url: path);
           await player.activate(path);
+          if (!_ownsRecord(generation, record)) return;
+          // The transport served its purpose: release its port / session
+          // instead of leaving it behind for the rest of the session.
+          await _disposeActiveSource();
           _activeSource = PlaySource.file(path);
           _notify();
           return;
         }
       }
     }
+    if (!_ownsRecord(generation, record)) return;
     if (!_disposed && phase != FeedPhase.error) {
       _fail('此视频无法解码', failure: RequestFailure.generic);
     }
@@ -1088,12 +1344,14 @@ class FeedController extends ChangeNotifier {
     // Persist the playhead before the decoder goes away: the poll timer was
     // the only writer, and stopping it above would drop the final position.
     refreshProgress();
+    // Backgrounding invalidates any activation still in flight: it must not
+    // install a player behind a screen the user cannot see.
+    _generation++;
+    _gate.cancelAll();
     await player.release();
-    // The stream source dies with the visible play; resuming re-resolves and
-    // picks up wherever the download got to (cache hit if it finished).
-    final source = _activeSource;
-    _activeSource = null;
-    await source?.dispose();
+    // The source dies with the visible play; resuming re-resolves and picks up
+    // wherever the download got to (cache hit if it finished).
+    await _disposeActiveSource();
   }
 
   void _startPolling() {
@@ -1124,6 +1382,7 @@ class FeedController extends ChangeNotifier {
   /// Releases the player, stops the transfer and the poll timer. Must be called
   /// before [dispose] from a widget that can await.
   Future<void> shutdown() async {
+    _generation++;
     _gate.cancelAll();
     _stopPolling();
     // Leaving the feed is the one guaranteed write: without it the last second
@@ -1134,14 +1393,15 @@ class FeedController extends ChangeNotifier {
       unawaited(sources.cancel(record.fileId));
     }
     await player.release();
-    final source = _activeSource;
-    _activeSource = null;
-    await source?.dispose();
+    await _disposeActiveSource();
   }
 
   @override
   void dispose() {
     _disposed = true;
+    // Nothing may finish into a disposed controller: bumping the generation
+    // makes every in-flight callback stale by construction.
+    _generation++;
     _stopPolling();
     _gate.cancelAll();
     super.dispose();

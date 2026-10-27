@@ -18,6 +18,8 @@ import 'package:flutter/material.dart';
 
 import '../lock/lock_screens.dart';
 import '../platform/orientation_coordinator.dart';
+import '../playback/native_streaming.dart';
+import '../playback/resource_loader.dart';
 import '../lock/unlock_controller.dart';
 import '../security/biometric.dart';
 import '../security/lock_policy.dart';
@@ -118,6 +120,12 @@ class _TgMediaAppState extends State<TgMediaApp> with WidgetsBindingObserver {
     _preferences = PreferencesController(store: PreferencesStore(store: _secure));
     _lockStore = AppLockStore(store: _secure);
     _lock = UnlockController(lockStore: _lockStore, gate: _gate);
+    // Streaming V2 answers AVAssetResourceLoader from Dart, so the byte channel
+    // has to exist before the first player is created. Harmless elsewhere: the
+    // transport only exists on iOS.
+    if (StreamingV2.supported) {
+      ResourceLoaderHost.instance.install();
+    }
     unawaited(_bootstrap());
   }
 

@@ -3,14 +3,25 @@ import 'dart:io';
 
 import 'package:video_player/video_player.dart';
 
+import 'native_streaming.dart';
 import 'player_slot.dart';
+import 'resource_loader.dart';
 import 'streaming_diagnostics.dart';
 
 class VideoPlayerFactory implements PlayerFactory {
   const VideoPlayerFactory({
     this.streamingInitTimeout = const Duration(seconds: 12),
     this.onValueChanged,
+    this.nativeTransport,
+    this.nativeInitTimeout = const Duration(seconds: 20),
   });
+
+  /// V2 bridge. Injected in tests; `MethodChannel` on a device.
+  final NativeStreamingTransport? nativeTransport;
+
+  /// Bound on "the native item never became ready". Data requests are not
+  /// bounded — waiting for a tail range is normal.
+  final Duration nativeInitTimeout;
 
   /// Forwards every player value change to the diagnostics panel, so the
   /// playhead / status / decoder error shown there are the player's own
@@ -24,14 +35,25 @@ class VideoPlayerFactory implements PlayerFactory {
   final Duration streamingInitTimeout;
 
   @override
-  PlayerHandle create(String path) => VideoPlayerHandle(
-        path: path,
-        // Only a loopback stream URL gets the bound initialize; the check
-        // lives here so the handle itself stays a dumb lifecycle wrapper.
-        initializeTimeout:
-            path.startsWith('http') ? streamingInitTimeout : null,
-        onValueChanged: onValueChanged,
+  PlayerHandle create(String path) {
+    // A `tgmedia://` URL is the V2 transport: the bytes come from
+    // AVAssetResourceLoader, so `video_player` (which only understands file and
+    // http URLs) must not see it.
+    if (path.startsWith('$kResourceLoaderScheme://')) {
+      return NativeStreamPlayerHandle(
+        sessionId: Uri.parse(path).pathSegments.last,
+        transport: nativeTransport ?? MethodChannelStreamingTransport(),
+        initializeTimeout: nativeInitTimeout,
       );
+    }
+    return VideoPlayerHandle(
+      path: path,
+      // Only a loopback stream URL gets the bound initialize; the check lives
+      // here so the handle itself stays a dumb lifecycle wrapper.
+      initializeTimeout: path.startsWith('http') ? streamingInitTimeout : null,
+      onValueChanged: onValueChanged,
+    );
+  }
 }
 
 /// `video_player`-backed player.
