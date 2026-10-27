@@ -139,6 +139,7 @@ class ResourceSupply {
     required this.fileId,
     required this.watch,
     this.onEvent,
+    this.onTypedEvent,
     this.steerGapBytes = 256 * 1024,
     this.resumeGapBytes = 4 * 1024 * 1024,
     this.windowBytes = 16 * 1024 * 1024,
@@ -151,6 +152,13 @@ class ResourceSupply {
   final int fileId;
   final FileProgressWatch watch;
   final void Function(String event)? onEvent;
+
+  /// Structured version of [onEvent]: the named events the diagnostics panel
+  /// and the acceptance report read (`growthDetected`, `waitingForGrowth`,
+  /// `targetedDownloadRequested`, `resumeSequential`). Free text cannot be
+  /// counted, and "how many targets did the loader pull" is a counted
+  /// question.
+  final void Function(String name, Map<String, Object?> fields)? onTypedEvent;
 
   /// Inside this gap the sequential download is about to arrive on its own, so
   /// the window is left alone.
@@ -223,6 +231,11 @@ class ResourceSupply {
       _seenReach = reach;
       _seenComplete = watch.isComplete;
       _lastAdvance = now;
+      onTypedEvent?.call('growthDetected', <String, Object?>{
+        'head': head,
+        'reach': reach,
+        'total': total,
+      });
     }
 
     if (reach >= offset) {
@@ -243,6 +256,13 @@ class ResourceSupply {
     final stalled = waited >= stallGrace;
     if (stalled) _stalls++;
     _waits++;
+    onTypedEvent?.call('waitingForGrowth', <String, Object?>{
+      'offset': offset,
+      'waitedMs': waited.inMilliseconds,
+      'head': head,
+      'total': total,
+      'stalled': stalled,
+    });
     return SupplyReading(
       path: path,
       from: -1,
@@ -274,6 +294,10 @@ class ResourceSupply {
         try {
           await watch.resumeSequential();
           onEvent?.call('resume sequential (offset=$offset head=$head)');
+          onTypedEvent?.call('resumeSequential', <String, Object?>{
+            'offset': offset,
+            'head': head,
+          });
         } on Object catch (e) {
           onEvent?.call('resume failed: $e');
         }
@@ -301,6 +325,11 @@ class ResourceSupply {
     _steers++;
     _windowed = true;
     onEvent?.call('window $key (offset=$offset head=$head)');
+    onTypedEvent?.call('targetedDownloadRequested', <String, Object?>{
+      'from': from,
+      'to': end,
+      'offset': offset,
+    });
     try {
       await watch.requestWindow(from, end);
     } on Object catch (e) {
@@ -333,6 +362,11 @@ class ResourceLoaderSession {
           clock: clock,
           onEvent: (event) => diagnostics?.noteResourceLoader('supply: $event',
               generation: generation),
+          onTypedEvent: (name, fields) => diagnostics?.noteResourceLoaderEvent(
+            name,
+            fields: fields,
+            generation: generation,
+          ),
         );
 
   final String sessionId;
@@ -381,6 +415,21 @@ class ResourceLoaderSession {
   /// refuses the session — the caller then falls back to V1.
   Future<void> open() async {
     if (_opened) return;
+    diagnostics?.noteResourceLoaderEvent(
+      'resourceLoaderCreated',
+      fields: <String, Object?>{
+        'sessionId': sessionId,
+        'totalBytes': watch.expectedBytes,
+        'completed': watch.isComplete,
+        'mimeType': mimeType,
+      },
+      generation: generation,
+    );
+    diagnostics?.noteResourceLoaderEvent(
+      'contentInfoRequested',
+      fields: <String, Object?>{'totalBytes': watch.expectedBytes},
+      generation: generation,
+    );
     final reply = await transport.openSession(
       sessionId: sessionId,
       fileId: fileId,
@@ -400,6 +449,16 @@ class ResourceLoaderSession {
       'type=${reply['contentType']} byteRange=${reply['byteRangeAccessSupported']}',
       generation: generation,
     );
+    diagnostics?.noteResourceLoaderEvent(
+      'contentInfoReady',
+      fields: <String, Object?>{
+        'totalBytes': reply['totalBytes'],
+        'contentType': reply['contentType'],
+        'byteRangeAccessSupported': reply['byteRangeAccessSupported'],
+        'entireLengthAvailableOnDemand': reply['entireLengthAvailableOnDemand'],
+      },
+      generation: generation,
+    );
   }
 
   /// Answers one native chunk request.
@@ -407,6 +466,17 @@ class ResourceLoaderSession {
     _dataRequests++;
     diagnostics?.noteResourceLoader('dataRequest offset=$offset len=$length',
         generation: generation);
+    diagnostics?.noteResourceLoaderEvent(
+      'dataRequestCreated',
+      fields: <String, Object?>{
+        'requestedOffset': offset,
+        'requestedLength': length,
+        'currentOffset': offset,
+        'availableBytes': watch.headBytes,
+        'totalBytes': watch.expectedBytes,
+      },
+      generation: generation,
+    );
     if (_closed) {
       return const SupplyReading(
         from: -1,
@@ -433,7 +503,19 @@ class ResourceLoaderSession {
     final reading = await supply.read(offset);
     if (reading.hasData) {
       _responds++;
-      _bytesServed += math.min(length, reading.length);
+      final served = math.min(length, reading.length);
+      _bytesServed += served;
+      diagnostics?.noteResourceLoaderEvent(
+        'respond',
+        fields: <String, Object?>{
+          'respondCount': _responds,
+          'respondBytes': served,
+          'currentOffset': reading.from,
+          'availableTo': reading.to,
+          'downloaded': watch.headBytes,
+        },
+        generation: generation,
+      );
     } else if (reading.errorCode != null) {
       diagnostics?.noteResourceLoader(
         'stall ${reading.errorCode} offset=$offset waited=${reading.waitingMillis}ms',

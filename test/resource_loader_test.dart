@@ -6,6 +6,7 @@ import 'package:tg_media_probe/playback/native_streaming.dart'
     show StreamingV2Unavailable;
 import 'package:tg_media_probe/playback/resource_loader.dart';
 import 'package:tg_media_probe/playback/stream_proxy.dart' show FileProgressWatch;
+import 'package:tg_media_probe/playback/streaming_diagnostics.dart';
 
 /// A growing file with a steerable TDLib window — same model as the real
 /// watcher, driven by the test instead of by `updateFile`.
@@ -456,6 +457,115 @@ void main() {
       host.register(session);
       await session.close();
       expect(host.active, isNull);
+    });
+  });
+
+  // The diagnostics log the acceptance report reads. The requirement is not
+  // "some logging happened" but named events, each stamped with the play it
+  // belongs to — a leftover request from the previous video must be visible as
+  // a different file/generation, not blended into the current numbers.
+  group('diagnostics events', () {
+    late StreamingDiagnostics diagnostics;
+    late FakeWatch watch;
+    late ResourceLoaderSession session;
+
+    setUp(() {
+      diagnostics = StreamingDiagnostics();
+      diagnostics.beginPlay(fileId: 9, streaming: true, chatId: 4, messageId: 5);
+      watch = FakeWatch(total: 100 * 1024 * 1024, prefix: 2 * 1024 * 1024);
+      session = ResourceLoaderSession(
+        sessionId: '9_gen',
+        fileId: 9,
+        chatId: 4,
+        messageId: 5,
+        generation: diagnostics.generation,
+        watch: watch,
+        mimeType: 'video/mp4',
+        transport: FakeTransport(),
+        diagnostics: diagnostics,
+      );
+    });
+
+    test('opening names the session, the content info request and its answer',
+        () async {
+      await session.open();
+      final names = diagnostics.resourceLoaderLog.map((e) => e.name).toList();
+      expect(names, containsAllInOrder(<String>[
+        'resourceLoaderCreated',
+        'contentInfoRequested',
+        'contentInfoReady',
+      ]));
+      final ready = diagnostics.resourceLoaderLog
+          .firstWhere((e) => e.name == 'contentInfoReady');
+      expect(ready['contentType'], 'public.mpeg-4');
+      expect(ready['totalBytes'], 100 * 1024 * 1024);
+      expect(ready['byteRangeAccessSupported'], isTrue);
+      expect(ready['entireLengthAvailableOnDemand'], isFalse);
+    });
+
+    test('a served request logs offset, length and the respond', () async {
+      await session.open();
+      await session.serve(0, 512 * 1024);
+
+      final created = diagnostics.resourceLoaderLog
+          .firstWhere((e) => e.name == 'dataRequestCreated');
+      expect(created['requestedOffset'], 0);
+      expect(created['requestedLength'], 512 * 1024);
+      expect(created['availableBytes'], 2 * 1024 * 1024);
+
+      final respond =
+          diagnostics.resourceLoaderLog.firstWhere((e) => e.name == 'respond');
+      expect(respond['respondCount'], 1);
+      expect(respond['respondBytes'], 512 * 1024);
+    });
+
+    test('waiting on a growing file is logged, not invented as a failure',
+        () async {
+      await session.open();
+      await session.serve(50 * 1024 * 1024, 64 * 1024);
+
+      final waiting = diagnostics.resourceLoaderLog
+          .where((e) => e.name == 'waitingForGrowth')
+          .toList();
+      expect(waiting, isNotEmpty);
+      expect(waiting.first['offset'], 50 * 1024 * 1024);
+      expect(waiting.first['stalled'], isFalse);
+      // The window move that makes the wait finite is logged too.
+      final targeted = diagnostics.resourceLoaderLog
+          .where((e) => e.name == 'targetedDownloadRequested')
+          .toList();
+      expect(targeted, isNotEmpty);
+    });
+
+    test('every entry carries the identity of the play', () async {
+      await session.open();
+      await session.serve(0, 1024);
+      for (final event in diagnostics.resourceLoaderLog) {
+        expect(event.chatId, 4);
+        expect(event.messageId, 5);
+        expect(event.fileId, 9);
+        expect(event.generation, diagnostics.generation);
+      }
+    });
+
+    test('the log is exported with the report', () async {
+      await session.open();
+      await session.serve(0, 1024);
+      final json = diagnostics.toJson();
+      final rl = json['resourceLoader'] as Map<String, Object?>;
+      final events = rl['events'] as List<Object?>;
+      expect(events, isNotEmpty);
+      final first = events.first as Map<String, Object?>;
+      expect(first['name'], 'resourceLoaderCreated');
+      expect(first['file'], 9);
+      expect(first['generation'], diagnostics.generation);
+    });
+
+    test('a new play starts with an empty log', () async {
+      await session.open();
+      expect(diagnostics.resourceLoaderLog, isNotEmpty);
+      diagnostics.beginPlay(fileId: 10, streaming: true, chatId: 4, messageId: 6);
+      expect(diagnostics.resourceLoaderLog, isEmpty);
     });
   });
 

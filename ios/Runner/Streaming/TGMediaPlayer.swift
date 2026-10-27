@@ -257,11 +257,15 @@ final class TGMediaPlayerView: NSObject, FlutterPlatformView {
 
   private func attachIfNeeded() {
     guard let player = host?.player(id: playerId) else { return }
-    if attachedPlayer === player, attachedLayer != nil { return }
+    if attachedPlayer === player, let attached = attachedLayer {
+      // `CALayer.autoresizingMask` does not exist on iOS, so the frame is
+      // re-applied on every layout pass instead of being automated.
+      attached.frame = container.bounds
+      return
+    }
     attachedLayer?.removeFromSuperlayer()
     let layer = player.playerLayer
     layer.frame = container.bounds
-    layer.autoresizingMask = [.layerWidthSizable, .layerHeightSizable]
     container.layer.addSublayer(layer)
     attachedLayer = layer
     attachedPlayer = player

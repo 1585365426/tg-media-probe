@@ -58,8 +58,13 @@ final class TGMediaResourceLoader: NSObject, AVAssetResourceLoaderDelegate {
       info.isByteRangeAccessSupported = true
       // Only a finished download is fully available. Claiming otherwise for a
       // growing file is what makes AVPlayer read past EOF, give up, and report
-      // "无法连接服务器".
-      info.isEntireLengthAvailableOnDemand = session.completed
+      // "无法连接服务器". The property itself only exists from iOS 16; on 15 the
+      // absence of an answer is the default AVFoundation assumption, and the
+      // loader's job stays the same — wait for growth instead of ending the
+      // request short.
+      if #available(iOS 16.0, *) {
+        info.isEntireLengthAvailableOnDemand = session.completed
+      }
       host?.emit(type: "contentInfo", session: session, extra: [
         "total": session.totalBytes,
         "contentType": session.contentType,
@@ -116,7 +121,9 @@ final class TGMediaResourceLoader: NSObject, AVAssetResourceLoaderDelegate {
   ) {
     let total = session.totalBytes
     let start = dataRequest.requestedOffset
-    let requested = dataRequest.requestedLength
+    // `requestedOffset` is Int64, `requestedLength` is Int: one explicit
+    // conversion here keeps the arithmetic below in a single type.
+    let requested = Int64(dataRequest.requestedLength)
 
     // End of what the player wants, exclusive. `requestsAllDataToEndOfResource`
     // means "everything from here on" — for a growing file that is the total

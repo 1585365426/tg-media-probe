@@ -27,6 +27,7 @@ import '../data/video_number_lookup.dart';
 import '../playback/media_metadata.dart';
 import '../playback/playback_trace.dart';
 import '../playback/native_streaming.dart';
+import '../playback/playback_failure.dart';
 import '../playback/player_slot.dart';
 import '../playback/video_source.dart';
 import '../playback/watch_store.dart';
@@ -648,6 +649,7 @@ class FeedController extends ChangeNotifier {
         _fail(
           e.message,
           failure: e.isStall ? RequestFailure.offline : RequestFailure.generic,
+          kind: classifyPlaybackFailure(e),
         );
         return;
       }
@@ -656,7 +658,11 @@ class FeedController extends ChangeNotifier {
       final path = await _fallbackFullDownload(record, trace, e, generation);
       if (path == null) {
         if (!_ownsRecord(generation, record)) return;
-        _fail(e.message, failure: classifyFailure(e));
+        _fail(
+          e.message,
+          failure: classifyFailure(e),
+          kind: classifyPlaybackFailure(e),
+        );
         return;
       }
       source = PlaySource.file(path);
@@ -664,7 +670,11 @@ class FeedController extends ChangeNotifier {
       final path = await _fallbackFullDownload(record, trace, e, generation);
       if (path == null) {
         if (!_ownsRecord(generation, record)) return;
-        _fail('$e', failure: classifyFailure(e));
+        _fail(
+          '$e',
+          failure: classifyFailure(e),
+          kind: classifyPlaybackFailure(e),
+        );
         return;
       }
       source = PlaySource.file(path);
@@ -1365,10 +1375,22 @@ class FeedController extends ChangeNotifier {
     _poll = null;
   }
 
-  void _fail(String message, {RequestFailure failure = RequestFailure.generic}) {
+  void _fail(
+    String message, {
+    RequestFailure failure = RequestFailure.generic,
+    PlaybackFailure? kind,
+  }) {
     _phase = FeedPhase.error;
     _error = message;
     _failure = failure;
+    // One classification, recorded once: the panel, the exported report and
+    // the error page then name the same reason. Classified from the message
+    // only when the caller did not know better — most call sites throw a typed
+    // exception and pass its kind explicitly.
+    _diagnostics.noteFailure(
+      kind ?? classifyPlaybackMessage(message),
+      message: message,
+    );
     _bufferFraction = 0;
     _stopPolling();
     _notify();

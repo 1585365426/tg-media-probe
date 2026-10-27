@@ -16,12 +16,18 @@ import UIKit
 /// no connection lifetime to mismanage: the loader answers byte ranges
 /// directly, which is the whole point of moving off the V1 proxy.
 enum TGMediaStreamingPlugin {
-  static func register(with registrar: FlutterPluginRegistrar) {
+  /// `FlutterBaseRegistrar` is the common base of `FlutterPluginRegistrar` and
+  /// `FlutterApplicationRegistrar`. The app registers this on the application
+  /// registrar (it must exist before the first frame), so the narrower
+  /// `FlutterPluginRegistrar` type would not accept it — and the only two
+  /// facilities used here, `messenger()` and `registerViewFactory`, live on
+  /// the base protocol anyway.
+  static func register(with registrar: FlutterBaseRegistrar) {
     let host = TGMediaStreamingHost.install(messenger: registrar.messenger())
     host.attach()
     // The view is only the `AVPlayerLayer`; every overlay and gesture stays in
     // Flutter, so the immersive feed looks exactly as before.
-    registrar.register(
+    registrar.registerViewFactory(
       TGMediaPlayerViewFactory(host: host),
       withId: "tgmedia/player_view"
     )

@@ -231,6 +231,20 @@ class NativeStreamPlayerHandle
     final id = event['playerId'];
     if (id != null && id != sessionId) return;
     final type = event['type'] as String? ?? '';
+    // The native side speaks in short type names; the diagnostics log speaks
+    // in the names the acceptance report asked for. One translation table, so
+    // a report line and a native event can always be matched up.
+    final logged = _nativeEventNames[type];
+    if (logged != null) {
+      StreamingDiagnostics.instance.noteResourceLoaderEvent(
+        logged,
+        fields: <String, Object?>{
+          for (final entry in event.entries)
+            if (entry.key != 'type' && entry.key != 'playerId')
+              entry.key: entry.value,
+        },
+      );
+    }
     switch (type) {
       case 'ready':
         _buffering = false;
@@ -270,6 +284,21 @@ class NativeStreamPlayerHandle
   void _complete(bool ok) {
     if (!_ready.isCompleted) _ready.complete(ok);
   }
+
+  /// Native event type → the name the diagnostics log records.
+  static const Map<String, String> _nativeEventNames = <String, String>{
+    'sessionOpen': 'sessionOpen',
+    'contentInfo': 'contentInfoReady',
+    'dataRequest': 'dataRequestCreated',
+    'waiting': 'waitingForGrowth',
+    'requestFinished': 'dataRequestFinished',
+    'requestCancelled': 'dataRequestCancelled',
+    'supplyError': 'supplyError',
+    'playerCreated': 'playerItemCreated',
+    'ready': 'playerReady',
+    'failed': 'playerFailed',
+    'firstFrame': 'firstFrame',
+  };
 
   static Duration _ms(Object? value) {
     final ms = value is int ? value : (value is num ? value.toInt() : 0);

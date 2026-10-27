@@ -27,6 +27,7 @@ import '../td/td_models.dart' show FileState;
 import '../util/byte_format.dart';
 import '../util/redact.dart';
 import 'mp4_probe.dart';
+import 'playback_failure.dart';
 import 'stream_proxy.dart' show ProxyExchange;
 
 /// What the recorded evidence says.
@@ -78,6 +79,48 @@ class StreamingGrowthSample {
 
   final int millis;
   final int bytes;
+}
+
+/// One Streaming V2 event, stamped with the play it belongs to.
+///
+/// The acceptance questions are per-request ("did request 3 get more than one
+/// respond", "did the tail request finish or was it cancelled"), so the log
+/// keeps the fields instead of a rendered string.
+class ResourceLoaderEvent {
+  const ResourceLoaderEvent({
+    required this.name,
+    required this.fields,
+    required this.chatId,
+    required this.messageId,
+    required this.fileId,
+    required this.generation,
+    required this.elapsedMillis,
+  });
+
+  /// `resourceLoaderCreated`, `contentInfoRequested`, `contentInfoReady`,
+  /// `dataRequestCreated`, `respond`, `waitingForGrowth`, `growthDetected`,
+  /// `targetedDownloadRequested`, `dataRequestFinished`,
+  /// `dataRequestCancelled`, `playerItemCreated`, `playerReady`,
+  /// `playerFailed`.
+  final String name;
+  final Map<String, Object?> fields;
+  final int? chatId;
+  final int? messageId;
+  final int? fileId;
+  final int generation;
+  final int elapsedMillis;
+
+  Object? operator [](String key) => fields[key];
+
+  /// `t=120ms dataRequestCreated offset=0 length=524288 file=9123 gen=7`
+  @override
+  String toString() {
+    final rest = fields.entries.map((e) => '${e.key}=${e.value}').join(' ');
+    final identity = 'file=${fileId ?? '-'} msg=${messageId ?? '-'} '
+        'chat=${chatId ?? '-'} gen=$generation';
+    return 't=${elapsedMillis}ms $name'
+        '${rest.isEmpty ? '' : ' $rest'} $identity';
+  }
 }
 
 /// Live streaming diagnostics for the current (or last) play.
@@ -252,6 +295,11 @@ class StreamingDiagnostics extends ChangeNotifier {
   int? _playerFailedMillis;
   String? _playerFailedText;
 
+  /// Why this play failed, in the one vocabulary the report and the error page
+  /// share. Null while the play is healthy.
+  PlaybackFailure? _failureKind;
+  String? _failureMessage;
+
   int _totalBytes = 0;
   int _downloadedBytes = 0;
   int _headBytes = 0;
@@ -341,6 +389,10 @@ class StreamingDiagnostics extends ChangeNotifier {
   int? get playerReadyMillis => _playerReadyMillis;
   int? get playerFailedMillis => _playerFailedMillis;
   String? get playerFailedText => _playerFailedText;
+
+  /// The classified reason this play ended in an error page, or null.
+  PlaybackFailure? get failureKind => _failureKind;
+  String? get failureMessage => _failureMessage;
 
   int get totalBytes => _totalBytes;
   int get downloadedBytes => _downloadedBytes;
@@ -639,6 +691,46 @@ class StreamingDiagnostics extends ChangeNotifier {
     _note('RL $text');
   }
 
+  /// Streaming V2 event log.
+  ///
+  /// One entry per thing that actually happened — a content information
+  /// request, a data request, a respond, a window move, a finished request, a
+  /// player item becoming ready. Free-text `_note` lines cannot answer "how
+  /// many responds did request 3 get", and the acceptance questions are
+  /// exactly that specific.
+  ///
+  /// Every entry carries the identity it belongs to, so a request left over
+  /// from the previous video is visible as a different `fileId`/generation
+  /// instead of being mixed into the current play's numbers.
+  final List<ResourceLoaderEvent> _rlLog = <ResourceLoaderEvent>[];
+
+  /// Bounded: an idle player polls, and a 4 GB film would otherwise grow this
+  /// list for the whole session.
+  static const int maxResourceLoaderEvents = 400;
+
+  List<ResourceLoaderEvent> get resourceLoaderLog =>
+      List<ResourceLoaderEvent>.unmodifiable(_rlLog);
+
+  void noteResourceLoaderEvent(
+    String name, {
+    Map<String, Object?> fields = const <String, Object?>{},
+    int? generation,
+  }) {
+    if (_sealedResult || _stale(generation)) return;
+    if (_rlLog.length >= maxResourceLoaderEvents) _rlLog.removeAt(0);
+    _rlLog.add(ResourceLoaderEvent(
+      name: name,
+      fields: fields,
+      chatId: _chatId,
+      messageId: _messageId,
+      fileId: _fileId,
+      generation: generation ?? _generation,
+      elapsedMillis: _elapsed(),
+    ));
+    _note('RL $name ${fields.entries.map((e) => '${e.key}=${e.value}').join(' ')}');
+    notifyListeners();
+  }
+
   /// The tapped list item, as the local index has it.
   ///
   /// Written by the feed controller before it resolves a play. It survives
@@ -711,9 +803,18 @@ class StreamingDiagnostics extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// The player object was constructed for this play.
-  void notePlayerCreated({int? generation}) {
+  /// Records why the play failed. Called once, from the failure path, so the
+  /// panel and the exported report name the same reason the user was shown.
+  void noteFailure(PlaybackFailure kind, {String? message, int? generation}) {
     if (_sealedResult || _stale(generation)) return;
+    _failureKind = kind;
+    _failureMessage = message;
+    _note('failure=${kind.code}${message == null ? '' : ': $message'}');
+    notifyListeners();
+  }
+
+  /// The player object was constructed for this play.
+  void notePlayerCreated({int? generation}) {    if (_sealedResult || _stale(generation)) return;
     _playerCreatedMillis ??= _elapsed();
     _note('player created');
     notifyListeners();
@@ -803,11 +904,14 @@ class StreamingDiagnostics extends ChangeNotifier {
     _rlBytes = 0;
     _rlStalls = 0;
     _rlContentInfo = null;
+    _rlLog.clear();
     _moov = MoovPosition.unknown;
     _playerCreatedMillis = null;
     _playerReadyMillis = null;
     _playerFailedMillis = null;
     _playerFailedText = null;
+    _failureKind = null;
+    _failureMessage = null;
     _decisionPreference = null;
     _decisionForce = null;
     _decisionCandidate = null;
@@ -1101,9 +1205,14 @@ class StreamingDiagnostics extends ChangeNotifier {
             'status=${_lastStatus ?? '-'} 206x$_partialContentCount',
         'range truncated=$_truncatedCount forward=$_forwardRangeRequests '
             'moov=${_moov.name}',
-        if (_playerSourceType == 'RESOURCE_LOADER' || _rlRequests > 0)
+        if (_playerSourceType == 'RESOURCE_LOADER' || _rlRequests > 0) ...[
           'v2 sessions=$_rlSessions req=$_rlRequests resp=$_rlResponds '
               'bytes=$_rlBytes stalls=$_rlStalls',
+          // The last few V2 events, oldest first: the sequence that answers
+          // "did it wait for growth or did it finish short".
+          for (final event in _rlLog.reversed.take(6).toList().reversed)
+            'rl ${event.name} ${event.fields.entries.map((e) => '${e.key}=${e.value}').join(' ')}',
+        ],
         // One line per exchange, newest last: what the player asked for, what
         // the proxy declared, and how many bytes really went out.
         for (final exchange in _exchanges.reversed.take(4))
@@ -1262,6 +1371,8 @@ class StreamingDiagnostics extends ChangeNotifier {
         ? 'tailRequests=0 NO_TAIL_REQUEST'
         : 'tailRequests=$_forwardRangeRequests');
     lines.add('moov=${_moov.name}');
+    lines.add('failure=${_failureKind?.code ?? 'NONE'}'
+        '${_failureMessage == null ? '' : ' ${_failureMessage!}'}');
     lines.add('playerItemCreated=${_stamp(_playerCreatedMillis)} '
         'ready=${_stamp(_playerReadyMillis)} '
         'failed=${_stamp(_playerFailedMillis)}');
@@ -1324,6 +1435,15 @@ class StreamingDiagnostics extends ChangeNotifier {
         'proxyStartedMillis': _proxyStartedMillis,
         'verdict': verdict.code,
         'moov': _moov.name,
+        // Why the play failed, in the same vocabulary the error page used.
+        // A report that says "network" for every failure cannot be acted on;
+        // this is the field that tells a codec problem from a stalled
+        // download.
+        'failure': <String, Object?>{
+          'kind': _failureKind?.code,
+          'message': _failureMessage,
+          'retryable': _failureKind?.retryable,
+        },
         'truncatedRanges': _truncatedCount,
         'resourceLoader': <String, Object?>{
           'sessions': _rlSessions,
@@ -1332,6 +1452,21 @@ class StreamingDiagnostics extends ChangeNotifier {
           'bytes': _rlBytes,
           'stalls': _rlStalls,
           'contentInfo': _rlContentInfo,
+          // The ordered events, each stamped with chat/message/file/generation
+          // — the part of the report that answers "did it wait for growth or
+          // did it finish short".
+          'events': <Map<String, Object?>>[
+            for (final event in _rlLog)
+              <String, Object?>{
+                'name': event.name,
+                'at': event.elapsedMillis,
+                'chat': event.chatId,
+                'message': event.messageId,
+                'file': event.fileId,
+                'generation': event.generation,
+                ...event.fields,
+              },
+          ],
         },
         'incompleteBodies': _incompleteCount,
         'headerMismatches': _headerMismatchCount,
