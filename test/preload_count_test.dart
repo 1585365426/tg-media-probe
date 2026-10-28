@@ -67,12 +67,20 @@ class _Transfer implements FileTransferApi {
   final Set<int> failIds;
   final List<int> started = <int>[];
   final List<int> cancelled = <int>[];
+  /// Every request with the caller that sent it. B+ reads this to prove a
+  /// preload never becomes a transfer.
+  final List<(int, DownloadCaller)> calls = <(int, DownloadCaller)>[];
+  final Set<int> _done = <int>{};
+
   final StreamController<FileState> _updates =
       StreamController<FileState>.broadcast();
 
   @override
   Future<FileState?> stat(int fileId) async {
-    final local = localIds.contains(fileId);
+    // A finished download changes what `stat` answers, the way TDLib does.
+    // Without this the B+ chain (reader → disk watermark) could never see the
+    // file as complete and every play would wait out its timeout.
+    final local = localIds.contains(fileId) || _done.contains(fileId);
     return FileState(
       id: fileId,
       size: local ? 1024 : 0,
@@ -86,10 +94,12 @@ class _Transfer implements FileTransferApi {
 
   @override
   Future<void> start(int fileId, {DownloadCaller caller = DownloadCaller.unknown, String cause = ''}) async {
+    calls.add((fileId, caller));
     if (failIds.contains(fileId)) {
       throw VideoSourceException('TDLib error 400: FILE_ID_INVALID');
     }
     started.add(fileId);
+    _done.add(fileId);
     // Complete immediately: without an update the resolver would wait for its
     // 15 s timeout and every test here would need half a minute.
     _updates.add(FileState(
@@ -105,6 +115,7 @@ class _Transfer implements FileTransferApi {
 
   @override
   Future<void> startRange(int fileId, {required int offset, required int limit, int priority = 16, DownloadCaller caller = DownloadCaller.unknown, String cause = ''}) async {
+    calls.add((fileId, caller));
     if (failIds.contains(fileId)) {
       throw VideoSourceException('TDLib error 400: FILE_ID_INVALID');
     }
@@ -245,15 +256,21 @@ void main() {
       c.shutdown();
     });
 
-    test('count 2 prefetches exactly the next two items', () async {
-      final transfer = _Transfer(localIds: <int>{900100});
+    test('count 2 warms exactly the next two items, and downloads nothing',
+        () async {
+      // B+：预取不再是 TDLib 请求。已在本地的邻居被「warm」，其余等用户点开
+      // 时由 Downloader 拉全文件。窗口仍然只有 2 个。
+      final transfer = _Transfer(localIds: <int>{900100, 900099, 900098});
       final c = controller(transfer: transfer, preloadCount: 2);
       await c.load();
       await Future<void>.delayed(const Duration(milliseconds: 20));
 
-      // First two items are 100 (local, no transfer) and 99, 98 as prefetch.
-      expect(transfer.started, <int>[900099, 900098]);
-      expect(c.prefetchCompleted, 2);
+      expect(c.prefetchCompleted, 2, reason: '窗口内的两个邻居被 warm');
+      expect(
+        transfer.calls.where((c) => c.$2 == DownloadCaller.preload),
+        isEmpty,
+        reason: 'B+：preload 不得发出任何 TDLib 请求',
+      );
       c.shutdown();
     });
 
@@ -329,17 +346,27 @@ void main() {
     // 152 MB video first; the fix is that preloading cannot reach the player
     // at all, so the only id that may appear here is the one that was tapped.
     test('a prefetched neighbour never becomes the player', () async {
-      final transfer = _Transfer(localIds: <int>{900100});
+      // 只有已在本地的邻居会被 warm；未下载的邻居连请求都不发（B+）。
+      final transfer = _Transfer(localIds: <int>{900100, 900099});
       final c = controller(transfer: transfer, preloadCount: 3);
       await c.load();
       await Future<void>.delayed(const Duration(milliseconds: 20));
 
       expect(c.activeFileId, 900100);
       expect(c.current?.messageId, 100);
-      expect(transfer.started, isNot(contains(900100)),
-          reason: '预加载不得碰当前正在播放的文件');
-      // Whatever the window warmed, it is not the play.
-      expect(c.prefetchCompleted, greaterThanOrEqualTo(1));
+      // 当前项只由 Downloader 请求一次；预取连请求都不发。
+      expect(
+        transfer.calls.where((call) => call.$2 == DownloadCaller.preload),
+        isEmpty,
+        reason: '预加载不得发出 TDLib 请求',
+      );
+      expect(
+        transfer.calls.where((call) => call.$1 == 900100).length,
+        lessThanOrEqualTo(1),
+        reason: '当前项已在本地的情形下不应再有下载请求',
+      );
+      // 窗口里只有那个已完成的邻居被 warm，其余等用户点开。
+      expect(c.prefetchCompleted, 1);
       c.shutdown();
     });
 

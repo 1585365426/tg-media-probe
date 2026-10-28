@@ -48,19 +48,28 @@ class _Transfer implements FileTransferApi {
   final StreamController<FileState> _updates =
       StreamController<FileState>.broadcast();
 
+  /// Files TDLib has finished for this test — `stat` answers them as complete
+  /// and on disk, the way the real backend does. Without it the B+ chain
+  /// (reader → disk watermark) waits on a file that never appears.
+  final Set<int> _done = <int>{};
+
   @override
-  Future<FileState?> stat(int fileId) async => FileState(
-        id: fileId,
-        size: 0,
-        expectedSize: 4096,
-        downloadedSize: 0,
-        isCompleted: false,
-        path: '',
-        canBeDownloaded: true,
-      );
+  Future<FileState?> stat(int fileId) async {
+    final local = _done.contains(fileId);
+    return FileState(
+      id: fileId,
+      size: local ? 4096 : 0,
+      expectedSize: 4096,
+      downloadedSize: local ? 4096 : 0,
+      isCompleted: local,
+      path: local ? '/pool/$fileId' : '',
+      canBeDownloaded: true,
+    );
+  }
 
   @override
   Future<void> start(int fileId, {DownloadCaller caller = DownloadCaller.unknown, String cause = ''}) async {
+    _done.add(fileId);
     _updates.add(FileState(
       id: fileId,
       size: 4096,
@@ -240,7 +249,16 @@ void main() {
       final controller = FeedController(
         source: IndexFeedSource(store: store, chatId: 1),
         player: SinglePlayerController(factory: factory),
-        sources: VideoSourceResolver(api: api, fileExists: (_) async => true),
+        sources: VideoSourceResolver(
+          api: api,
+          fileExists: (_) async => true,
+          // Pool paths are fake; the volume answers for them.
+          diskSizeOf: (_) async => 4096,
+          // These tests only assert chrome state across a swipe. A neighbour
+          // that has to be fetched would otherwise sit out the 15 s stall
+          // timeout twice and blow the 30 s test budget.
+          stallTimeout: const Duration(milliseconds: 200),
+        ),
         preloadCount: 0,
         pollInterval: null,
       );
@@ -298,7 +316,16 @@ void main() {
       final controller = FeedController(
         source: IndexFeedSource(store: store, chatId: 1),
         player: SinglePlayerController(factory: _Factory()),
-        sources: VideoSourceResolver(api: api, fileExists: (_) async => true),
+        sources: VideoSourceResolver(
+          api: api,
+          fileExists: (_) async => true,
+          // Pool paths are fake; the volume answers for them.
+          diskSizeOf: (_) async => 4096,
+          // These tests only assert chrome state across a swipe. A neighbour
+          // that has to be fetched would otherwise sit out the 15 s stall
+          // timeout twice and blow the 30 s test budget.
+          stallTimeout: const Duration(milliseconds: 200),
+        ),
         watch: watch,
         preloadCount: 0,
         pollInterval: null,
@@ -339,7 +366,16 @@ void main() {
       final controller = FeedController(
         source: IndexFeedSource(store: store, chatId: 1),
         player: SinglePlayerController(factory: _Factory()),
-        sources: VideoSourceResolver(api: api, fileExists: (_) async => true),
+        sources: VideoSourceResolver(
+          api: api,
+          fileExists: (_) async => true,
+          // Pool paths are fake; the volume answers for them.
+          diskSizeOf: (_) async => 4096,
+          // These tests only assert chrome state across a swipe. A neighbour
+          // that has to be fetched would otherwise sit out the 15 s stall
+          // timeout twice and blow the 30 s test budget.
+          stallTimeout: const Duration(milliseconds: 200),
+        ),
         watch: watch,
         preloadCount: 0,
         pollInterval: null,

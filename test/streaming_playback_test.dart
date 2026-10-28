@@ -222,6 +222,9 @@ class RepairingMetadata implements MediaMetadataLookup {
 /// exactly — same interface, same window semantics including the coverage map
 /// (bytes stay readable after the window moves away).
 class FixtureWatch implements FileProgressWatch {
+  @override
+  bool get canDownload => !api.completed;
+
   FixtureWatch(this.api, this.fileId, {FileState? initial}) {
     // A broadcast stream never replays: a fixture built after `advance` or
     // `complete` needs the state pushed as if it had been listening.
@@ -604,10 +607,10 @@ void main() {
       await api.close();
     });
 
-    test('the play opens a bounded window, never the whole file', () async {
-      // 64 MB on the server, 512 KB on disk: the old first request was
-      // `downloadFile(offset: 0, limit: 0)` — TDLib's "to the end of file" —
-      // and it ran while AVPlayer was still initialising.
+    test('the play opens one whole-file download, never a window', () async {
+      // B+：首窗口请求已经删除。播放路径不向 TDLib 要任何范围——下载由
+      // Downloader 以 downloadFile(offset:0, limit:0) 发起一次，播放只读增长中的
+      // 本地文件。旧形态（PLAYER 发 limit=0 或首窗口）在本断言下必然失败。
       final api = ScriptedFile(sandbox, expectedSize: 64 * 1024 * 1024);
       await api.advance(512 * 1024);
       final resolver = VideoSourceResolver(
@@ -618,12 +621,10 @@ void main() {
 
       final source = await resolver.resolveStream(1002);
 
-      expect(api.lastCaller, DownloadCaller.player);
-      expect(api.lastRange, isNotNull);
-      expect(api.lastRange!.$1, 0);
-      expect(api.lastRange!.$2, StreamWindow.firstBytes);
-      expect(api.lastRange!.$2, lessThan(api.expectedSize),
-          reason: '首窗口不得是整文件');
+      expect(api.rangeCalls, 0, reason: '播放路径不得发起任何窗口请求');
+      expect(api.downloadCalls, 1,
+          reason: '一次播放只有一次整文件下载，由 Downloader 发起');
+      expect(source.url, startsWith('http'));
 
       await source.dispose();
       await api.close();

@@ -26,6 +26,7 @@ import '../data/media_record.dart';
 import '../data/video_number_lookup.dart';
 import '../playback/media_metadata.dart';
 import '../playback/playback_trace.dart';
+import '../playback/downloader.dart';
 import '../playback/native_streaming.dart';
 import '../playback/playback_failure.dart';
 import '../playback/playback_session.dart';
@@ -120,6 +121,7 @@ class FeedController extends ChangeNotifier {
     bool preloadAdjacent = true,
     int? preloadCount,
     this.pollInterval = const Duration(milliseconds: 250),
+    this.fullDownloadWait = const Duration(minutes: 30),
     this.watch,
     StreamingDiagnostics? diagnostics,
   })  : _muted = defaultMuted,
@@ -148,6 +150,12 @@ class FeedController extends ChangeNotifier {
 
   /// Playhead polling. Null in tests, where time does not pass.
   final Duration? pollInterval;
+
+  /// How long a stream failure may wait for the play's existing full download
+  /// to land before the play gives up. Exposed because a wait that only a
+  /// device can end is untestable, and because "how patient" is a product
+  /// decision, not a constant buried in a loop.
+  final Duration fullDownloadWait;
 
   /// Local watch state (position + finished). Optional so a test without one
   /// exercises exactly the same playback path minus the bookkeeping.
@@ -806,6 +814,18 @@ class FeedController extends ChangeNotifier {
           onRecordRefreshed: _absorbRefreshed,
           onProgress: onProgress,
         );
+      } on DiskFullException catch (e) {
+        _failedStreamTransport = StreamTransport.resourceLoader;
+        _diagnostics.noteTransportAttempt('RESOURCE_LOADER', failed: true);
+        // The disk refused the download before TDLib was asked: this is not
+        // a transport failure and has no transport recovery.
+        _diagnostics.noteDecision(
+          candidate: false,
+          decision: 'DISK_FULL',
+          reason: e.message,
+          generation: generation,
+        );
+        rethrow;
       } on VideoSourceTimeout {
         _failedStreamTransport = StreamTransport.resourceLoader;
         _diagnostics.noteTransportAttempt('RESOURCE_LOADER', failed: true);
@@ -1011,87 +1031,87 @@ class FeedController extends ChangeNotifier {
       if (!_ownsRecord(generation, record)) return null;
     }
 
-    // 3. One whole-file fallback per session — and only for a file TDLib
-    //    actually has a record for. A missing record is an id problem: the
-    //    fresh stat above could not resolve the message's file, and a
-    //    whole-file request for that same unproven id is how the device log
-    //    burned a `downloadFile` on 4999 and downloaded 2221 instead. The
-    //    play stops; the budget survives for a tap whose id resolved.
-    if (facts.hasRecord) {
-      final session = _session;
-      if (session != null && session.spendFullDownloadFallback()) {
-        return _fullDownloadFallback(record, trace, generation);
-      }
+    // 3. B+: the full download is the play's *one* download, started by the
+    //    Downloader before the stream existed. A streaming failure must not
+    //    create a second one — if it is still running, the play waits for the
+    //    file to finish on disk and plays it as LOCAL_FILE.
+    if (sources.downloader.isRunning(record.fileId)) {
+      return _waitForFullDownload(record, trace, generation,
+          reason: 'stream_failed_download_still_running');
     }
 
-    // 4. Nothing left that does not involve downloading the film — and the
-    //    one download this session was allowed has been spent.
+    // 4. The download is not running (TDLib refused or the transfer died).
+    //    One restart per session — the budget here is a restart, never a
+    //    second concurrent download. A missing record is an id problem: the
+    //    fresh stat above could not resolve the message's file, and a
+    //    whole-file request for that same unproven id is how the device log
+    //    burned a `downloadFile` on 4999 and downloaded 2221 instead.
+    final session = _session;
+    if (facts.hasRecord && session != null && session.spendFullDownloadFallback()) {
+      try {
+        await sources.downloader.restart(
+          chatId: record.chatId,
+          messageId: record.messageId,
+          fileId: record.fileId,
+          expectedSize: facts.expectedBytes,
+          generation: generation,
+        );
+      } on Object catch (e) {
+        _diagnostics.noteDecision(
+          decision: 'STOP',
+          reason: 'download_restart_failed:$e',
+          generation: generation,
+        );
+        return null;
+      }
+      return _waitForFullDownload(record, trace, generation,
+          reason: 'download_restarted_once');
+    }
+
+    // 5. Nothing left: the budget is spent and the file is still short.
     return null;
   }
 
-  /// The explicit last rung: download the whole file, on purpose, with the
-  /// user watching a progress bar instead of a spinner.
+  /// Waits for the Downloader's whole-file transfer to land, then plays it.
   ///
-  /// Reachable exactly once per [PlaybackSession] — the caller spent the
-  /// budget to get here. The door in the audit (`wholeFileAllowed`) is
-  /// reopened for this one call: the stream that closed it has already
-  /// failed, and this is the play's documented way out, not a background
-  /// decision. What comes back is measured: a "completed" transfer with no
-  /// bytes behind the path is an error, never a [PlaySource.file].
-  Future<PlaySource?> _fullDownloadFallback(
+  /// This is the B+ answer to "streaming failed": never a second
+  /// `downloadFile`, just patience with the transfer that already exists.
+  /// The poll reads TDLib's file record and measures the disk — the same two
+  /// facts every LOCAL_FILE decision is required to use.
+  Future<PlaySource?> _waitForFullDownload(
     MediaRecord record,
     PlaybackTrace trace,
-    int generation,
-  ) async {
+    int generation, {
+    required String reason,
+  }) async {
     _fallbackOccurred = true;
-    _diagnostics.allowWholeFile();
     _diagnostics.noteDecision(
       proxyAvailable: false,
-      decision: 'FULL_DOWNLOAD',
-      reason: 'stream_failed_fallback_once',
+      decision: 'WAIT_FULL_DOWNLOAD',
+      reason: reason,
       generation: generation,
     );
-    final session = _session;
-    try {
-      final playable = await sources.downloadWhole(
-        record.chatId,
-        record.messageId,
-        record.fileId,
-        trace: trace,
-        generation: generation,
-      );
+    trace.note = '流式失败，等待已有整文件下载';
+    final deadline = DateTime.now().add(fullDownloadWait);
+    while (_ownsRecord(generation, record) && DateTime.now().isBefore(deadline)) {
+      final facts = await sources.inspect(record.fileId);
       if (!_ownsRecord(generation, record)) return null;
-      if (!playable.isComplete) {
-        if (phase != FeedPhase.error) {
-          _fail(
-            '下载完成但文件不完整'
-            '（${playable.localSize}/${playable.expectedSize} 字节）',
-            kind: PlaybackFailure.downloadStalled,
-          );
-        }
-        return null;
+      if (facts.isPlayableFromDisk) {
+        _diagnostics.noteDecision(
+          proxyAvailable: false,
+          decision: 'LOCAL_FILE',
+          reason: 'full_download_completed_after_stream_failure',
+          generation: generation,
+        );
+        final session = _session;
+        session?.finalSource = 'LOCAL_FILE';
+        session?.resolvedFileId = record.fileId;
+        trace.mark(PlaybackStage.fileCompleted, bytes: facts.diskSize);
+        return PlaySource.file(facts.path);
       }
-      session?.finalSource = 'LOCAL_FILE';
-      session?.resolvedFileId = playable.fileId;
-      session?.playerReady = true;
-      _diagnostics.noteDecision(
-        proxyAvailable: false,
-        decision: 'LOCAL_FILE',
-        reason: 'full_download_completed_and_verified',
-        generation: generation,
-      );
-      // The file exists because a full download put it there — the origin is
-      // part of the report, not cosmetic: `finalSource=LOCAL_FILE` without
-      // it is how a 593 MB wait once read as a cache hit.
-      return PlaySource.file(playable.localPath, origin: 'FULL_DOWNLOAD');
-    } on Object catch (e) {
-      if (!_ownsRecord(generation, record)) return null;
-      _diagnostics.noteTransportAttempt('FULL_DOWNLOAD_FALLBACK', failed: true);
-      if (phase != FeedPhase.error) {
-        _fail('整文件下载失败：$e', kind: PlaybackFailure.downloadStalled);
-      }
-      return null;
+      await Future<void>.delayed(const Duration(milliseconds: 500));
     }
+    return null;
   }
 
   /// One step down the transport chain: V2 → V1 → local file → error.
@@ -1162,6 +1182,15 @@ class FeedController extends ChangeNotifier {
       );
       final v1 = await _tryV1(record, generation, trace);
       if (v1 != null) return v1;
+      if (!_ownsRecord(generation, record)) return null;
+    }
+
+    // B+: before stopping, the one download that exists may still be running.
+    // Waiting for it is the fallback — not a second `downloadFile`.
+    if (sources.downloader.isRunning(record.fileId)) {
+      final waited = await _waitForFullDownload(record, trace, generation,
+          reason: 'stream_failed_download_still_running');
+      if (waited != null) return waited;
       if (!_ownsRecord(generation, record)) return null;
     }
 
@@ -1605,6 +1634,12 @@ class FeedController extends ChangeNotifier {
     _phase = FeedPhase.error;
     _error = message;
     _failure = failure;
+    // A failed play names its own end state: `finalSource=FAILED` with the
+    // reason, never a stale transport label from before the failure.
+    _session
+      ?..finalSource = 'FAILED'
+      ..playerReady = false;
+    _diagnostics.noteFinalSource('FAILED');
     // One classification, recorded once: the panel, the exported report and
     // the error page then name the same reason. Classified from the message
     // only when the caller did not know better — most call sites throw a typed

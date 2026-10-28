@@ -255,10 +255,9 @@ void main() {
       await transport.dispose();
     });
 
-    test('the first window is 16 MB, not the 1.33 GB file', () async {
-      // The report this replaces: a 1.33 GB video had ~152 MB on disk two
-      // seconds after the tap, before AVPlayer had asked for a byte, because
-      // the play opened with `downloadFile(offset: 0, limit: 0)`.
+    test('the play opens one whole-file download, never a window', () async {
+      // B+：首窗口链路已删除。播放只让 Downloader 发一次整文件请求，之后
+      // AVPlayer 的每个 range 都由 ResourceLoader 从增长中的本地文件回读。
       const total = 1429876103;
       final api = V2File(sandbox, expectedSize: total);
       final transport = V2Transport();
@@ -271,19 +270,16 @@ void main() {
 
       final source = await resolver.resolveStreamV2(9);
 
-      expect(api.lastCaller, DownloadCaller.player);
-      expect(api.lastRange, isNotNull);
-      expect(api.lastRange!.$1, 0);
-      expect(api.lastRange!.$2, StreamWindow.firstBytes);
-      expect(api.lastRange!.$2 / total, lessThan(0.02),
-          reason: '首窗口必须是文件的一小片，不是整文件');
+      expect(api.rangeCalls, 0, reason: '播放路径不得发起任何窗口请求');
+      expect(api.downloadCalls, 1, reason: '一次播放只有一次整文件下载');
+      expect(source.isResourceLoader, isTrue);
 
       await source.dispose();
       await api.close();
       await transport.dispose();
     });
 
-    test('a preload asks for the head window at the lowest priority', () async {
+    test('a preload downloads nothing at all', () async {
       final api = V2File(sandbox, expectedSize: 512 * 1024 * 1024);
       final resolver = VideoSourceResolver(
         api: api,
@@ -294,12 +290,12 @@ void main() {
 
       final ok = await resolver.prefetch(11);
 
-      expect(ok, isTrue);
-      expect(api.prefetchCalls, 1);
-      expect(api.lastCaller, DownloadCaller.preload);
-      expect(api.lastRange, (0, StreamWindow.preloadBytes));
-      // A neighbour the user may never open has no claim on a whole film.
-      expect(StreamWindow.preloadBytes, lessThan(StreamWindow.firstBytes));
+      // B+：预取只读本地状态。邻居的字节还没落盘，所以它既不 warm 成功，
+      // 也不向 TDLib 要任何东西。
+      expect(ok, isFalse);
+      expect(api.prefetchCalls, 0);
+      expect(api.rangeCalls, 0, reason: '预取不得发窗口请求');
+      expect(api.downloadCalls, 0, reason: '预取不得发整文件请求');
       await api.close();
     });
 
@@ -322,7 +318,7 @@ void main() {
       expect(source.isResourceLoader, isTrue);
       expect(api.downloaded, lessThan(2 * 1024 * 1024),
           reason: 'V2 不得等 2 MB 才开始');
-      expect(source.session!.watch.headBytes, greaterThan(0));
+      expect(source.session!.reader.safeWatermark, greaterThan(0));
 
       await source.dispose();
       await api.close();
@@ -468,8 +464,10 @@ void main() {
 
       final accepted = await resolver.prefetch(31);
 
-      expect(accepted, isTrue);
-      expect(api.prefetchCalls, 1);
+      // 邻居没有落盘的字节，所以 warm 不成立；关键是没有发生任何请求。
+      expect(accepted, isFalse);
+      expect(api.prefetchCalls, 0);
+      expect(api.rangeCalls, 0);
       expect(transport.opened, isEmpty,
           reason: '预加载不得创建 session，更不得创建播放器');
 
@@ -554,7 +552,7 @@ void main() {
           reason: '短文件不是本地文件，但不完整也不是不可播');
       expect(api.cancelled, contains(9),
           reason: '声称完成却字节不足，必须取消并重下');
-      expect(source.session!.watch.isComplete, isFalse,
+      expect(source.session!.reader.isComplete, isFalse,
           reason: '声明不能代替测量');
 
       await source.dispose();

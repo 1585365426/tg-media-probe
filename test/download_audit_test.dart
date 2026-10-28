@@ -34,7 +34,7 @@ void main() {
       final audit = DownloadAudit();
       final call = audit.record(
         fileId: 1,
-        caller: DownloadCaller.fullDownload,
+        caller: DownloadCaller.downloader,
         offset: 0,
         limit: 0,
         priority: 32,
@@ -42,7 +42,7 @@ void main() {
       expect(call.unbounded, isTrue);
       expect(call.windowEnd, -1);
       expect(audit.anyUnbounded, isTrue);
-      expect(audit.unboundedCalls.single.caller, DownloadCaller.fullDownload);
+      expect(audit.unboundedCalls.single.caller, DownloadCaller.downloader);
     });
   });
 
@@ -159,13 +159,13 @@ void main() {
       final audit = DownloadAudit();
       audit.record(
         fileId: 1,
-        caller: DownloadCaller.fullDownload,
+        caller: DownloadCaller.downloader,
         offset: 0,
         limit: 0,
         priority: 32,
       );
       final lines = audit.summary().join('\n');
-      expect(lines, contains('UNBOUNDED=1 callers=FULL_DOWNLOAD'));
+      expect(lines, contains('UNBOUNDED=1 callers=DOWNLOADER'));
       expect(lines, contains('limit=WHOLE_FILE'));
     });
 
@@ -226,7 +226,7 @@ void main() {
         ..forbidWholeFile('streaming:V1');
       audit.noteBlockedWholeFile(
         fileId: 27588,
-        caller: DownloadCaller.fullDownload,
+        caller: DownloadCaller.downloader,
         cause: 'full download wait',
       );
 
@@ -235,7 +235,7 @@ void main() {
             (l) => l.contains('AUTO_FULL_DOWNLOAD_BLOCKED'),
           );
       expect(line, contains('file=27588'));
-      expect(line, contains('caller=FULL_DOWNLOAD'));
+      expect(line, contains('caller=DOWNLOADER'));
       expect(line, contains('full download wait'));
     });
 
@@ -244,7 +244,7 @@ void main() {
         ..forbidWholeFile('streaming:V2')
         ..noteBlockedWholeFile(
           fileId: 7,
-          caller: DownloadCaller.fullDownload,
+          caller: DownloadCaller.downloader,
           cause: '',
         );
 

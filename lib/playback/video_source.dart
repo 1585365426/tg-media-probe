@@ -28,6 +28,8 @@ import '../td/td_client.dart';
 import '../td/td_models.dart';
 import '../td/td_requests.dart';
 import 'download_audit.dart';
+import 'downloader.dart';
+import 'growing_file_reader.dart';
 import 'media_metadata.dart';
 import 'mp4_probe.dart';
 import 'playback_session.dart';
@@ -48,7 +50,7 @@ abstract class FileTransferApi {
   Future<FileState?> stat(int fileId);
 
   /// Starts the full download (offset 0, no limit). Only the
-  /// [DownloadCaller.fullDownload] rung may use this: for a play window it
+  /// [DownloadCaller.downloader] rung may use this: for a play window it
   /// asks TDLib for the whole file.
   Future<void> start(
     int fileId, {
@@ -178,11 +180,11 @@ class TdFileTransferApi implements FileTransferApi {
     String cause = '',
   }) async {
     // The last door before the wire. `limit: 0` means "down to the end of the
-    // file", and once a play has entered a streaming transport that answer is
-    // never acceptable: 4.9 MB of proxy stall used to turn into 622 MB of
-    // download and a 162-second wait for the first frame. Refusing here means
-    // no future call site can reintroduce it by accident.
-    if (!audit.wholeFileAllowed) {
+    // file", and under B+ it belongs to exactly one caller: the Downloader.
+    // A streaming play that reached for it is the 622 MB mistake — refused.
+    // The Downloader's own whole-file request is the architecture, not a
+    // breach, and passes without a key.
+    if (caller != DownloadCaller.downloader && !audit.wholeFileAllowed) {
       audit.noteBlockedWholeFile(
         fileId: fileId,
         caller: caller,
@@ -522,10 +524,29 @@ class VideoSourceResolver {
     NativeStreamingTransport? nativeTransport,
     this.resourceLoaderPathWait = const Duration(seconds: 8),
     this.windowBytes = StreamWindow.stepBytes,
+    this.waitTimeout = const Duration(seconds: 10),
+    FreeBytesProbe? freeBytes,
   })  : _fileExists = fileExists ?? _defaultFileExists,
         _diskSizeOf = diskSizeOf ?? _defaultDiskSizeOf,
         _diagnostics = diagnostics ?? StreamingDiagnostics.instance,
-        _nativeTransport = nativeTransport ?? MethodChannelStreamingTransport();
+        _nativeTransport = nativeTransport ?? MethodChannelStreamingTransport(),
+        freeBytes = freeBytes ?? _defaultFreeBytes;
+
+  /// B+ WAIT_TIMEOUT default (task book §8): 10 seconds, configurable.
+  final Duration waitTimeout;
+
+  /// Free disk space probe; injected in tests, host OS on a device.
+  final FreeBytesProbe freeBytes;
+
+  /// The download authority: the only path from this resolver to TDLib's
+  /// download API. Every whole-file request a play makes goes through it.
+  late final TelegramMediaDownloader downloader = TelegramMediaDownloader(
+    api: api,
+    audit: _diagnostics.downloadAudit,
+    freeBytes: freeBytes,
+  )..diskSizeOf = _diskSizeOf;
+
+  static Future<int> _defaultFreeBytes() async => -1;
 
   /// Streaming V2 bridge. Injected in tests, `MethodChannel` on a device.
   final NativeStreamingTransport _nativeTransport;
@@ -1005,14 +1026,18 @@ class VideoSourceResolver {
   /// a neighbour ended up in the player.
   Future<bool> prefetch(int fileId) async {
     if (fileId <= 0) return false;
-    // The play owns its own transfer; preloading it would re-steer the very
-    // window the proxy is using.
     if (_activePlayFileId == fileId) return true;
     if (!_prefetching.add(fileId)) return true;
     try {
-      await api.prefetch(fileId);
+      // B+: preload never downloads. A warm neighbour is a *local* fact —
+      // whether its bytes are already complete. Anything else waits for the
+      // user's tap, which is where [downloader.ensureFullDownload] lives.
+      // `api.prefetch` (a TDLib range request) has no caller left under B+.
+      final state = await api.stat(fileId);
+      if (state == null) return false;
+      final facts = await _factsFor(state, fileId);
       _warmed.add(fileId);
-      return true;
+      return facts.isPlayableFromDisk;
     } on Object {
       return false;
     } finally {
@@ -1255,18 +1280,18 @@ class VideoSourceResolver {
     }
 
     // TDLib says finished, the disk says otherwise. Nothing more will ever be
-    // sent for this file, so waiting is a guaranteed stall: restart it.
+    // sent for this file, so waiting is a guaranteed stall: the Downloader
+    // cancels and re-issues the whole-file request. B+ routes that pair
+    // through the downloader — the resolver itself never sends `downloadFile`.
     if (decision.needsRedownload) {
       _diagnostics.noteSourceDecision(decision, generation: generation);
       try {
-        await api.cancel(fileId);
-        await api.startRange(
-          fileId,
-          offset: 0,
-          limit: StreamWindow.firstWindow(facts.expectedBytes),
-          priority: 32,
-          caller: DownloadCaller.player,
-          cause: 'redownload',
+        await downloader.restart(
+          chatId: chatId ?? 0,
+          messageId: messageId ?? 0,
+          fileId: fileId,
+          expectedSize: facts.expectedBytes,
+          generation: generation,
         );
       } on Object catch (e) {
         _diagnostics.noteDecision(
@@ -1283,11 +1308,34 @@ class VideoSourceResolver {
     trace?.mark(PlaybackStage.streamingModeSelected);
     _diagnostics.noteDecision(candidate: true, generation: generation);
     _diagnostics.noteStreamingSelected(generation: generation);
-    // A stream is really being attempted from here, so the whole-file door
-    // closes for the rest of this play. Set *after* the decision, not before:
-    // "size unknown / no record" is a play that never had a stream, and it
-    // must still be able to wait for the file. What is forbidden is a *failed*
-    // stream deciding to download the film.
+
+    // B+: the whole file IS the play's download. The Downloader starts it —
+    // or joins the one already running for this file — after measuring the
+    // disk rule (remaining × 1.5 free required). This is the play's single
+    // legal `limit = 0`, and it happens *before* the player exists.
+    final FullDownloadJob job;
+    try {
+      job = await downloader.ensureFullDownload(
+        chatId: chatId ?? 0,
+        messageId: messageId ?? 0,
+        fileId: fileId,
+        expectedSize: facts.expectedBytes,
+        generation: generation,
+      );
+    } on Object catch (e) {
+      // TDLib refused the id. That is the one error the repair loop can fix by
+      // re-reading the message, so it has to arrive as [_MissingFile] — a raw
+      // VideoSourceException here would end the play on a stale file id.
+      final text = '$e';
+      if (_looksMissing(text.toUpperCase())) throw _MissingFile(text);
+      rethrow;
+    }
+    if (job.state == FullDownloadState.diskFull) {
+      throw DiskFullException(job.failureReason ?? '磁盘空间不足');
+    }
+    // From here on no caller but the Downloader may send a whole-file
+    // request. The gate is closed *after* the download exists, because the
+    // download itself is the request the gate exists to allow.
     _diagnostics.forbidWholeFile(
       transport == StreamTransport.resourceLoader ? 'streaming:V2' : 'streaming:V1',
     );
@@ -1301,41 +1349,34 @@ class VideoSourceResolver {
       // superseded play keeps receiving `updateFile` for its own file, and
       // without this it wrote that file's byte counts into the live panel
       // (the "300 MB → 302 MB growth while playing a 23 MB video" report).
-      onState: (state) => _diagnostics.updateTransferFromState(
-        state,
-        generation: generation,
-      ),
+      onState: (state) {
+        _diagnostics.updateTransferFromState(
+          state,
+          generation: generation,
+        );
+        // The job is the Downloader's bookkeeping, and only TDLib's own
+        // updates can close it: without this the job stayed `running` for the
+        // life of the process, so `isRunning` lied and a recovery path waited
+        // on a download that had already ended.
+        downloader.observeTransfer(
+          fileId: fileId,
+          completed: state.isCompleted,
+          canBeDownloaded: state.canBeDownloaded,
+        );
+      },
       // Same measurement the decision layer uses: the watcher may not complete
       // the file on a length it did not read itself.
       diskSizeOf: _measureDisk,
     );
+    await watch.seed();
 
     StreamProxyServer? proxy;
     try {
       trace?.mark(PlaybackStage.downloadRequested);
-      // The first window is bounded, and it is bounded *before* the player
-      // asks for anything.
-      //
-      // This used to be `api.start(fileId)`, i.e. `downloadFile(offset: 0,
-      // limit: 0)` — "to the end of the file". TDLib accepted it and ran at
-      // priority 32 while AVPlayer was still initialising, so a 1.33 GB video
-      // had ~150 MB on disk seconds after the tap. That is the burst the
-      // device reports called "152 MB before playback"; it is bandwidth
-      // multiplied by however long initialisation took, not a constant, which
-      // is why it moved between 120 and 160 MB.
-      //
-      // A bounded head window still gives the player everything it needs for
-      // the first frame, and every later byte is asked for by the player's own
-      // request (see ResourceSupply / StreamProxyServer) or by the next
-      // continuation step.
-      await api.startRange(
-        fileId,
-        offset: 0,
-        limit: StreamWindow.firstWindow(facts.expectedBytes),
-        priority: 32,
-        caller: DownloadCaller.player,
-        cause: 'first window',
-      );
+      // No first window here any more. The Downloader owns the transfer and
+      // it is already running — the old `startRange(offset: 0, limit: 16MB,
+      // caller: PLAYER)` is exactly the path B+ deletes: the player's very
+      // existence must not reach TDLib's download API.
 
       if (transport == StreamTransport.resourceLoader) {
         // V2 has no startup gate. AVFoundation asks for the ranges it needs and
@@ -1384,17 +1425,35 @@ class VideoSourceResolver {
       }
 
       if (transport == StreamTransport.resourceLoader) {
+        // The reader sees the same file the Downloader writes: TDLib's
+        // progress is observation (the watch, via the bridge), the disk is
+        // measured, and the watermark is the min of the two. It cannot
+        // download anything.
+        final bridge = _LiveProgressBridge(watch);
+        final reader = GrowingFileReader(
+          path: localPath,
+          expectedSize: watch.expectedBytes,
+          generation: generation,
+          progress: bridge,
+          diskSizeOf: _measureDisk,
+          waitTimeout: waitTimeout,
+        );
         return await _startResourceLoader(
           fileId: fileId,
           chatId: chatId,
           messageId: messageId,
           mimeType: mimeType,
           watch: watch,
+          reader: reader,
           localPath: localPath,
           generation: generation,
           fileComplete: fileComplete,
           trace: trace,
           onProgress: onProgress,
+          onDispose: () async {
+            await reader.dispose();
+            await watch.dispose();
+          },
         );
       }
 
@@ -1475,11 +1534,13 @@ class VideoSourceResolver {
     required int? messageId,
     required String? mimeType,
     required FileProgressWatch watch,
+    required GrowingFileReader reader,
     required String localPath,
     required int generation,
     required bool fileComplete,
     PlaybackTrace? trace,
     void Function(VideoSourceUpdate update)? onProgress,
+    Future<void> Function()? onDispose,
   }) async {
     final session = ResourceLoaderSession(
       sessionId: '${fileId}_$generation',
@@ -1487,7 +1548,7 @@ class VideoSourceResolver {
       chatId: chatId ?? 0,
       messageId: messageId ?? 0,
       generation: generation,
-      watch: watch,
+      reader: reader,
       mimeType: (mimeType != null && mimeType.isNotEmpty)
           ? mimeType
           : 'video/mp4',
@@ -1530,7 +1591,7 @@ class VideoSourceResolver {
       session.url,
       localPath,
       session,
-      watch.dispose,
+      onDispose ?? watch.dispose,
     );
   }
 
@@ -1978,7 +2039,7 @@ class VideoSourceResolver {
         // keeps a *failed* stream from reaching this line.
         await api.start(
           fileId,
-          caller: DownloadCaller.fullDownload,
+          caller: DownloadCaller.downloader,
           cause: 'whole file: no stream attempted',
         );
       } on Object {
@@ -2133,6 +2194,22 @@ class _LiveFileWatch implements FileProgressWatch, WindowContinuation {
         );
   }
 
+  /// One stat after the subscription exists, so a play never waits on an
+  ///  that fired before anyone was listening.
+  ///
+  /// The whole-file request returns *before* TDLib pushes its first update, and
+  /// the push can beat the subscription that follows it — the event is then
+  /// gone for good (broadcast stream), and a watch stuck at 0 bytes rides the
+  /// stall watchdog into a phantom failure.
+  Future<void> seed() async {
+    try {
+      final state = await _api.stat(_fileId);
+      if (state != null) _onState(state);
+    } on Object {
+      // A failed seed leaves the subscription (and the watchdog) in charge.
+    }
+  }
+
   final FileTransferApi _api;
   final int _fileId;
 
@@ -2251,6 +2328,8 @@ class _LiveFileWatch implements FileProgressWatch, WindowContinuation {
   String get localPath => _path;
   @override
   Stream<void> get progress => _changes.stream;
+  @override
+  bool get canDownload => _canDownload;
 
   @override
   Future<void> requestWindow(int from, int end) async {
@@ -2396,6 +2475,27 @@ class _LiveFileWatch implements FileProgressWatch, WindowContinuation {
     await _subscription.cancel();
     if (!_changes.isClosed) await _changes.close();
   }
+}
+
+/// TDLib observation for [GrowingFileReader], read straight off the watch.
+///
+/// Purely a lens: no download call can be reached through it.
+class _LiveProgressBridge implements TdProgressSource {
+  _LiveProgressBridge(this._watch);
+
+  final FileProgressWatch _watch;
+
+  @override
+  int get tdlibReach => _watch.headBytes;
+
+  @override
+  bool get tdlibCompleted => _watch.isComplete;
+
+  @override
+  bool get tdlibCanDownload => _watch.canDownload;
+
+  @override
+  Stream<void> get changes => _watch.progress;
 }
 
 /// Internal signal used to close a completer nobody is waiting for any more.

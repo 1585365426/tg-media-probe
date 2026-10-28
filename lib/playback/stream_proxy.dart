@@ -148,6 +148,10 @@ abstract class FileProgressWatch {
   /// completion. Never fires for nothing, so "no events" is a real stall.
   Stream<void> get progress;
 
+  /// Whether TDLib would keep downloading this file. Concrete so the many
+  /// test doubles stay valid; the live watch overrides it.
+  bool get canDownload => true;
+
   /// Folds what is actually on disk into what this watch believes.
   ///
   /// `updateFile` is the only thing that normally moves [headBytes], and it

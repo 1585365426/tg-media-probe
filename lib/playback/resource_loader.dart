@@ -3,8 +3,7 @@ import 'dart:math' as math;
 
 import 'package:flutter/services.dart';
 
-import 'download_audit.dart' show DownloadCaller;
-import 'stream_proxy.dart' show FileProgressWatch, WindowContinuation;
+import 'growing_file_reader.dart';
 import 'streaming_diagnostics.dart';
 
 /// Streaming V2: the byte supply behind `AVAssetResourceLoader`.
@@ -19,10 +18,15 @@ import 'streaming_diagnostics.dart';
 /// answers with the bytes that exist and keeps answering as the file grows.
 /// The transport no longer has a status line to get wrong.
 ///
-/// What stays here, on the Dart side:
-/// * the TDLib download window (it must follow what the player is asking for);
-/// * "which bytes are readable right now" (the growing-file model);
+/// What stays here, on the Dart side (B+):
+/// * "which bytes are readable right now" — read off [GrowingFileReader]'s
+///   safe watermark, never from a TDLib download window;
+/// * WAIT when a request is past the watermark and the download is not done,
+///   and WAIT_TIMEOUT once the configured wait is spent;
 /// * the generation guard, so a superseded play cannot serve a byte.
+///
+/// Nothing in this file knows TDLib's download API exists. The downloader
+/// writes; this file reads.
 ///
 /// What moves to Swift: `AVAssetResourceLoaderDelegate`, the content
 /// information block, and the repeated `respond(with:)` calls.
@@ -138,93 +142,67 @@ class SupplyReading {
 class ResourceSupply {
   ResourceSupply({
     required this.fileId,
-    required this.watch,
+    required GrowingFileReader reader,
     this.onEvent,
     this.onTypedEvent,
-    this.steerGapBytes = 256 * 1024,
-    this.resumeGapBytes = 4 * 1024 * 1024,
-    this.windowBytes = 16 * 1024 * 1024,
-    this.stallGrace = const Duration(seconds: 20),
-    this.steerCooldown = const Duration(seconds: 2),
     DateTime Function()? clock,
   })  : _clock = clock ?? DateTime.now,
-        _lastAdvance = (clock ?? DateTime.now)();
+        reader = reader,
+        // The first read must not read as "growth": the clock starts when
+        // this supply exists, and a watermark that never moved times out
+        // exactly [reader.waitTimeout] later.
+        _lastAdvance = (clock ?? DateTime.now)() {
+    _seenWatermark = reader.safeWatermark;
+    _seenComplete = reader.isComplete;
+  }
 
   final int fileId;
-  final FileProgressWatch watch;
+
+  /// The growing local file. The only data source this supply has — there is
+  /// no code path from here to TDLib's download API, and the static-scan CI
+  /// test is what keeps it that way.
+  final GrowingFileReader reader;
   final void Function(String event)? onEvent;
 
-  /// Structured version of [onEvent]: the named events the diagnostics panel
-  /// and the acceptance report read (`growthDetected`, `waitingForGrowth`,
-  /// `targetedDownloadRequested`, `resumeSequential`). Free text cannot be
-  /// counted, and "how many targets did the loader pull" is a counted
-  /// question.
+  /// Structured events the diagnostics panel reads (`growthDetected`,
+  /// `waitingForGrowth`, `waitTimeout`). Free text cannot be counted.
   final void Function(String name, Map<String, Object?> fields)? onTypedEvent;
-
-  /// Inside this gap the sequential download is about to arrive on its own, so
-  /// the window is left alone.
-  final int steerGapBytes;
-
-  /// Nothing at the head yet and the request is close to it: restart the
-  /// sequential download instead of opening a window somewhere else.
-  final int resumeGapBytes;
-
-  /// Size of a targeted window. TDLib replaces the running download with it,
-  /// so a small window is what keeps this from degenerating into a full
-  /// download: 16 MB is several seconds of video and one moov probe.
-  final int windowBytes;
-
-  /// No growth for this long, while the file is still incomplete, is the only
-  /// condition reported as a stall. A paused player, a slow link and a TDLib
-  /// chunk boundary all stay below it, and the request keeps waiting.
-  final Duration stallGrace;
-
-  /// Minimum time between two window moves. AVPlayer polls a data request in a
-  /// tight loop; without this every poll would restart the TDLib transfer.
-  final Duration steerCooldown;
 
   final DateTime Function() _clock;
 
   DateTime _lastAdvance;
-  int _seenHead = -1;
-  int _seenReach = -1;
+  int _seenWatermark = -1;
   bool _seenComplete = false;
-  String _steerKey = '';
-  DateTime? _steerAt;
-  int _steerFrom = -1;
-  int _steerTo = -1;
-  bool _windowed = false;
-  int _steers = 0;
   int _waits = 0;
-  int _stalls = 0;
+  int _timeouts = 0;
 
-  int get steerCount => _steers;
   int get waitCount => _waits;
-  int get stallCount => _stalls;
+  int get timeoutCount => _timeouts;
 
-  /// Reads the state for [offset]. Never throws: every outcome is a reading,
-  /// because "the bytes are not there yet" is the normal case for a growing
-  /// file and must not look like an exception to the transport.
+  /// Reads the state for [offset]. Never throws and never downloads: every
+  /// outcome is a reading. "The bytes are not there yet" is the normal case
+  /// for a growing file — a WAIT, not a failure and never an EOF.
   Future<SupplyReading> read(int offset) async {
     final now = _clock();
-    final total = watch.expectedBytes;
-    final path = watch.localPath;
-    // The player's own request, recorded on the watch: a download window that
-    // is opened next is then attributable to `player=<offset>` in the audit
-    // instead of appearing out of nowhere.
-    final Object extension = watch;
-    if (extension is WindowContinuation) extension.markRead(offset);
+    final total = reader.expectedSize;
+    final path = reader.path;
 
-    // Disk first: `updateFile` stops once TDLib considers the file finished,
-    // so a supply that begins after that point would otherwise wait on
-    // silence forever. The stat is only paid when there is nothing to serve.
-    var reach = watch.readableEndFrom(offset);
-    if (!watch.isComplete && reach < offset) {
-      await watch.refresh();
-      reach = watch.readableEndFrom(offset);
+    final result = await reader.read(offset);
+
+    // Growth is the watermark moving. It is what resets the wait clock: a
+    // slow link is still downloading, and only a silent file times out.
+    if (result.watermark != _seenWatermark ||
+        result.completed != _seenComplete) {
+      _seenWatermark = result.watermark;
+      _seenComplete = result.completed;
+      _lastAdvance = now;
+      onTypedEvent?.call('growthDetected', <String, Object?>{
+        'head': result.watermark,
+        'total': total,
+      });
     }
 
-    if (watch.isComplete) {
+    if (result.completed) {
       return SupplyReading(
         path: path,
         from: offset,
@@ -235,66 +213,30 @@ class ResourceSupply {
       );
     }
 
-    // Progress is measured against what this loader can see: the head prefix
-    // and the reach at the offset it is serving. A window move that lands new
-    // bytes is progress too — the request may be waiting on a region the
-    // sequential download will never reach.
-    final head = watch.headBytes;
-    if (head != _seenHead || reach != _seenReach || watch.isComplete != _seenComplete) {
-      _seenHead = head;
-      _seenReach = reach;
-      _seenComplete = watch.isComplete;
-      _lastAdvance = now;
-      onTypedEvent?.call('growthDetected', <String, Object?>{
-        'head': head,
-        'reach': reach,
-        'total': total,
-      });
-    }
-
-    if (reach >= offset) {
+    if (result.available) {
       return SupplyReading(
         path: path,
         from: offset,
-        to: reach,
+        to: result.readableTo,
         total: total,
         completed: false,
         downloading: true,
       );
     }
 
-    // Not on disk yet. Move the window only when waiting cannot help.
-    //
-    // A window that has been filled looks exactly like a dead transfer if the
-    // only rule is "wait for growth": nothing will ever arrive again until
-    // TDLib is given a new window. Extending it first is what makes bounded
-    // windows playable at all.
-    if (extension is WindowContinuation && extension.windowExhausted) {
-      await extension.continueWindow(caller: DownloadCaller.resourceLoader);
-      final again = watch.readableEndFrom(offset);
-      if (watch.isComplete || again >= offset) {
-        return SupplyReading(
-          path: path,
-          from: offset,
-          to: watch.isComplete ? math.max(offset, total - 1) : again,
-          total: total,
-          completed: watch.isComplete,
-          downloading: true,
-        );
-      }
-    }
-    await _steerIfNeeded(offset, head, total);
-
+    // Past the safe watermark and the download is not done: WAIT. The task
+    // book's §7 rule, verbatim — EOF only when the watermark reaches the
+    // expected size, which [reader.isComplete] has already refused above.
     final waited = _clock().difference(_lastAdvance);
-    final stalled = waited >= stallGrace;
-    if (stalled) _stalls++;
+    final timedOut = waited >= reader.waitTimeout;
+    if (timedOut) _timeouts++;
     _waits++;
     onTypedEvent?.call('waitingForGrowth', <String, Object?>{
       'offset': offset,
       'waitedMs': waited.inMilliseconds,
-      'head': head,
+      'head': result.watermark,
       'total': total,
-      'stalled': stalled,
+      'timedOut': timedOut,
     });
     return SupplyReading(
       path: path,
@@ -302,72 +244,15 @@ class ResourceSupply {
       to: -1,
       total: total,
       completed: false,
-      downloading: !stalled,
+      downloading: !timedOut,
       waitingMillis: waited.inMilliseconds,
-      errorCode: stalled ? 'DOWNLOAD_STALLED' : null,
-      errorMessage: stalled
-          ? 'TDLib 已 ${stallGrace.inSeconds} 秒没有写入新数据（offset=$offset，'
-              '已下载到 ${head > 0 ? head : "窗口外"}，total=$total）'
+      errorCode: timedOut ? 'WAIT_TIMEOUT' : null,
+      errorMessage: timedOut
+          ? '等待 ${reader.waitTimeout.inSeconds} 秒文件未增长'
+              '（offset=$offset，safeWatermark=${result.watermark}，'
+              'total=$total）——下载仍在后台继续，等待后重试'
           : null,
     );
-  }
-
-  Future<void> _steerIfNeeded(int offset, int head, int total) async {
-    if (total <= 0) return;
-    final now = _clock();
-
-    // The request sits at the head the sequential download is already filling.
-    if (offset <= head + steerGapBytes) {
-      if (_windowed && offset <= resumeGapBytes) {
-        // The window is parked somewhere else and nothing has reached the
-        // head; waiting here would wait forever.
-        _windowed = false;
-        _steerFrom = -1;
-        _steerTo = -1;
-        try {
-          await watch.resumeSequential();
-          onEvent?.call('resume sequential (offset=$offset head=$head)');
-          onTypedEvent?.call('resumeSequential', <String, Object?>{
-            'offset': offset,
-            'head': head,
-          });
-        } on Object catch (e) {
-          onEvent?.call('resume failed: $e');
-        }
-      }
-      return;
-    }
-
-    // The range is already being downloaded for this player: AVPlayer asks for
-    // the same tail many times (once per probe, once per repeat) and every
-    // repeat must not restart the TDLib transfer.
-    if (_windowed && offset >= _steerFrom && offset <= _steerTo) return;
-
-    final from = offset & ~1023; // TDLib chunks on 1 KB boundaries
-    final end = math.min(total - 1, from + windowBytes - 1);
-    final key = '$from-$end';
-    if (key == _steerKey) {
-      final at = _steerAt;
-      if (at != null && now.difference(at) < steerCooldown) return;
-    }
-
-    _steerFrom = from;
-    _steerTo = end;
-    _steerKey = key;
-    _steerAt = now;
-    _steers++;
-    _windowed = true;
-    onEvent?.call('window $key (offset=$offset head=$head)');
-    onTypedEvent?.call('targetedDownloadRequested', <String, Object?>{
-      'from': from,
-      'to': end,
-      'offset': offset,
-    });
-    try {
-      await watch.requestWindow(from, end);
-    } on Object catch (e) {
-      onEvent?.call('window failed $key: $e');
-    }
   }
 }
 
@@ -383,7 +268,7 @@ class ResourceLoaderSession {
     required this.chatId,
     required this.messageId,
     required this.generation,
-    required this.watch,
+    required this.reader,
     required this.mimeType,
     required this.transport,
     this.activeGeneration,
@@ -391,7 +276,7 @@ class ResourceLoaderSession {
     this.clock,
   }) : supply = ResourceSupply(
           fileId: fileId,
-          watch: watch,
+          reader: reader,
           clock: clock,
           onEvent: (event) => diagnostics?.noteResourceLoader('supply: $event',
               generation: generation),
@@ -410,7 +295,7 @@ class ResourceLoaderSession {
   /// The play generation this session belongs to.
   final int generation;
 
-  final FileProgressWatch watch;
+  final GrowingFileReader reader;
   final String mimeType;
   final NativeStreamingTransport transport;
   final ResourceSupply supply;
@@ -448,19 +333,23 @@ class ResourceLoaderSession {
   /// refuses the session — the caller then falls back to V1.
   Future<void> open() async {
     if (_opened) return;
+    // Measure before the facts go out: `completed` tells AVFoundation it may
+    // assume the whole file on demand. A reader that has not stat'ed yet
+    // would answer from a -1 disk and mislabel a finished file as growing.
+    await reader.refresh();
     diagnostics?.noteResourceLoaderEvent(
       'resourceLoaderCreated',
       fields: <String, Object?>{
         'sessionId': sessionId,
-        'totalBytes': watch.expectedBytes,
-        'completed': watch.isComplete,
+        'totalBytes': reader.expectedSize,
+        'completed': reader.isComplete,
         'mimeType': mimeType,
       },
       generation: generation,
     );
     diagnostics?.noteResourceLoaderEvent(
       'contentInfoRequested',
-      fields: <String, Object?>{'totalBytes': watch.expectedBytes},
+      fields: <String, Object?>{'totalBytes': reader.expectedSize},
       generation: generation,
     );
     final reply = await transport.openSession(
@@ -469,8 +358,8 @@ class ResourceLoaderSession {
       chatId: chatId,
       messageId: messageId,
       generation: generation,
-      totalBytes: watch.expectedBytes,
-      completed: watch.isComplete,
+      totalBytes: reader.expectedSize,
+      completed: reader.isComplete,
       mimeType: mimeType,
     );
     if (reply == null) {
@@ -512,8 +401,8 @@ class ResourceLoaderSession {
         'requestedOffset': offset,
         'requestedLength': length,
         'currentOffset': offset,
-        'availableBytes': watch.headBytes,
-        'totalBytes': watch.expectedBytes,
+        'availableBytes': reader.safeWatermark,
+        'totalBytes': reader.expectedSize,
       },
       generation: generation,
     );
@@ -553,7 +442,7 @@ class ResourceLoaderSession {
           'respondBytes': served,
           'currentOffset': reading.from,
           'availableTo': reading.to,
-          'downloaded': watch.headBytes,
+          'downloaded': reader.safeWatermark,
         },
         generation: generation,
       );

@@ -389,8 +389,11 @@ void main() {
       // Nothing was asked of TDLib for the dead id: the record was re-read
       // first. The device log had `#1 file=4999 limit=WHOLE_FILE grew=0` — a
       // request spent on an id TDLib had already disowned.
-      expect(api.started, isEmpty);
-      expect(api.statIds, <int>[4999, 2221]);
+      expect(api.started, isNot(contains(4999)),
+          reason: '死 id 不得收到任何下载请求');
+      expect(api.started, <int>[2221],
+          reason: 'B+：修好的 id 由 Downloader 发起一次整文件下载');
+      expect(api.statIds.toSet(), <int>{4999, 2221});
       expect(source.path, '/pool/2221');
       expect(diagnostics.fileIdRemaps.single, contains('old=4999 new=2221'));
     });

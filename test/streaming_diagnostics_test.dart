@@ -1222,7 +1222,7 @@ void main() {
       diag.forbidWholeFile('streaming:V2');
       diag.downloadAudit.noteBlockedWholeFile(
         fileId: 7,
-        caller: DownloadCaller.fullDownload,
+        caller: DownloadCaller.downloader,
         cause: 'full download wait',
       );
 
@@ -1231,7 +1231,7 @@ void main() {
       expect(text, contains('wholeFileAllowed=false'));
       expect(text, contains('revokedBy=streaming:V2'));
       expect(text, contains('FULL_DOWNLOAD_GUARD fired'));
-      expect(text, contains('caller=FULL_DOWNLOAD'));
+      expect(text, contains('caller=DOWNLOADER'));
       // The guard firing is not a download: nothing was recorded as growth.
       expect(diag.downloadAudit.count, 0);
     });
@@ -1241,7 +1241,7 @@ void main() {
       diag.beginPlay(fileId: 7, streaming: false);
       diag.downloadAudit.record(
         fileId: 7,
-        caller: DownloadCaller.fullDownload,
+        caller: DownloadCaller.downloader,
         offset: 0,
         limit: 0,
         priority: 32,
@@ -1249,7 +1249,7 @@ void main() {
 
       final text = diag.acceptanceLines().join('\n');
       expect(text, contains('unbounded=1'));
-      expect(text, contains('UNBOUNDED=1 callers=FULL_DOWNLOAD'));
+      expect(text, contains('UNBOUNDED=1 callers=DOWNLOADER'));
       expect(diag.panelLines().join('\n'), contains('limit=WHOLE_FILE'));
     });
 

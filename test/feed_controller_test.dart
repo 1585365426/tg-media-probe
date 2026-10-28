@@ -320,6 +320,10 @@ class Rig {
       preloadAdjacent: preload,
       // No timers in unit tests: progress is read explicitly.
       pollInterval: null,
+      // The B+ recovery waits for the play's own download to land. A device
+      // may legitimately take minutes; a test may not, so the budget is
+      // injected rather than hard-coded in the loop.
+      fullDownloadWait: const Duration(milliseconds: 400),
     );
   }
 
@@ -550,11 +554,9 @@ void main() {
       await rig.controller.load();
 
       expect(rig.controller.phase, FeedPhase.error);
-      // The end of the transport ladder is an error, not "download the whole
-      // file and try again": V2 and V1 both failed on a file that is still
-      // growing, so there is nothing left that does not involve downloading
-      // the film.
-      expect(rig.controller.error, '流式播放失败，已停止下载');
+      // B+：下载先把文件写完整，播放器拒绝的是字节本身 —— 这条路径的终点是
+      // 「此视频无法解码」，而不是再去下载一遍。旧的整文件 fallback 已删除。
+      expect(rig.controller.error, '此视频无法解码');
       expect(rig.controller.phase, isNot(FeedPhase.ready));
       // A player that failed to load must not stay live.
       expect(rig.ledger.live, 0);
@@ -600,21 +602,23 @@ void main() {
       expect(rig.controller.diagnostics.v1Attempted, isFalse,
           reason: 'V2-only：V2 失败后不得调用 V1');
       expect(rig.controller.diagnostics.v2Attempted, isTrue);
-      expect(rig.api.startCalls, 1, reason: '一次播放最多一次整文件 fallback');
-      expect(rig.api.wholeFileCallers, everyElement(DownloadCaller.fullDownload),
-          reason: 'WHOLE_FILE 只能由 FULL_DOWNLOAD_FALLBACK 发出');
+      expect(rig.api.startCalls, 1, reason: '一次播放只有一次整文件下载');
+      expect(rig.api.wholeFileCallers, everyElement(DownloadCaller.downloader),
+          reason: 'WHOLE_FILE 只能由 DOWNLOADER 发出');
       expect(
         rig.api.windowCallers.where((c) => c == DownloadCaller.proxy),
         isEmpty,
         reason: 'proxy 窗口意味着 V1 被启动过',
       );
-      expect(rig.controller.session?.fullDownloadFallbackUsed, isTrue);
+      // B+：V2 失败后不花「fallback 预算」，而是等这次播放本来就有的下载落盘。
+      expect(rig.controller.session?.fullDownloadFallbackUsed, isFalse,
+          reason: '等待已有下载不是 fallback，预算不该被花掉');
     });
 
-    test('a failed fallback stops the play instead of looping', () async {
-      // The whole-file request itself is refused. One play, one fallback:
-      // a second attempt must not exist, or "stream → download → fail →
-      // download" loops forever on a file TDLib will never deliver.
+    test('a refused fallback stops the play instead of looping', () async {
+      // The whole-file request itself is refused. One play: the first request
+      // fails, the recovery path spends its single restart, that restart is
+      // refused too, and the play stops. A third attempt would be the loop.
       StreamingV2.enabledOverride = true;
       final rig = Rig(pages: <List<MediaRecord>>[
         <MediaRecord>[video(1)],
@@ -623,34 +627,31 @@ void main() {
       await rig.controller.load();
 
       expect(rig.controller.phase, FeedPhase.error);
-      expect(rig.api.startCalls, 1,
-          reason: 'fallback 失败后不得再次整文件下载');
-      expect(rig.controller.session?.fullDownloadFallbackUsed, isTrue);
+      expect(rig.api.startCalls, 2,
+          reason: '首播一次 + 恢复路径唯一一次 restart，之后必须停止');
+      expect(rig.controller.session?.fullDownloadFallbackUsed, isTrue,
+          reason: 'restart 花掉的是这一次播放的预算');
     });
 
-    test('PLAYER never sends a whole-file request', () async {
-      // Every TDLib request the play path makes must be a bounded window.
-      // The rig's default transport is the loopback proxy; the first window
-      // caller is PLAYER on both transports — the device log that started
-      // this (`#1 caller=PLAYER limit=WHOLE_FILE`) is what this forbids.
+    test('PLAYER never sends any TDLib request', () async {
+      // B+ 把窗口请求整条删了：播放只读本地增长文件，唯一的下发者是
+      // Downloader。任何 PLAYER 字样的调用都是旧链路的回魂。
       final rig = Rig(pages: <List<MediaRecord>>[
         <MediaRecord>[video(1)],
       ]);
       await rig.controller.load();
 
-      final playerCalls = rig.api.windowLimits
-          .where((c) => c.$1 == DownloadCaller.player)
-          .toList();
-      expect(playerCalls, isNotEmpty, reason: '播放路径必须发出过窗口请求');
-      for (final (caller, limit) in playerCalls) {
-        expect(limit, greaterThan(0),
-            reason: '$caller 发出了 limit=$limit 的请求（152MB 回归形态）');
-      }
       expect(
         rig.api.wholeFileCallers.where((c) => c == DownloadCaller.player),
         isEmpty,
         reason: 'PLAYER 不得出现在 WHOLE_FILE 调用里',
       );
+      expect(
+        rig.api.windowCallers.where((c) => c == DownloadCaller.player),
+        isEmpty,
+        reason: 'PLAYER 不得发出窗口请求（B+ 已删除该链路）',
+      );
+      expect(rig.api.wholeFileCallers, everyElement(DownloadCaller.downloader));
       expect(rig.controller.phase, FeedPhase.ready);
     });
   });
@@ -665,17 +666,18 @@ void main() {
       await rig.controller.load();
 
       expect(rig.controller.phase, FeedPhase.error);
-      // The new floor: streaming failed, the play spends its ONE whole-file
-      // fallback — which the same refusal also kills. The play stops with
-      // the real reason; nothing loops, nothing retries the download.
-      expect(rig.api.startCalls, 1,
-          reason: '流式失败后允许一次整文件 fallback');
-      expect(rig.api.wholeFileCallers, everyElement(DownloadCaller.fullDownload),
-          reason: 'WHOLE_FILE 只能由 FULL_DOWNLOAD_FALLBACK 发出');
+      // The new floor: every TDLib request fails, so the play's first download
+      // is refused; the recovery path spends its one restart, which the same
+      // refusal kills. The play stops with the real reason: two requests, no
+      // loop, no third attempt.
+      expect(rig.api.startCalls, 2,
+          reason: '首播一次 + 唯一一次 restart，拒绝后立即停止');
+      expect(rig.api.wholeFileCallers, everyElement(DownloadCaller.downloader),
+          reason: 'WHOLE_FILE 只能由 DOWNLOADER 发出');
       expect(rig.controller.phase, isNot(FeedPhase.ready));
     });
 
-    test('a stalled stream takes its one fallback, then stops', () async {
+    test('a stalled stream waits for the play download, then stops', () async {
       final rig = Rig(
         pages: <List<MediaRecord>>[
           <MediaRecord>[video(1)],
@@ -687,8 +689,12 @@ void main() {
 
       expect(rig.controller.phase, FeedPhase.error);
       expect(rig.api.startCalls, 1,
-          reason: 'stall 之后只有一次整文件尝试，不得反复下载');
-      expect(rig.controller.session?.fullDownloadFallbackUsed, isTrue);
+          reason: 'stall 之后只有首播那一次整文件请求，不得反复下载');
+      // B+：下载还在跑，所以「等待」就是全部动作；等待超时即停，不另起请求，
+      // 也不花 fallback 预算。
+      expect(rig.controller.session?.fullDownloadFallbackUsed, isFalse);
+      expect(rig.api.startCalls, 1,
+          reason: '等待超时不得变成第二次整文件请求');
     });
   });
 
@@ -812,15 +818,20 @@ void main() {
   });
 
   group('preloading', () {
-    test('the adjacent item is resolved ahead of time', () async {
+    test('the adjacent item is warmed locally, never downloaded', () async {
       final rig = Rig(pages: <List<MediaRecord>>[
         <MediaRecord>[video(1), video(2)],
       ]);
       await rig.controller.load();
+      final statsBefore = rig.api.statCalls;
       // Give the prefetch a turn.
       await Future<void>.delayed(Duration.zero);
 
-      expect(rig.api.startedIds, contains(1002));
+      // B+：预取只读本地状态（一次 stat），不再向 TDLib 要一段窗口。
+      expect(rig.api.startedIds, isNot(contains(1002)),
+          reason: '预取不得发起任何下载');
+      expect(rig.api.statCalls, greaterThan(statsBefore),
+          reason: '预取的动作应该是一次 stat');
       // Preloading never creates a second player.
       expect(rig.ledger.created, 1);
     });

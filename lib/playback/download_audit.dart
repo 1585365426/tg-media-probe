@@ -30,9 +30,13 @@ enum DownloadCaller {
   /// A neighbour warmed before the user reaches it.
   preload,
 
-  /// The full-download rung: the whole file, on purpose, with the user
-  /// waiting for it.
-  fullDownload,
+  /// The growing-file reader: an observer, never a downloader. Exists in the
+  /// enum so a violation can be *named* if one ever shows up.
+  growingFileReader,
+
+  /// The Downloader: the only caller allowed to send `downloadFile` at all,
+  /// and the only caller allowed `limit = 0`.
+  downloader,
 
   /// A call site that has not been tagged yet. Should be zero.
   unknown;
@@ -42,12 +46,22 @@ enum DownloadCaller {
         DownloadCaller.resourceLoader => 'RESOURCE_LOADER',
         DownloadCaller.proxy => 'PROXY',
         DownloadCaller.preload => 'PRELOAD',
-        // Named "fallback" because that is the only shape this caller may
-        // take: the explicit last rung after streaming failed, never a
-        // background decision. The label is what the acceptance report greps.
-        DownloadCaller.fullDownload => 'FULL_DOWNLOAD_FALLBACK',
+        DownloadCaller.growingFileReader => 'GROWING_FILE_READER',
+        // Named plainly: this is the download authority, not a fallback.
+        // The one whole-file request a B+ play makes belongs here.
+        DownloadCaller.downloader => 'DOWNLOADER',
         DownloadCaller.unknown => 'UNKNOWN',
       };
+
+  /// Callers whose reaching TDLib's download API is an architecture
+  /// violation under B+. The loopback proxy is history-compatible code, not
+  /// an AUTO path, and is therefore policed by the chain rather than here.
+  static const Set<DownloadCaller> forbiddenDownloaders = {
+    DownloadCaller.player,
+    DownloadCaller.resourceLoader,
+    DownloadCaller.growingFileReader,
+    DownloadCaller.preload,
+  };
 }
 
 /// One `downloadFile` and what came of it.
@@ -64,6 +78,8 @@ class DownloadCall {
     required this.chatId,
     required this.messageId,
     required this.generation,
+    this.fileUniqueId = '',
+    this.diskBefore = -1,
     required this.cause,
     required this.startedFrom,
   });
@@ -88,6 +104,12 @@ class DownloadCall {
   final int messageId;
   final int generation;
 
+  /// TDLib's stable id for the file, when the play knows one.
+  final String fileUniqueId;
+
+  /// Free disk space when the call was sent; -1 when not measured.
+  final int diskBefore;
+
   /// Why this window exists, in the caller's own words: `first window`,
   /// `av=1048576`, `continue`, `sequential`, `whole file`.
   final String cause;
@@ -101,6 +123,9 @@ class DownloadCall {
   /// Highest `download_offset + downloaded_size` seen during this call.
   int reached = 0;
 
+  /// Disk space observed when the transfer ended; -1 until stamped.
+  int diskAfter = -1;
+
   /// True when TDLib was asked for the rest of the file.
   bool get unbounded => limit <= 0;
 
@@ -110,11 +135,15 @@ class DownloadCall {
   /// The line a device report prints. Every field the task asked for is here.
   String describe() {
     final window = unbounded ? 'limit=WHOLE_FILE' : 'limit=$limit';
+    final disk = diskAfter >= 0 ? ' diskAfter=$diskAfter' : '';
     return '#$seq caller=${caller.label} file=$fileId '
         'msg=$messageId chat=$chatId gen=$generation '
+        '${fileUniqueId.isEmpty ? '' : 'uid=$fileUniqueId '}'
         'offset=$offset $window priority=$priority '
         'sync=${synchronous ? 'true' : 'false'} '
-        'before=$startedFrom grew=$grew cause="$cause"';
+        'before=$startedFrom grew=$grew '
+        '${diskBefore >= 0 ? 'diskBefore=$diskBefore ' : ''}'
+        'cause="$cause"$disk';
   }
 
   Map<String, Object?> toJson() => <String, Object?>{
@@ -160,6 +189,16 @@ class DownloadAudit {
   int chatId = 0;
   int messageId = 0;
   int generation = 0;
+  String fileUniqueId = '';
+
+  /// A B+ rule breach that was caught at runtime: a forbidden caller sent a
+  /// download, or a play tried to run with no room on disk. Non-empty means
+  /// the report must be read before the code that produced it is trusted.
+  final List<String> _violations = <String>[];
+
+  List<String> get violations => List<String>.unmodifiable(_violations);
+
+  void noteArchitectureViolation(String detail) => _violations.add(detail);
 
   int _seq = 0;
 
@@ -225,10 +264,16 @@ class DownloadAudit {
   }
 
   /// Stamps the identity every following call is attributed to.
-  void tag({int? chatId, int? messageId, int? generation}) {
+  void tag({
+    int? chatId,
+    int? messageId,
+    int? generation,
+    String? fileUniqueId,
+  }) {
     if (chatId != null) this.chatId = chatId;
     if (messageId != null) this.messageId = messageId;
     if (generation != null) this.generation = generation;
+    if (fileUniqueId != null) this.fileUniqueId = fileUniqueId;
   }
 
   /// Records a request. Called immediately before the TDLib call is sent, so
@@ -242,6 +287,7 @@ class DownloadAudit {
     required int priority,
     bool synchronous = false,
     String cause = '',
+    int diskBefore = -1,
   }) {
     final before = transferred(fileId);
     // Re-baseline the growth counter on the window this call asks for. TDLib
@@ -261,9 +307,20 @@ class DownloadAudit {
       chatId: chatId,
       messageId: messageId,
       generation: generation,
+      fileUniqueId: fileUniqueId,
+      diskBefore: diskBefore,
       cause: cause,
       startedFrom: before,
     );
+    // A forbidden caller reaching the download API is the B+ breach itself:
+    // record it as a violation the report cannot miss, then let the call
+    // through — the audit documents reality, the gate (not the log) blocks.
+    if (DownloadCaller.forbiddenDownloaders.contains(caller)) {
+      noteArchitectureViolation(
+        'FORBIDDEN_DOWNLOADER caller=${caller.label} file=$fileId '
+        'offset=$offset limit=$limit',
+      );
+    }
     _open[fileId] = call;
     _calls.add(call);
     if (_calls.length > maxCalls) _calls.removeAt(0);
@@ -383,6 +440,9 @@ class DownloadAudit {
     for (final blocked in _blocked) {
       lines.add('  AUTO_FULL_DOWNLOAD_BLOCKED $blocked');
     }
+    for (final violation in _violations) {
+      lines.add('  ARCHITECTURE_VIOLATION $violation');
+    }
     return lines;
   }
 
@@ -391,6 +451,8 @@ class DownloadAudit {
     _open.clear();
     _last.clear();
     _seq = 0;
+    _violations.clear();
+    fileUniqueId = '';
     // `wholeFileAllowed` is *not* reset here on purpose — see [allowWholeFile].
   }
 }

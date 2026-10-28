@@ -67,6 +67,9 @@ class ScriptedTransfer implements FileTransferApi {
 
   final StreamController<FileState> _updates =
       StreamController<FileState>.broadcast();
+
+  /// Files the script finished; `stat` reports them as complete on disk.
+  final Set<int> _done = <int>{};
   final List<int> started = <int>[];
   final List<int> cancelled = <int>[];
   int statCalls = 0;
@@ -74,13 +77,17 @@ class ScriptedTransfer implements FileTransferApi {
   @override
   Future<FileState?> stat(int fileId) async {
     statCalls++;
+    // A finished scripted transfer becomes a real, measured local file —
+    // TDLib's `stat` is what the B+ chain reads its watermark from, and a fake
+    // that never completes would hold every play in its wait loop.
+    final done = _done.contains(fileId);
     return FileState(
       id: fileId,
-      size: 0,
+      size: done ? expectedSize : 0,
       expectedSize: expectedSize,
-      downloadedSize: 0,
-      isCompleted: false,
-      path: '',
+      downloadedSize: done ? expectedSize : 0,
+      isCompleted: done,
+      path: done ? '/pool/$fileId' : '',
       canBeDownloaded: true,
     );
   }
@@ -119,6 +126,7 @@ class ScriptedTransfer implements FileTransferApi {
 
   void _complete(int fileId) {
     if (_updates.isClosed) return;
+    _done.add(fileId);
     _updates.add(FileState(
       id: fileId,
       size: expectedSize,
@@ -369,6 +377,11 @@ void main() {
         sources: VideoSourceResolver(
           api: api,
           fileExists: (_) async => true,
+          // Pool paths are fake: the volume answers for them, and the short
+          // stall window keeps a genuinely refused id from sitting out the
+          // 15 s production timeout twice inside one test.
+          diskSizeOf: (_) async => 4096,
+          stallTimeout: const Duration(milliseconds: 200),
         ),
         chatTitles: const <int, String>{1: '测试频道'},
         preloadCount: 0,
@@ -404,7 +417,12 @@ void main() {
       final controller = FeedController(
         source: IndexFeedSource(store: store, chatId: 1),
         player: SinglePlayerController(factory: _Factory()),
-        sources: VideoSourceResolver(api: api, fileExists: (_) async => true),
+        sources: VideoSourceResolver(
+          api: api,
+          fileExists: (_) async => true,
+          diskSizeOf: (_) async => 4096,
+          stallTimeout: const Duration(milliseconds: 200),
+        ),
         metadata: FakeMetadata(records: <String, MediaRecord>{
           '1:42': video(42, name: '45641345461.MP4'),
         }),
@@ -437,6 +455,8 @@ void main() {
         sources: VideoSourceResolver(
           api: ScriptedTransfer(),
           fileExists: (_) async => true,
+          diskSizeOf: (_) async => 4096,
+          stallTimeout: const Duration(milliseconds: 200),
         ),
         chatTitles: const <int, String>{1: '测试频道'},
         pollInterval: null,
