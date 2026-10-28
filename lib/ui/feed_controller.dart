@@ -797,10 +797,8 @@ class FeedController extends ChangeNotifier {
     }
 
     if (StreamingV2.supported) {
-      // Recorded on entry, not on failure: a V2 attempt that throws before the
-      // player exists used to leave `v2Attempted=false` in the report while
-      // the device log showed a `tgmedia://` session being opened.
-      _diagnostics.noteTransportStart('RESOURCE_LOADER');
+      // The transport's own entry record lives in the resolver, right after
+      // `beginPlay` — recording it here would be erased by that reset.
       final session = _session;
       session?.streamingAttempted = true;
       session?.resolvedFileId = record.fileId;
@@ -844,36 +842,24 @@ class FeedController extends ChangeNotifier {
           generation: generation,
         );
         _diagnostics.noteV2OnlyStop('$e');
-        // V2-only: a native error is this play's error. There is no second
+        // A native error is this play's error. There is no second streaming
         // transport to hide behind, and no download to make it look better.
         // Re-thrown as-is so the user sees the transport's own reason.
-        if (StreamingV2.v2Only) rethrow;
-        _diagnostics.noteDecision(
-          candidate: true,
-          decision: 'STREAM',
-          reason: 'v2_unavailable_using_v1',
-          generation: generation,
-        );
+        rethrow;
       }
     }
 
-    // Only reachable when this build has no V2 bridge at all (or V2-only is
-    // switched off in code): the loopback proxy is then the only streaming
-    // transport that exists, not a fallback from a V2 failure.
-    _failedStreamTransport = StreamTransport.httpProxy;
-    return sources.resolveStream(
-      record.fileId,
-      chatId: record.chatId,
-      messageId: record.messageId,
-      // The served Content-Type comes from the message's own mime type;
-      // guessing mp4 for a webm is another way to make AVPlayer refuse.
-      mimeType: record.mimeType,
-      trace: trace,
-      // TDLib rejected the stored file id (or the message carried a file name
-      // the mirror never had): keep the repaired record.
-      onRecordRefreshed: _absorbRefreshed,
-      onProgress: onProgress,
+    // No bridge on this platform. V1 (loopback HTTP) is not the answer and is
+    // no longer a call site in this file at all: the automatic chain is stat →
+    // disk → Downloader → GrowingFileReader → ResourceLoader → AVPlayer, and
+    // a platform that cannot run the last two simply cannot stream here.
+    _diagnostics.noteDecision(
+      candidate: false,
+      decision: 'STOP',
+      reason: 'no_streaming_transport',
+      generation: generation,
     );
+    throw VideoSourceException('此设备不支持流式播放（缺少原生播放桥）');
   }
 
   /// Hands [source]'s URL to the player and waits for it to become ready.
@@ -933,64 +919,21 @@ class FeedController extends ChangeNotifier {
     }
   }
 
-  /// The streaming transport that last failed in this play, so a recovery can
-  /// tell "V2 failed, V1 is still worth a try" from "V1 failed, there is
-  /// nothing left".
+  /// The streaming transport that last failed in this play.
+  ///
+  /// Kept for the report only: the ladder no longer branches on it, because
+  /// there is one streaming rung. Read it through [failedStreamTransport].
   StreamTransport? _failedStreamTransport;
 
-  /// Tries V1 on the current record. Null means the proxy refused too.
-  ///
-  /// Shared by the two places that may still reach it — a V2 player that never
-  /// installed, and a V2 resolve that timed out — so both name the attempt the
-  /// same way in the report.
-  Future<PlaySource?> _tryV1(
-    MediaRecord record,
-    int generation,
-    PlaybackTrace trace,
-  ) async {
-    _diagnostics.noteTransportStart('HTTP_PROXY');
-    try {
-      final v1 = await sources.resolveStream(
-        record.fileId,
-        chatId: record.chatId,
-        messageId: record.messageId,
-        // The served Content-Type comes from the message's own mime type;
-        // guessing mp4 for a webm is another way to make AVPlayer refuse.
-        mimeType: record.mimeType,
-        trace: trace,
-        onRecordRefreshed: _absorbRefreshed,
-        onProgress: (update) {
-          if (update.stage != SourceStage.fetching) return;
-          if (!_owns(generation)) return;
-          _bufferFraction = update.fraction;
-          _notify();
-        },
-      );
-      if (!_ownsRecord(generation, record)) {
-        await v1.dispose();
-        return null;
-      }
-      _diagnostics.noteTransportAttempt('HTTP_PROXY', failed: false);
-      _diagnostics.noteDecision(
-        proxyAvailable: true,
-        decision: 'STREAM',
-        reason: 'v1_after_v2_failure',
-        generation: generation,
-      );
-      return v1;
-    } on Object catch (e) {
-      _failedStreamTransport = StreamTransport.httpProxy;
-      _diagnostics.noteTransportAttempt('HTTP_PROXY', failed: true);
-      _diagnostics.noteFallback('V1 也失败：$e');
-      return null;
-    }
-  }
+  /// Which streaming transport failed last, for the diagnostics panel.
+  StreamTransport? get failedStreamTransport => _failedStreamTransport;
 
   /// What a failed stream may do next. In order, and nothing else:
   ///
   /// 1. the file finished while the transport was failing → play it from disk;
-  /// 2. V2 was the one that failed → one attempt on V1;
-  /// 3. otherwise → null, and the caller shows an error.
+  /// 2. the play's own download is still running → wait for it, then disk;
+  /// 3. its single restart budget is unspent → restart that download once;
+  /// 4. otherwise → null, and the caller shows an error.
   ///
   /// There used to be a step before 1 — "no stream was possible, so wait for
   /// the whole file" — and the device report is what removed it: a 24 MB video
@@ -1022,14 +965,8 @@ class FeedController extends ChangeNotifier {
       return PlaySource.file(facts.path);
     }
 
-    // 2. V2-only builds stop here. The proxy is not tried: a V2 failure is
-    //    the play's failure, not a reason to start a second transport inside
-    //    the same tap.
-    if (!StreamingV2.v2Only && _failedStreamTransport != StreamTransport.httpProxy) {
-      final v1 = await _tryV1(record, generation, trace);
-      if (v1 != null) return v1;
-      if (!_ownsRecord(generation, record)) return null;
-    }
+    // 2. The proxy is not tried. A V2 failure is the play's failure, not a
+    //    reason to start a second transport inside the same tap.
 
     // 3. B+: the full download is the play's *one* download, started by the
     //    Downloader before the stream existed. A streaming failure must not
@@ -1157,10 +1094,10 @@ class FeedController extends ChangeNotifier {
           ? PlaybackSourceKind.resourceLoader
           : PlaybackSourceKind.httpProxy,
       v2Supported: StreamingV2.supported,
-      // V2-only: the ladder has one rung. `httpProxy` would name a transport
-      // this build never reaches, and the report would then claim a V1 attempt
-      // that never happened.
-      allowProxy: !StreamingV2.v2Only,
+      // The ladder has one streaming rung, and this is where that is decided —
+      // not by a flag further up. A V2 failure is the play's failure: the only
+      // remaining move is the bytes that are already on disk.
+      allowProxy: false,
     );
     _diagnostics.noteSourceDecision(decision, generation: generation);
 
@@ -1173,16 +1110,6 @@ class FeedController extends ChangeNotifier {
       );
       trace.note = '流式传输失败后文件已完整，改用本地文件';
       return PlaySource.file(facts.path);
-    }
-
-    if (decision.source == PlaybackSourceKind.httpProxy) {
-      _diagnostics.noteResourceLoader(
-        'v2 player failed, retrying with V1',
-        generation: generation,
-      );
-      final v1 = await _tryV1(record, generation, trace);
-      if (v1 != null) return v1;
-      if (!_ownsRecord(generation, record)) return null;
     }
 
     // B+: before stopping, the one download that exists may still be running.

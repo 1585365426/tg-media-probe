@@ -4,6 +4,8 @@ import 'package:flutter/widgets.dart' show AppLifecycleState, Orientation;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:tg_media_probe/data/media_record.dart';
 import 'package:tg_media_probe/playback/native_streaming.dart' show StreamingV2;
+import 'package:tg_media_probe/playback/resource_loader.dart'
+    show NativeStreamingTransport;
 import 'package:tg_media_probe/playback/player_slot.dart';
 import 'package:tg_media_probe/playback/video_source.dart';
 import 'package:tg_media_probe/td/td_error_kind.dart';
@@ -291,6 +293,75 @@ class FakeTransferApi implements FileTransferApi {
   Future<void> dispose() async => _updates.close();
 }
 
+/// The native bridge, faked.
+///
+/// `openSession` is the only call the Dart side makes before a play is live:
+/// the byte requests are the native side's job, and what these tests verify is
+/// the decision chain on this side of the channel — stats, disk rule,
+/// Downloader, reader, session, player. A real Swift loader would only change
+/// who asks `serve(offset, length)`.
+class FakeStreamingTransport implements NativeStreamingTransport {
+  FakeStreamingTransport({this.refuseSessions = false});
+
+  /// The platform rejects the session — the shape of a missing bridge or a
+  /// refused session on a device.
+  bool refuseSessions;
+
+  final List<String> opened = <String>[];
+  final List<String> closed = <String>[];
+  final StreamController<Map<String, Object?>> _events =
+      StreamController<Map<String, Object?>>.broadcast();
+
+  @override
+  bool get supported => true;
+
+  @override
+  Future<Map<String, Object?>?> openSession({
+    required String sessionId,
+    required int fileId,
+    required int chatId,
+    required int messageId,
+    required int generation,
+    required int totalBytes,
+    required bool completed,
+    required String mimeType,
+  }) async {
+    if (refuseSessions) return null;
+    opened.add(sessionId);
+    return <String, Object?>{
+      'sessionId': sessionId,
+      'totalBytes': totalBytes,
+      'contentType': mimeType,
+      'byteRangeAccessSupported': true,
+      'entireLengthAvailableOnDemand': false,
+    };
+  }
+
+  @override
+  Future<void> closeSession(String sessionId) async => closed.add(sessionId);
+
+  @override
+  Future<void> createPlayer(String sessionId) async {}
+
+  @override
+  Future<void> play(String sessionId) async {}
+
+  @override
+  Future<void> pause(String sessionId) async {}
+
+  @override
+  Future<void> seek(String sessionId, Duration position) async {}
+
+  @override
+  Future<void> setVolume(String sessionId, double volume) async {}
+
+  @override
+  Future<void> disposePlayer(String sessionId) async {}
+
+  @override
+  Stream<Map<String, Object?>> events() => _events.stream;
+}
+
 class Rig {
   Rig({
     required List<List<MediaRecord>> pages,
@@ -301,7 +372,13 @@ class Rig {
     bool muted = false,
   })  : source = FakeFeedSource(pages, error: sourceError),
         tracker = FakeTracker(),
+        transport = FakeStreamingTransport(),
         api = FakeTransferApi(autoComplete: autoComplete) {
+    // The production chain is V2 (the resource loader). The host the tests run
+    // on has no iOS bridge, so the resolver would otherwise report "no
+    // streaming transport" — a platform difference, not the behaviour under
+    // test. Every rig therefore runs the chain a device runs.
+    StreamingV2.enabledOverride = true;
     controller = FeedController(
       source: source,
       player: SinglePlayerController(factory: _Factory(tracker)),
@@ -314,6 +391,10 @@ class Rig {
         // must never read as complete.
         fileExists: (_) async => true,
         diskSizeOf: (_) async => 4096,
+        nativeTransport: transport,
+        // A fake pool names its file immediately; the wait exists for TDLib
+        // metadata, which a device may take a moment to produce.
+        resourceLoaderPathWait: const Duration(milliseconds: 200),
       ),
       chatTitles: const <int, String>{1: '测试频道'},
       defaultMuted: muted,
@@ -330,6 +411,7 @@ class Rig {
   final FakeFeedSource source;
   final FakeTracker tracker;
   final FakeTransferApi api;
+  final FakeStreamingTransport transport;
   late final FeedController controller;
 
   PlayerLedger get ledger => tracker.ledger;

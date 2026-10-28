@@ -259,4 +259,54 @@ void main() {
       expect(audit.blockedWholeFileCount, 0);
     });
   });
+
+  group('the B+ breach is named in the report', () {
+    test('a forbidden caller is an ARCHITECTURE_VIOLATION, not a footnote', () {
+      // The log documents; the static gate blocks. But a report that quietly
+      // lists `caller=PLAYER` among ordinary calls is how the 152 MB request
+      // survived three rounds of review.
+      final audit = DownloadAudit();
+      audit.record(
+        fileId: 27588,
+        caller: DownloadCaller.downloader,
+        offset: 0,
+        limit: 0,
+        priority: 32,
+      );
+      audit.record(
+        fileId: 27588,
+        caller: DownloadCaller.player,
+        offset: 0,
+        limit: 16 * 1024 * 1024,
+        priority: 32,
+      );
+
+      final violations = audit.summary()
+          .where((line) => line.contains('ARCHITECTURE_VIOLATION'))
+          .toList();
+      expect(violations, hasLength(1));
+      expect(violations.single, contains('caller=PLAYER'));
+      expect(violations.single, contains('file=27588'));
+      // The legal request stays a legal request.
+      expect(violations.single, isNot(contains('caller=DOWNLOADER')));
+    });
+
+    test('every player-side caller is in the forbidden set', () {
+      // Whoever owns the pixels must not own the transfer. The set is the
+      // contract; this asserts it still names every such caller.
+      expect(
+        DownloadCaller.forbiddenDownloaders,
+        containsAll(<DownloadCaller>[
+          DownloadCaller.player,
+          DownloadCaller.resourceLoader,
+          DownloadCaller.growingFileReader,
+          DownloadCaller.preload,
+        ]),
+      );
+      expect(
+        DownloadCaller.forbiddenDownloaders,
+        isNot(contains(DownloadCaller.downloader)),
+      );
+    });
+  });
 }

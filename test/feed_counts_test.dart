@@ -110,6 +110,10 @@ void main() {
         sources: VideoSourceResolver(
           api: _Transfer(),
           fileExists: (_) async => true,
+          // The fixture's pool path is a completed file; measuring it is what
+          // makes the play a LOCAL_FILE one. Without a measurement the resolver
+          // cannot tell "already downloaded" from "nothing on disk".
+          diskSizeOf: (_) async => 1024,
         ),
         pollInterval: null,
       );

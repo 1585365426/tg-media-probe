@@ -138,6 +138,40 @@ void main() {
       expect(body.contains('ensureFullDownload'), isTrue);
     });
 
+    test('the controller has no second streaming transport', () {
+      // V1 (loopback HTTP) is not "switched off" in the feed controller — it
+      // is gone. No `_tryV1`, no `allowProxy: true`, and no call to the
+      // resolver's proxy entry point. A flag can be flipped back by someone in
+      // a hurry; a missing call site cannot.
+      final code = _code(
+        File('$root/lib/ui/feed_controller.dart').readAsStringSync(),
+      );
+      for (final gone in <String>[
+        '_tryV1',
+        'allowProxy: true',
+        'sources.resolveStream(',
+        "noteTransportStart('HTTP_PROXY')",
+      ]) {
+        expect(code.contains(gone), isFalse,
+            reason: 'AUTO 链只剩一条流式通路，控制器里出现了「$gone」');
+      }
+      expect(code.contains('allowProxy: false'), isTrue,
+          reason: 'decideAfterTransportFailure 必须显式关掉 proxy 选项');
+    });
+
+    test('the transport entry is recorded after beginPlay', () {
+      // `beginPlay` opens a fresh evidence block and clears the attempt flags.
+      // A transport named before it is a transport the report forgets.
+      final source = File('$root/lib/playback/video_source.dart')
+          .readAsStringSync();
+      final begin = source.indexOf('final generation = _diagnostics.beginPlay(');
+      final attempt = source.indexOf('_diagnostics.noteTransportStart(');
+      expect(begin, isNot(-1));
+      expect(attempt, isNot(-1), reason: '没有任何地方记录 transport 进入');
+      expect(attempt, greaterThan(begin),
+          reason: 'noteTransportStart 在 beginPlay 之前 —— 会被重置抹掉');
+    });
+
     test('the player path holds no downloader reference at all', () {
       // Player-facing modules: the player itself, the proxy, sessions.
       for (final relative in <String>[

@@ -1215,6 +1215,16 @@ class VideoSourceResolver {
         generation: generation,
       );
     }
+    // Recorded here, not in the caller: [beginPlay] opens a fresh evidence
+    // block and would erase an attempt written before it. A transport that is
+    // entered is a fact even when it then succeeds — a report that only names
+    // the transport after it fails cannot tell "V2 played" from "V2 was never
+    // tried".
+    _diagnostics.noteTransportStart(
+      transport == StreamTransport.resourceLoader
+          ? StreamingV2.sourceLabel
+          : 'HTTP_PROXY',
+    );
     // One rule, one place. The old check trusted `is_downloading_completed`
     // and then, when it failed, still opened the proxy — which is how a
     // 756 MB file whose bytes were already on disk ended up in a growing-file
@@ -1425,7 +1435,15 @@ class VideoSourceResolver {
           reason: 'no_local_path',
           generation: generation,
         );
-        throw VideoSourceException('流式播放不可用（下载未产生本地文件）');
+        // TDLib was asked for the file and did not even name it inside the
+        // bounded wait: no byte arrived. That is a stall — the only timeout
+        // this build may report as a network problem — and not a cache miss,
+        // because the download it waited on was started by this play.
+        throw VideoSourceStalled(
+          resourceLoaderPathWait,
+          downloadedBytes: watch.headBytes,
+          expectedBytes: watch.expectedBytes,
+        );
       }
 
       if (transport == StreamTransport.resourceLoader) {

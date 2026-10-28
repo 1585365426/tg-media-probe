@@ -124,6 +124,9 @@ void main() {
         sources: VideoSourceResolver(
           api: _FakeTransfer(),
           fileExists: (_) async => true,
+          // Every row here is a finished download; without a measurement the
+          // resolver would treat the fake pool path as empty and try to stream.
+          diskSizeOf: (_) async => 1024,
         ),
         pollInterval: null,
       );

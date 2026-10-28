@@ -287,7 +287,12 @@ void main() {
     });
 
     test('switching cancels the rest of the old window', () async {
-      final transfer = _Transfer(localIds: <int>{900100, 900099, 900098, 900097});
+      // The item the swipe lands on is already on disk: what this test is
+      // about is the preload window, and a play that had to stream would fail
+      // for an unrelated reason on a host with no native bridge.
+      final transfer = _Transfer(
+        localIds: <int>{900100, 900095, 900099, 900098, 900097},
+      );
       final c = controller(transfer: transfer, preloadCount: 3);
       await c.load();
       await Future<void>.delayed(Duration.zero);

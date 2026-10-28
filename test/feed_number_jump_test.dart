@@ -104,6 +104,9 @@ void main() {
         sources: VideoSourceResolver(
           api: _Transfer(),
           fileExists: (_) async => true,
+          // A finished pool file: measured, so the play is a LOCAL_FILE one and
+          // the test stays about number lookup instead of transport.
+          diskSizeOf: (_) async => 1024,
         ),
         pollInterval: null,
       );

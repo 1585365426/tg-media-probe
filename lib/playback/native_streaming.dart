@@ -34,17 +34,14 @@ class StreamingV2 {
   /// The player source label the diagnostics report for a V2 play.
   static const String sourceLabel = 'RESOURCE_LOADER';
 
-  /// V2 is the only automatic streaming path.
+  /// V2 is the only automatic streaming path, and there is no flag for it.
   ///
-  /// With this on, a play that cannot stream through the resource loader ends
-  /// in an error page: it does not try the loopback proxy, and it does not
-  /// download the file. The proxy is still in the repository and still tested
-  /// — it is simply no longer reachable from the play path, so a device run
-  /// has one streaming branch to read instead of three.
-  ///
-  /// Not a runtime preference: flipping it back is a code change with a test
-  /// run, not a switch a report can be blamed on.
-  static const bool v2Only = true;
+  /// There used to be a `v2Only` const here that the feed controller read to
+  /// decide whether a V2 failure could fall back to the loopback proxy. A
+  /// constant is one edit away from being flipped, and the fallback it guarded
+  /// is exactly the transport the device reports indicted. The controller no
+  /// longer names the proxy at all: `test/architecture_scan_test.dart` fails if
+  /// `_tryV1` or `allowProxy: true` ever comes back.
 }
 
 /// `MethodChannel` implementation of the native transport.
