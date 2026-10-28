@@ -82,10 +82,10 @@ class _FakeTransfer implements FileTransferApi {
       );
 
   @override
-  Future<void> start(int fileId) async {}
+  Future<void> start(int fileId, {DownloadCaller caller = DownloadCaller.unknown, String cause = ''}) async {}
 
   @override
-  Future<void> startRange(int fileId, {required int offset, required int limit}) async {}
+  Future<void> startRange(int fileId, {required int offset, required int limit, int priority = 16, DownloadCaller caller = DownloadCaller.unknown, String cause = ''}) async {}
   @override
   Future<void> cancel(int fileId) async {}
 

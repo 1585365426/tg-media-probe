@@ -1,0 +1,309 @@
+/// Who asked TDLib for bytes, and how many bytes that request really moved.
+///
+/// `downloadFile` returns as soon as TDLib accepts it; the transfer then runs
+/// in the background and the only evidence of how far it got is `updateFile`.
+/// That gap is why "the video downloads 152 MB before it plays" kept being
+/// attributed to the wrong caller: the request and its growth were never
+/// recorded next to each other.
+///
+/// Every call is recorded with the caller that issued it, and every byte TDLib
+/// then writes is attributed to the call that was open for that file. TDLib
+/// runs exactly one transfer per file id, so that attribution is exact rather
+/// than statistical.
+library;
+
+/// Which code path sent a `downloadFile`.
+///
+/// The list is closed on purpose: a new caller has to be named here, which
+/// means a new call site cannot silently show up as [unknown] in a device
+/// report.
+enum DownloadCaller {
+  /// The play itself — the window the player opens on.
+  player,
+
+  /// Streaming V2: a window steered by `AVAssetResourceLoader`'s requests.
+  resourceLoader,
+
+  /// Streaming V1: a window steered by the loopback HTTP proxy.
+  proxy,
+
+  /// A neighbour warmed before the user reaches it.
+  preload,
+
+  /// The full-download rung: the whole file, on purpose, with the user
+  /// waiting for it.
+  fullDownload,
+
+  /// A call site that has not been tagged yet. Should be zero.
+  unknown;
+
+  String get label => switch (this) {
+        DownloadCaller.player => 'PLAYER',
+        DownloadCaller.resourceLoader => 'RESOURCE_LOADER',
+        DownloadCaller.proxy => 'PROXY',
+        DownloadCaller.preload => 'PRELOAD',
+        DownloadCaller.fullDownload => 'FULL_DOWNLOAD',
+        DownloadCaller.unknown => 'UNKNOWN',
+      };
+}
+
+/// One `downloadFile` and what came of it.
+class DownloadCall {
+  DownloadCall({
+    required this.seq,
+    required this.at,
+    required this.fileId,
+    required this.caller,
+    required this.offset,
+    required this.limit,
+    required this.priority,
+    required this.synchronous,
+    required this.chatId,
+    required this.messageId,
+    required this.generation,
+    required this.cause,
+    required this.startedFrom,
+  });
+
+  /// 1-based, per audit instance — the order the requests were sent in.
+  final int seq;
+  final DateTime at;
+  final int fileId;
+  final DownloadCaller caller;
+
+  /// `downloadFile.offset`.
+  final int offset;
+
+  /// `downloadFile.limit`. **0 means "to the end of the file"** — the shape
+  /// that must never be used for a play window.
+  final int limit;
+
+  final int priority;
+  final bool synchronous;
+
+  final int chatId;
+  final int messageId;
+  final int generation;
+
+  /// Why this window exists, in the caller's own words: `first window`,
+  /// `av=1048576`, `continue`, `sequential`, `whole file`.
+  final String cause;
+
+  /// `download_offset + downloaded_size` for the file when the call was sent.
+  final int startedFrom;
+
+  /// Bytes TDLib wrote for this file while this call was the open one.
+  int grew = 0;
+
+  /// Highest `download_offset + downloaded_size` seen during this call.
+  int reached = 0;
+
+  /// True when TDLib was asked for the rest of the file.
+  bool get unbounded => limit <= 0;
+
+  /// Last byte the request can produce, or -1 when unbounded.
+  int get windowEnd => limit <= 0 ? -1 : offset + limit - 1;
+
+  /// The line a device report prints. Every field the task asked for is here.
+  String describe() {
+    final window = unbounded ? 'limit=WHOLE_FILE' : 'limit=$limit';
+    return '#$seq caller=${caller.label} file=$fileId '
+        'msg=$messageId chat=$chatId gen=$generation '
+        'offset=$offset $window priority=$priority '
+        'sync=${synchronous ? 'true' : 'false'} '
+        'before=$startedFrom grew=$grew cause="$cause"';
+  }
+
+  Map<String, Object?> toJson() => <String, Object?>{
+        'seq': seq,
+        'at': at.toIso8601String(),
+        'fileId': fileId,
+        'chatId': chatId,
+        'messageId': messageId,
+        'generation': generation,
+        'caller': caller.label,
+        'offset': offset,
+        'limit': limit,
+        'unbounded': unbounded,
+        'priority': priority,
+        'synchronous': synchronous,
+        'cause': cause,
+        'startedFrom': startedFrom,
+        'grew': grew,
+        'reached': reached,
+      };
+}
+
+/// The audit log: every request, every byte attributed.
+class DownloadAudit {
+  /// Enough for a long play (one call per window step) without growing
+  /// without bound over a session.
+  static const int maxCalls = 400;
+
+  final List<DownloadCall> _calls = <DownloadCall>[];
+
+  /// The call currently open per file id. TDLib keeps one transfer per file,
+  /// so "the last request for this file" is exactly "the call that is
+  /// producing these bytes".
+  final Map<int, DownloadCall> _open = <int, DownloadCall>{};
+
+  /// Last observed `(downloadOffset, downloadedSize)` per file, so growth is
+  /// only counted inside one window. A window move resets `downloaded_size`,
+  /// and treating that reset as growth is how a 1.4 GB offset appeared as
+  /// "1.4 GB downloaded" in an earlier report.
+  final Map<int, (int, int)> _last = <int, (int, int)>{};
+
+  /// Context stamped onto every call, set by the resolver when a play starts.
+  int chatId = 0;
+  int messageId = 0;
+  int generation = 0;
+
+  int _seq = 0;
+
+  List<DownloadCall> get calls => List<DownloadCall>.unmodifiable(_calls);
+
+  int get count => _calls.length;
+
+  /// Stamps the identity every following call is attributed to.
+  void tag({int? chatId, int? messageId, int? generation}) {
+    if (chatId != null) this.chatId = chatId;
+    if (messageId != null) this.messageId = messageId;
+    if (generation != null) this.generation = generation;
+  }
+
+  /// Records a request. Called immediately before the TDLib call is sent, so
+  /// a request that never reaches TDLib is a separate failure (the exception
+  /// propagates from the api) — the log shows the intent and the caller.
+  DownloadCall record({
+    required int fileId,
+    required DownloadCaller caller,
+    required int offset,
+    required int limit,
+    required int priority,
+    bool synchronous = false,
+    String cause = '',
+  }) {
+    final before = transferred(fileId);
+    // Re-baseline the growth counter on the window this call asks for. TDLib
+    // reports `downloaded_size` relative to `download_offset`, so the first
+    // update after a request counts from zero — and a move to a far window is
+    // a new baseline, not a download.
+    _last[fileId] = (offset, 0);
+    final call = DownloadCall(
+      seq: ++_seq,
+      at: DateTime.now(),
+      fileId: fileId,
+      caller: caller,
+      offset: offset,
+      limit: limit,
+      priority: priority,
+      synchronous: synchronous,
+      chatId: chatId,
+      messageId: messageId,
+      generation: generation,
+      cause: cause,
+      startedFrom: before,
+    );
+    _open[fileId] = call;
+    _calls.add(call);
+    if (_calls.length > maxCalls) _calls.removeAt(0);
+    return call;
+  }
+
+  /// `download_offset + downloaded_size` — the furthest byte this file's
+  /// current window has reached.
+  int transferred(int fileId) {
+    final last = _last[fileId];
+    if (last == null) return 0;
+    return last.$1 + last.$2;
+  }
+
+  /// Feeds one `updateFile` into the attribution.
+  ///
+  /// Growth is only counted when the window offset did not change: a move to
+  /// a far window is not growth, and counting it would make a seek look like a
+  /// hundred-megabyte download.
+  void observe({
+    required int fileId,
+    required int offset,
+    required int downloaded,
+  }) {
+    final previous = _last[fileId];
+    _last[fileId] = (offset, downloaded);
+    final call = _open[fileId];
+    if (call == null) return;
+    if (previous != null && previous.$1 == offset && downloaded > previous.$2) {
+      call.grew += downloaded - previous.$2;
+    }
+    final reached = offset + downloaded;
+    if (reached > call.reached) call.reached = reached;
+  }
+
+  /// Total bytes TDLib wrote because of [caller].
+  int grewBy(DownloadCaller caller) => _calls
+      .where((c) => c.caller == caller)
+      .fold<int>(0, (sum, c) => sum + c.grew);
+
+  /// The request that moved the most bytes — the answer to "who caused the
+  /// big download".
+  DownloadCall? get largest {
+    DownloadCall? best;
+    for (final call in _calls) {
+      if (best == null || call.grew > best.grew) best = call;
+    }
+    return best;
+  }
+
+  /// True when any single request was allowed to ask for the whole file.
+  bool get anyUnbounded => _calls.any((c) => c.unbounded);
+
+  /// The unbounded calls, oldest first. A play window is not one of these.
+  List<DownloadCall> get unboundedCalls =>
+      _calls.where((c) => c.unbounded).toList();
+
+  /// `PLAYER:159383552 RESOURCE_LOADER:16777216 …`, largest first.
+  String growthSummary() {
+    final byCaller = <DownloadCaller, int>{};
+    for (final call in _calls) {
+      byCaller[call.caller] = (byCaller[call.caller] ?? 0) + call.grew;
+    }
+    if (byCaller.isEmpty) return '-';
+    final entries = byCaller.entries.toList()
+      ..sort((a, b) => b.value.compareTo(a.value));
+    return entries.map((e) => '${e.key.label}:${e.value}').join(' ');
+  }
+
+  /// The lines the diagnostics panel and the acceptance report print.
+  List<String> summary({int max = 8}) {
+    if (_calls.isEmpty) return const <String>['DOWNLOAD AUDIT: no calls'];
+    final lines = <String>[
+      'DOWNLOAD AUDIT calls=${_calls.length} '
+          'unbounded=${unboundedCalls.length} growthByCaller=${growthSummary()}',
+    ];
+    final recent = _calls.length <= max
+        ? _calls
+        : _calls.sublist(_calls.length - max);
+    for (final call in recent) {
+      lines.add('  ${call.describe()}');
+    }
+    final big = largest;
+    if (big != null && big.grew > 0) {
+      lines.add('  LARGEST caller=${big.caller.label} file=${big.fileId} '
+          'offset=${big.offset} '
+          'limit=${big.limit <= 0 ? 'WHOLE_FILE' : big.limit} grew=${big.grew}');
+    }
+    final unbounded = unboundedCalls;
+    if (unbounded.isNotEmpty) {
+      final who = unbounded.map((c) => c.caller.label).toSet().join(',');
+      lines.add('  UNBOUNDED=${unbounded.length} callers=$who');
+    }
+    return lines;
+  }
+
+  void reset() {
+    _calls.clear();
+    _open.clear();
+    _last.clear();
+    _seq = 0;
+  }
+}

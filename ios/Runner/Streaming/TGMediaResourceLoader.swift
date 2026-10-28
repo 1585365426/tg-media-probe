@@ -35,6 +35,20 @@ final class TGMediaResourceLoader: NSObject, AVAssetResourceLoaderDelegate {
   private let cancelLock = NSLock()
   private var cancelled = Set<ObjectIdentifier>()
 
+  /// Monotonic id per loading request, so one AVPlayer range can be followed
+  /// from `dataRequest` through the Dart supply, the TDLib window it caused and
+  /// the bytes that came back. Without it the four values are three unordered
+  /// log lines.
+  private let seqLock = NSLock()
+  private var requestSeq: Int64 = 0
+
+  private func nextRequestId() -> Int64 {
+    seqLock.lock()
+    defer { seqLock.unlock() }
+    requestSeq += 1
+    return requestSeq
+  }
+
   init(session: TGMediaSession, host: TGMediaStreamingHost?) {
     self.session = session
     self.host = host
@@ -77,7 +91,16 @@ final class TGMediaResourceLoader: NSObject, AVAssetResourceLoaderDelegate {
       return true
     }
 
+    let requestId = nextRequestId()
+
+    // The four values the report has to be able to line up:
+    //   AVPlayer asked for `requestedOffset` + `requestedLength`
+    //   (or "to the end of the resource");
+    //   Dart answers with what is readable, and only steers a TDLib window
+    //   when the bytes are not on their way. Logging them together is what
+    //   makes "who opened a 150 MB window" an answerable question.
     host?.emit(type: "dataRequest", session: session, extra: [
+      "requestId": requestId,
       "offset": dataRequest.requestedOffset,
       "length": dataRequest.requestedLength,
       "currentOffset": dataRequest.currentOffset,
@@ -85,7 +108,11 @@ final class TGMediaResourceLoader: NSObject, AVAssetResourceLoaderDelegate {
     ])
 
     queue.async { [weak self] in
-      self?.pump(loadingRequest: loadingRequest, dataRequest: dataRequest)
+      self?.pump(
+        loadingRequest: loadingRequest,
+        dataRequest: dataRequest,
+        requestId: requestId
+      )
     }
     return true
   }
@@ -117,7 +144,8 @@ final class TGMediaResourceLoader: NSObject, AVAssetResourceLoaderDelegate {
   /// and keeps going. It never finishes early with a short body.
   private func pump(
     loadingRequest: AVAssetResourceLoadingRequest,
-    dataRequest: AVAssetResourceLoadingDataRequest
+    dataRequest: AVAssetResourceLoadingDataRequest,
+    requestId: Int64
   ) {
     let total = session.totalBytes
     let start = dataRequest.requestedOffset
@@ -154,10 +182,11 @@ final class TGMediaResourceLoader: NSObject, AVAssetResourceLoaderDelegate {
       }
       if want <= 0 { break }
 
-      let reading = session.supply(offset: offset, length: want)
+      let reading = session.supply(offset: offset, length: want, requestId: requestId)
 
       if let code = reading.errorCode {
         host?.emit(type: "supplyError", session: session, extra: [
+          "requestId": requestId,
           "code": code,
           "message": reading.errorMessage ?? "",
           "offset": offset,
@@ -201,6 +230,7 @@ final class TGMediaResourceLoader: NSObject, AVAssetResourceLoaderDelegate {
       if idlePolls == 5 || (idlePolls % 100 == 0) {
         waitingReported += 1
         host?.emit(type: "waiting", session: session, extra: [
+          "requestId": requestId,
           "offset": offset,
           "waitedMs": reading.waitingMillis,
           "downloading": reading.downloading,
@@ -213,7 +243,8 @@ final class TGMediaResourceLoader: NSObject, AVAssetResourceLoaderDelegate {
     let cancelledNow = isCancelled(loadingRequest)
     host?.emit(type: cancelledNow ? "requestCancelled" : "requestFinished",
                 session: session,
-                extra: ["served": servedBytes, "from": start])
+                extra: ["requestId": requestId, "served": servedBytes,
+                        "from": start, "requested": requested])
     if !cancelledNow {
       loadingRequest.finishLoading()
     }

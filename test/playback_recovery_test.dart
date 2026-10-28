@@ -86,7 +86,7 @@ class ScriptedTransfer implements FileTransferApi {
   }
 
   @override
-  Future<void> start(int fileId) async {
+  Future<void> start(int fileId, {DownloadCaller caller = DownloadCaller.unknown, String cause = ''}) async {
     started.add(fileId);
     final error = failIds[fileId];
     if (error != null) throw VideoSourceException(error);
@@ -131,7 +131,13 @@ class ScriptedTransfer implements FileTransferApi {
   }
 
   @override
-  Future<void> startRange(int fileId, {required int offset, required int limit}) async {}
+  Future<void> startRange(int fileId, {required int offset, required int limit, int priority = 16, DownloadCaller caller = DownloadCaller.unknown, String cause = ''}) async {
+    if (caller == DownloadCaller.preload) {
+      started.add(fileId);
+      return;
+    }
+    await start(fileId, caller: caller, cause: cause);
+  }
   @override
   Future<void> cancel(int fileId) async => cancelled.add(fileId);
 

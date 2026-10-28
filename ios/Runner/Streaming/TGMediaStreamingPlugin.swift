@@ -140,13 +140,14 @@ final class TGMediaSession {
 
   /// Blocking byte request. Called from a resource-loader queue, never from the
   /// platform thread: the Dart answer arrives through the channel callback.
-  func supply(offset: Int64, length: Int64) -> TGSupply {
+  func supply(offset: Int64, length: Int64, requestId: Int64) -> TGSupply {
     guard !isClosed, let host = host else {
       return TGSupply.failure("SESSION_CLOSED", "播放已切换")
     }
     let semaphore = DispatchSemaphore(value: 0)
     var reading = TGSupply.failure("SUPPLY_TIMEOUT", "Dart 未在 15 秒内回应")
-    host.supply(sessionId: id, offset: offset, length: length) { result in
+    host.supply(sessionId: id, offset: offset, length: length,
+                requestId: requestId) { result in
       reading = result
       semaphore.signal()
     }
@@ -289,12 +290,13 @@ final class TGMediaStreamingHost: NSObject, FlutterStreamHandler {
 
   // MARK: - supply (native -> Dart)
 
-  func supply(sessionId: String, offset: Int64, length: Int64,
+  func supply(sessionId: String, offset: Int64, length: Int64, requestId: Int64,
               completion: @escaping (TGSupply) -> Void) {
     let args: [String: Any] = [
       "sessionId": sessionId,
       "offset": offset,
       "length": length,
+      "requestId": requestId,
     ]
     let invoke = { [weak self] in
       guard let self = self else {

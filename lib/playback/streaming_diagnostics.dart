@@ -27,6 +27,7 @@ import '../td/td_models.dart' show FileState;
 import '../util/byte_format.dart';
 import '../util/redact.dart';
 import 'mp4_probe.dart';
+import 'download_audit.dart';
 import 'source_decision.dart';
 import 'playback_failure.dart';
 import 'stream_proxy.dart' show ProxyExchange;
@@ -193,6 +194,12 @@ class StreamingDiagnostics extends ChangeNotifier {
   bool _v1Attempted = false;
   bool _v1Failed = false;
   String? _finalSource;
+
+  /// Every `downloadFile` of the current play, with the caller that sent it
+  /// and the bytes it actually moved. This is the object that answers "who
+  /// downloaded 152 MB before the first frame" — and it is fed by the transfer
+  /// layer itself, not by an inference from which branch ran.
+  final DownloadAudit downloadAudit = DownloadAudit();
 
   /// STREAM / LOCAL_FILE / FALLBACK — what the resolver returned.
   String? _decision;
@@ -652,6 +659,25 @@ class StreamingDiagnostics extends ChangeNotifier {
     }
   }
 
+  /// Records that a transport is being *entered*, before anything can fail.
+  ///
+  /// [noteTransportAttempt] only fires on the failure path, so a run where V2
+  /// was tried and threw before the player existed reported
+  /// `v2Attempted=false` — the report then claimed V2 was never used while the
+  /// device log showed a `tgmedia://` session. An attempt is a fact at entry,
+  /// not at exit.
+  void noteTransportStart(String transport) {
+    if (_sealedResult) return;
+    switch (transport) {
+      case 'RESOURCE_LOADER':
+        _v2Attempted = true;
+      case 'HTTP_PROXY':
+        _v1Attempted = true;
+    }
+    _note('transportStart=$transport');
+    notifyListeners();
+  }
+
   /// What the player finally opened.
   void noteFinalSource(String source) {
     if (_sealedResult) return;
@@ -1010,6 +1036,12 @@ class StreamingDiagnostics extends ChangeNotifier {
     _v1Attempted = false;
     _v1Failed = false;
     _finalSource = null;
+    // The download audit belongs to the play, not to the process: a report has
+    // to answer "which requests did *this* play send", not "which requests has
+    // the app ever sent".
+    downloadAudit
+      ..reset()
+      ..tag(chatId: chatId ?? 0, messageId: messageId ?? 0, generation: _generation);
     _startedAt = _clock();
     _growth.clear();
     _events.clear();
@@ -1296,6 +1328,9 @@ class StreamingDiagnostics extends ChangeNotifier {
             '(${_percentString()})',
         'head=$_headBytes B downloadOffset=$_downloadOffset',
         'window=$_windowStart-$_windowEnd moves=$_windowMoves',
+        // Who asked TDLib for bytes, and which request moved them. The header
+        // line is the counter; the calls below it are the evidence.
+        ...downloadAudit.summary(max: 4),
         'isDownloading=${_isDownloading ? 'true' : 'false'} '
             'completed=${_isDownloadingCompleted ? 'true' : 'false'}',
         'range=${_lastRange ?? '-'} requests=$_rangeRequests '
@@ -1467,6 +1502,20 @@ class StreamingDiagnostics extends ChangeNotifier {
       lines.add('source=STREAM_HTTP scheme=http');
     }
     lines.add('RANGE_TRUNCATED=$_truncatedCount');
+    // The download audit: every `downloadFile` this play sent, the caller that
+    // sent it, the window it asked for, and the bytes it moved. Without this
+    // block "152 MB appeared" is an observation; with it, it is a named call.
+    lines.add('DOWNLOAD_AUDIT calls=${downloadAudit.count} '
+        'unbounded=${downloadAudit.unboundedCalls.length}');
+    lines.add('DOWNLOAD_GROWTH ${downloadAudit.growthSummary()}');
+    final largest = downloadAudit.largest;
+    if (largest != null) {
+      lines.add('LARGEST_DOWNLOAD caller=${largest.caller.label} '
+          'file=${largest.fileId} offset=${largest.offset} '
+          'limit=${largest.limit <= 0 ? 'WHOLE_FILE' : largest.limit} '
+          'grew=${largest.grew}');
+    }
+    lines.addAll(downloadAudit.summary(max: 10));
     // Header/body agreement, counted from the exchanges the proxy really
     // performed: a 206 that declared more bytes than it carried is the
     // failure mode that reads as "无法连接服务器" on the device.
@@ -1580,6 +1629,16 @@ class StreamingDiagnostics extends ChangeNotifier {
           'v2Failed': _v2Failed,
           'v1Attempted': _v1Attempted,
           'v1Failed': _v1Failed,
+        },
+        // The audit as data: every request, who sent it, and the bytes it
+        // moved. A report can sum this; it cannot sum a log line.
+        'downloadAudit': <String, Object?>{
+          'calls': <Map<String, Object?>>[
+            for (final call in downloadAudit.calls) call.toJson(),
+          ],
+          'growthByCaller': downloadAudit.growthSummary(),
+          'unboundedCalls': downloadAudit.unboundedCalls.length,
+          'largest': downloadAudit.largest?.toJson(),
         },
         'resourceLoader': <String, Object?>{
           'sessions': _rlSessions,

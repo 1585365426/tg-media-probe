@@ -85,7 +85,7 @@ class _Transfer implements FileTransferApi {
   }
 
   @override
-  Future<void> start(int fileId) async {
+  Future<void> start(int fileId, {DownloadCaller caller = DownloadCaller.unknown, String cause = ''}) async {
     if (failIds.contains(fileId)) {
       throw VideoSourceException('TDLib error 400: FILE_ID_INVALID');
     }
@@ -104,11 +104,17 @@ class _Transfer implements FileTransferApi {
   }
 
   @override
-  Future<void> startRange(int fileId, {required int offset, required int limit}) async {
+  Future<void> startRange(int fileId, {required int offset, required int limit, int priority = 16, DownloadCaller caller = DownloadCaller.unknown, String cause = ''}) async {
     if (failIds.contains(fileId)) {
       throw VideoSourceException('TDLib error 400: FILE_ID_INVALID');
     }
-    started.add(fileId);
+    // A preload only ever records the request: it must not produce a path or
+    // a completion, or a neighbour would be ready to play.
+    if (caller == DownloadCaller.preload) {
+      started.add(fileId);
+      return;
+    }
+    await start(fileId, caller: caller, cause: cause);
   }
   @override
   Future<void> cancel(int fileId) async => cancelled.add(fileId);

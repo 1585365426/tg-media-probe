@@ -43,6 +43,9 @@ class V2File implements FileTransferApi {
   bool completed = false;
   int downloadCalls = 0;
   int prefetchCalls = 0;
+  int rangeCalls = 0;
+  (int, int)? lastRange;
+  DownloadCaller lastCaller = DownloadCaller.unknown;
   bool rejectStart = false;
 
   final StreamController<FileState> _updates =
@@ -99,7 +102,7 @@ class V2File implements FileTransferApi {
   }
 
   @override
-  Future<void> start(int id) async {
+  Future<void> start(int id, {DownloadCaller caller = DownloadCaller.unknown, String cause = ''}) async {
     downloadCalls++;
     if (rejectStart) throw VideoSourceException('TDLib error 400: FILE_ID_INVALID');
     // TDLib's first write lands right after acceptance; V1 gates on it and V2
@@ -108,15 +111,26 @@ class V2File implements FileTransferApi {
   }
 
   @override
-  Future<void> startRange(int id, {required int offset, required int limit}) async {
-    // Snapshot only: the window move is the bridge's business, and these tests
-    // assert on the hand-off rather than on the supply window.
+  Future<void> startRange(int id, {required int offset, required int limit, int priority = 16, DownloadCaller caller = DownloadCaller.unknown, String cause = ''}) async {
+    // The window move itself is the bridge's business; what matters here is
+    // that TDLib accepted it and started writing — the first window produces
+    // the same first update a full start does.
+    rangeCalls++;
+    lastRange = (offset, limit);
+    lastCaller = caller;
+    if (caller == DownloadCaller.preload) return;
+    if (downloaded == 0) await advance(64 * 1024);
   }
 
   @override
   Future<void> prefetch(int id) async {
     prefetchCalls++;
-    await startRange(id, offset: 0, limit: 0);
+    await startRange(
+      id,
+      offset: 0,
+      limit: StreamWindow.preloadBytes,
+      caller: DownloadCaller.preload,
+    );
   }
 
   final List<int> cancelled = <int>[];
@@ -239,6 +253,54 @@ void main() {
       await source.dispose();
       await api.close();
       await transport.dispose();
+    });
+
+    test('the first window is 16 MB, not the 1.33 GB file', () async {
+      // The report this replaces: a 1.33 GB video had ~152 MB on disk two
+      // seconds after the tap, before AVPlayer had asked for a byte, because
+      // the play opened with `downloadFile(offset: 0, limit: 0)`.
+      const total = 1429876103;
+      final api = V2File(sandbox, expectedSize: total);
+      final transport = V2Transport();
+      final resolver = VideoSourceResolver(
+        api: api,
+        fileExists: (_) async => true,
+        nativeTransport: transport,
+        diagnostics: freshDiagnostics(),
+      );
+
+      final source = await resolver.resolveStreamV2(9);
+
+      expect(api.lastCaller, DownloadCaller.player);
+      expect(api.lastRange, isNotNull);
+      expect(api.lastRange!.$1, 0);
+      expect(api.lastRange!.$2, StreamWindow.firstBytes);
+      expect(api.lastRange!.$2 / total, lessThan(0.02),
+          reason: '首窗口必须是文件的一小片，不是整文件');
+
+      await source.dispose();
+      await api.close();
+      await transport.dispose();
+    });
+
+    test('a preload asks for the head window at the lowest priority', () async {
+      final api = V2File(sandbox, expectedSize: 512 * 1024 * 1024);
+      final resolver = VideoSourceResolver(
+        api: api,
+        fileExists: (_) async => true,
+        nativeTransport: V2Transport(),
+        diagnostics: freshDiagnostics(),
+      );
+
+      final ok = await resolver.prefetch(11);
+
+      expect(ok, isTrue);
+      expect(api.prefetchCalls, 1);
+      expect(api.lastCaller, DownloadCaller.preload);
+      expect(api.lastRange, (0, StreamWindow.preloadBytes));
+      // A neighbour the user may never open has no claim on a whole film.
+      expect(StreamWindow.preloadBytes, lessThan(StreamWindow.firstBytes));
+      await api.close();
     });
 
     test('V2 does not wait for the startup buffer V1 needs', () async {

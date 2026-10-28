@@ -62,6 +62,9 @@ class ScriptedFile implements FileTransferApi {
   int cancelCalls = 0;
   (int, int)? lastRange;
 
+  /// The caller badge of the last window request — what the audit is built on.
+  DownloadCaller lastCaller = DownloadCaller.unknown;
+
   /// `start` throws for these ids, the way TDLib refuses a stale file id.
   Map<int, String> rejectIds = <int, String>{};
 
@@ -148,7 +151,7 @@ class ScriptedFile implements FileTransferApi {
   }
 
   @override
-  Future<void> start(int id) async {
+  Future<void> start(int id, {DownloadCaller caller = DownloadCaller.unknown, String cause = ''}) async {
     downloadCalls++;
     final rejection = rejectIds[id];
     if (rejection != null) throw VideoSourceException(rejection);
@@ -164,11 +167,23 @@ class ScriptedFile implements FileTransferApi {
     int id, {
     required int offset,
     required int limit,
+    int priority = 16,
+    DownloadCaller caller = DownloadCaller.unknown,
+    String cause = '',
   }) async {
     rangeCalls++;
     lastRange = (offset, limit);
-    // The real TDLib *replaces* the download window; the test decides when
-    // (and whether) the bytes actually arrive via deliverRange.
+    lastCaller = caller;
+    // A preload is bytes and nothing else — no path, so it can never become
+    // the player's source.
+    if (caller == DownloadCaller.preload) return;
+    // Otherwise TDLib accepted a window and starts writing it: the same first
+    // update a full start produces. The rest of the bytes arrive through
+    // deliverRange, because window replacement is the test's decision.
+    downloadCalls++;
+    final rejection = rejectIds[id];
+    if (rejection != null) throw VideoSourceException(rejection);
+    if (downloaded == 0) await advance(64 * 1024);
   }
 
   @override
@@ -586,6 +601,31 @@ void main() {
       await api.close();
     });
 
+    test('the play opens a bounded window, never the whole file', () async {
+      // 64 MB on the server, 512 KB on disk: the old first request was
+      // `downloadFile(offset: 0, limit: 0)` — TDLib's "to the end of file" —
+      // and it ran while AVPlayer was still initialising.
+      final api = ScriptedFile(sandbox, expectedSize: 64 * 1024 * 1024);
+      await api.advance(512 * 1024);
+      final resolver = VideoSourceResolver(
+        api: api,
+        fileExists: (_) async => true,
+        startupBufferBytes: 256 * 1024,
+      );
+
+      final source = await resolver.resolveStream(1002);
+
+      expect(api.lastCaller, DownloadCaller.player);
+      expect(api.lastRange, isNotNull);
+      expect(api.lastRange!.$1, 0);
+      expect(api.lastRange!.$2, StreamWindow.firstBytes);
+      expect(api.lastRange!.$2, lessThan(api.expectedSize),
+          reason: '首窗口不得是整文件');
+
+      await source.dispose();
+      await api.close();
+    });
+
     test('a stalled stream start is a network verdict', () async {
       final api = ScriptedFile(sandbox)..silentStart = true;
       final resolver = VideoSourceResolver(
@@ -995,7 +1035,13 @@ void main() {
       // 4 MB 足以把已经死掉的 socket 写穿 —— 这一步就是在等写错误。
       await api.deliverRange(from, 4 * 1024 * 1024);
 
-      final deadline = DateTime.now().add(const Duration(seconds: 3));
+      // The release is driven by a write failing on a dead loopback socket.
+      // How long that takes depends on how much the kernel buffers before the
+      // first error — on a loaded machine running the whole suite in parallel
+      // it can be several seconds. The deadline only has to be longer than
+      // "the error lands", not tight: a window that is genuinely held forever
+      // still fails here.
+      final deadline = DateTime.now().add(const Duration(seconds: 20));
       while (proxy.diversionActive && DateTime.now().isBefore(deadline)) {
         await Future<void>.delayed(const Duration(milliseconds: 20));
       }

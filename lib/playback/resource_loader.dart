@@ -3,7 +3,8 @@ import 'dart:math' as math;
 
 import 'package:flutter/services.dart';
 
-import 'stream_proxy.dart' show FileProgressWatch;
+import 'download_audit.dart' show DownloadCaller;
+import 'stream_proxy.dart' show FileProgressWatch, WindowContinuation;
 import 'streaming_diagnostics.dart';
 
 /// Streaming V2: the byte supply behind `AVAssetResourceLoader`.
@@ -208,6 +209,11 @@ class ResourceSupply {
     final now = _clock();
     final total = watch.expectedBytes;
     final path = watch.localPath;
+    // The player's own request, recorded on the watch: a download window that
+    // is opened next is then attributable to `player=<offset>` in the audit
+    // instead of appearing out of nowhere.
+    final Object extension = watch;
+    if (extension is WindowContinuation) extension.markRead(offset);
 
     // Disk first: `updateFile` stops once TDLib considers the file finished,
     // so a supply that begins after that point would otherwise wait on
@@ -258,6 +264,25 @@ class ResourceSupply {
     }
 
     // Not on disk yet. Move the window only when waiting cannot help.
+    //
+    // A window that has been filled looks exactly like a dead transfer if the
+    // only rule is "wait for growth": nothing will ever arrive again until
+    // TDLib is given a new window. Extending it first is what makes bounded
+    // windows playable at all.
+    if (extension is WindowContinuation && extension.windowExhausted) {
+      await extension.continueWindow(caller: DownloadCaller.resourceLoader);
+      final again = watch.readableEndFrom(offset);
+      if (watch.isComplete || again >= offset) {
+        return SupplyReading(
+          path: path,
+          from: offset,
+          to: watch.isComplete ? math.max(offset, total - 1) : again,
+          total: total,
+          completed: watch.isComplete,
+          downloading: true,
+        );
+      }
+    }
     await _steerIfNeeded(offset, head, total);
 
     final waited = _clock().difference(_lastAdvance);
@@ -470,13 +495,20 @@ class ResourceLoaderSession {
   }
 
   /// Answers one native chunk request.
-  Future<SupplyReading> serve(int offset, int length) async {
+  ///
+  /// [requestId] is the native loader's own counter for the AVPlayer loading
+  /// request this read belongs to. It is carried into every event so the chain
+  /// `AVPlayer range → loader answer → TDLib window` can be read in order
+  /// instead of guessed from timestamps.
+  Future<SupplyReading> serve(int offset, int length, {int requestId = 0}) async {
     _dataRequests++;
-    diagnostics?.noteResourceLoader('dataRequest offset=$offset len=$length',
+    diagnostics?.noteResourceLoader(
+        'dataRequest #$requestId offset=$offset len=$length',
         generation: generation);
     diagnostics?.noteResourceLoaderEvent(
       'dataRequestCreated',
       fields: <String, Object?>{
+        'requestId': requestId,
         'requestedOffset': offset,
         'requestedLength': length,
         'currentOffset': offset,
@@ -516,6 +548,7 @@ class ResourceLoaderSession {
       diagnostics?.noteResourceLoaderEvent(
         'respond',
         fields: <String, Object?>{
+          'requestId': requestId,
           'respondCount': _responds,
           'respondBytes': served,
           'currentOffset': reading.from,
@@ -601,6 +634,7 @@ class ResourceLoaderHost {
     final id = arguments['sessionId'] as String?;
     final offset = _asInt(arguments['offset']);
     final length = _asInt(arguments['length']);
+    final requestId = _asInt(arguments['requestId']);
     final session = id == null ? null : _sessions[id];
     if (session == null) {
       return const SupplyReading(
@@ -613,7 +647,7 @@ class ResourceLoaderHost {
         errorMessage: '没有对应的播放会话',
       ).toMap();
     }
-    final reading = await session.serve(offset, length);
+    final reading = await session.serve(offset, length, requestId: requestId);
     return reading.toMap();
   }
 

@@ -20,6 +20,7 @@ import '../platform/orientation_controller.dart';
 import '../platform/orientation_coordinator.dart';
 import '../playback/native_streaming.dart';
 import '../playback/player_slot.dart';
+import '../playback/streaming_diagnostics.dart';
 import '../playback/video_player_handle.dart';
 import '../playback/video_source.dart';
 import '../playback/watch_store.dart';
@@ -150,7 +151,13 @@ class _FeedPageState extends State<FeedPage> with WidgetsBindingObserver {
         activeFiles: _activeFiles,
       ),
       sources: VideoSourceResolver(
-        api: TdFileTransferApi(client),
+        // The audit is the panel's, so a device report can print the exact
+        // `downloadFile` calls of the play it describes — caller, window and
+        // bytes moved — instead of inferring them.
+        api: TdFileTransferApi(
+          client,
+          auditSink: StreamingDiagnostics.instance.downloadAudit,
+        ),
         // One `getMessage` is what repairs a stale file id and what fills in a
         // missing file name — both were reported from the device.
         metadata: metadata,

@@ -40,6 +40,8 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:math';
 
+import 'download_audit.dart' show DownloadCaller;
+
 /// Which byte ranges of a file are physically on disk right now.
 ///
 /// TDLib downloads a *window* (`download_offset` + `downloaded_size`) and
@@ -161,6 +163,35 @@ abstract class FileProgressWatch {
   /// Releases the update subscription. Called by whoever owns the transport:
   /// the proxy's close hook, or the resource-loader session.
   Future<void> dispose();
+}
+
+/// A watch that downloads in bounded windows instead of "to the end of file".
+///
+/// Kept as a separate interface rather than more members on
+/// [FileProgressWatch]: a test double that knows nothing about windows keeps
+/// working, and a transport asks for the capability with `is` — the same shape
+/// the player handles already use.
+///
+/// Why it exists: `downloadFile(limit: 0)` asks TDLib for the whole file. A
+/// 1.33 GB video therefore had ~150 MB on disk seconds after the tap, before
+/// AVPlayer had requested a byte. A bounded window is only useful if someone
+/// extends it when the reader reaches its end, which is exactly
+/// [continueWindow].
+abstract class WindowContinuation {
+  /// True when the window TDLib was last given is fully on disk and no
+  /// further bytes will arrive until another window is requested.
+  bool get windowExhausted;
+
+  /// Asks for the next window, starting where the last one ended.
+  ///
+  /// [caller] is the badge the audit records: the same continuation can be
+  /// asked for by the resource loader (V2) or by the loopback proxy (V1), and
+  /// a report that mixes them up cannot answer "who downloaded this".
+  Future<void> continueWindow({DownloadCaller caller});
+
+  /// The offset the reader is waiting on, recorded so a download request can
+  /// name the player's own request it was issued for.
+  void markRead(int offset);
 }
 
 /// One HTTP exchange, recorded so a device report can show what the player
@@ -638,6 +669,11 @@ class StreamProxyServer {
     // Ask the disk before asking TDLib. A complete file whose updates already
     // stopped would otherwise look like a stalled download.
     await watch.refresh();
+    // Name the request the window will be opened for: the audit line then
+    // reads "a window was opened because the player asked for byte N", not
+    // "some window was opened".
+    final Object extension = watch;
+    if (extension is WindowContinuation) extension.markRead(from);
     // Make the first byte servable: startup gate for a fresh play, window
     // steering for a range the sequential download has not reached yet.
     await _prepare(from, requestedTo, total);
@@ -820,6 +856,16 @@ class StreamProxyServer {
           onEvent?.call('wait diversion cursor=$cursor');
           await finished.future;
         }
+        continue;
+      }
+      // A window that has been filled is not a dead transfer: it is a transfer
+      // that finished the bytes it was asked for. Without this, a bounded
+      // window would look exactly like a stalled download at its own edge.
+      final Object extension = watch;
+      if (cursor <= watch.headBytes + seekGapBytes &&
+          extension is WindowContinuation &&
+          extension.windowExhausted) {
+        await extension.continueWindow(caller: DownloadCaller.proxy);
         continue;
       }
       if (cursor <= watch.headBytes + seekGapBytes) {
@@ -1017,6 +1063,13 @@ class StreamProxyServer {
     // ends the wait instead of starting a 20-second one.
     await watch.refresh();
     if (watch.isComplete || watch.readableEndFrom(cursor) >= cursor) return;
+    // The window ended exactly where the reader is standing. Waiting here
+    // would burn the whole stall budget on a download that is not running.
+    final Object extension = watch;
+    if (extension is WindowContinuation && extension.windowExhausted) {
+      await extension.continueWindow(caller: DownloadCaller.proxy);
+      if (watch.isComplete || watch.readableEndFrom(cursor) >= cursor) return;
+    }
     final ok = await _awaitSignal(
       () => watch.isComplete || watch.readableEndFrom(cursor) >= cursor,
       label: 'body $cursor',

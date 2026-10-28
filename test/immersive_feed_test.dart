@@ -38,8 +38,12 @@ MediaRecord video(int messageId) => MediaRecord(
 
 class _Transfer implements FileTransferApi {
   @override
-  Future<void> prefetch(int fileId) =>
-      startRange(fileId, offset: 0, limit: 0);
+  Future<void> prefetch(int fileId) => startRange(
+        fileId,
+        offset: 0,
+        limit: StreamWindow.preloadBytes,
+        caller: DownloadCaller.preload,
+      );
 
   final StreamController<FileState> _updates =
       StreamController<FileState>.broadcast();
@@ -56,7 +60,7 @@ class _Transfer implements FileTransferApi {
       );
 
   @override
-  Future<void> start(int fileId) async {
+  Future<void> start(int fileId, {DownloadCaller caller = DownloadCaller.unknown, String cause = ''}) async {
     _updates.add(FileState(
       id: fileId,
       size: 4096,
@@ -69,7 +73,12 @@ class _Transfer implements FileTransferApi {
   }
 
   @override
-  Future<void> startRange(int fileId, {required int offset, required int limit}) async {}
+  Future<void> startRange(int fileId, {required int offset, required int limit, int priority = 16, DownloadCaller caller = DownloadCaller.unknown, String cause = ''}) async {
+    // A preload produces bytes and nothing else; every other caller is the
+    // play's own bounded window.
+    if (caller == DownloadCaller.preload) return;
+    await start(fileId, caller: caller, cause: cause);
+  }
   @override
   Future<void> cancel(int fileId) async {}
 

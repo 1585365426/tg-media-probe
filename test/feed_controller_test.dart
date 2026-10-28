@@ -205,7 +205,7 @@ class FakeTransferApi implements FileTransferApi {
   }
 
   @override
-  Future<void> start(int fileId) async {
+  Future<void> start(int fileId, {DownloadCaller caller = DownloadCaller.unknown, String cause = ''}) async {
     startCalls++;
     startedIds.add(fileId);
     if (failOnStart) throw VideoSourceException('TDLib error 400: FILE_ID_INVALID');
@@ -226,8 +226,16 @@ class FakeTransferApi implements FileTransferApi {
   /// real TDLib request and nothing else: no completion update, no path, so a
   /// preload can never turn into "ready to play".
   @override
-  Future<void> startRange(int fileId, {required int offset, required int limit}) async {
-    startedIds.add(fileId);
+  Future<void> startRange(int fileId, {required int offset, required int limit, int priority = 16, DownloadCaller caller = DownloadCaller.unknown, String cause = ''}) async {
+    // A preload is a real TDLib request and nothing else: no completion
+    // update and no path, so it can never turn into "ready to play".
+    if (caller == DownloadCaller.preload) {
+      startedIds.add(fileId);
+      return;
+    }
+    // Any other caller is the play opening its first bounded window; TDLib
+    // answers it exactly like a full start.
+    await start(fileId, caller: caller, cause: cause);
   }
   @override
   Future<void> cancel(int fileId) async {

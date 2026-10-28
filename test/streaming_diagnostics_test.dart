@@ -95,7 +95,7 @@ class ScriptedApi implements FileTransferApi {
   }
 
   @override
-  Future<void> start(int id) async {
+  Future<void> start(int id, {DownloadCaller caller = DownloadCaller.unknown, String cause = ''}) async {
     downloadCalls++;
     if (downloaded == 0) await advance(64 * 1024);
   }
@@ -105,6 +105,9 @@ class ScriptedApi implements FileTransferApi {
     int id, {
     required int offset,
     required int limit,
+    int priority = 16,
+    DownloadCaller caller = DownloadCaller.unknown,
+    String cause = '',
   }) async {
     rangeCalls++;
     lastRange = (offset, limit);
@@ -1061,6 +1064,98 @@ void main() {
       expect(diag.rangeRequests, 0);
       expect(diag.totalBytes, 2048);
       expect(diag.streamingEnabled, isTrue);
+    });
+  });
+
+  group('transport entry and download audit', () {
+    test('a transport counts as attempted the moment it is entered', () {
+      // The device report said `v2Attempted=false` while the log showed a
+      // `tgmedia://` session: an attempt was only recorded on failure.
+      final diag = StreamingDiagnostics();
+      diag.beginPlay(fileId: 55, streaming: false);
+
+      diag.noteTransportStart('RESOURCE_LOADER');
+
+      expect(diag.v2Attempted, isTrue);
+      expect(diag.v2Failed, isFalse);
+      expect(diag.v1Attempted, isFalse);
+      expect(
+        diag.acceptanceLines().join('\n'),
+        contains('v2Attempted=true v2Failed=false'),
+      );
+    });
+
+    test('a failed transport after entry is both attempted and failed', () {
+      final diag = StreamingDiagnostics();
+      diag.beginPlay(fileId: 55, streaming: false);
+      diag.noteTransportStart('RESOURCE_LOADER');
+      diag.noteTransportAttempt('RESOURCE_LOADER', failed: true);
+
+      expect(diag.v2Attempted, isTrue);
+      expect(diag.v2Failed, isTrue);
+    });
+
+    test('the acceptance report names the request that moved the most bytes',
+        () {
+      final diag = StreamingDiagnostics();
+      final generation =
+          diag.beginPlay(fileId: 13604, streaming: true, totalBytes: 1429876103);
+      expect(generation, greaterThan(0));
+
+      diag.downloadAudit.record(
+        fileId: 13604,
+        caller: DownloadCaller.player,
+        offset: 0,
+        limit: 16 * 1024 * 1024,
+        priority: 32,
+        cause: 'first window',
+      );
+      diag.downloadAudit.observe(
+        fileId: 13604,
+        offset: 0,
+        downloaded: 16 * 1024 * 1024,
+      );
+
+      final text = diag.acceptanceLines().join('\n');
+      expect(text, contains('DOWNLOAD_AUDIT calls=1 unbounded=0'));
+      expect(text, contains('DOWNLOAD_GROWTH PLAYER:16777216'));
+      expect(text, contains('LARGEST_DOWNLOAD caller=PLAYER file=13604'));
+      expect(text, contains('limit=16777216'));
+    });
+
+    test('a whole-file request shows up as UNBOUNDED, not as a window', () {
+      final diag = StreamingDiagnostics();
+      diag.beginPlay(fileId: 7, streaming: false);
+      diag.downloadAudit.record(
+        fileId: 7,
+        caller: DownloadCaller.fullDownload,
+        offset: 0,
+        limit: 0,
+        priority: 32,
+      );
+
+      final text = diag.acceptanceLines().join('\n');
+      expect(text, contains('unbounded=1'));
+      expect(text, contains('UNBOUNDED=1 callers=FULL_DOWNLOAD'));
+      expect(diag.panelLines().join('\n'), contains('limit=WHOLE_FILE'));
+    });
+
+    test('a new play starts a new audit', () {
+      final diag = StreamingDiagnostics();
+      diag.beginPlay(fileId: 1, streaming: false);
+      diag.downloadAudit.record(
+        fileId: 1,
+        caller: DownloadCaller.player,
+        offset: 0,
+        limit: 1024,
+        priority: 32,
+      );
+      expect(diag.downloadAudit.count, 1);
+
+      diag.beginPlay(fileId: 2, streaming: false);
+
+      expect(diag.downloadAudit.count, 0);
+      expect(diag.downloadAudit.chatId, 0);
     });
   });
 }

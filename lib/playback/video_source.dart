@@ -27,6 +27,7 @@ import '../data/media_record.dart';
 import '../td/td_client.dart';
 import '../td/td_models.dart';
 import '../td/td_requests.dart';
+import 'download_audit.dart';
 import 'media_metadata.dart';
 import 'mp4_probe.dart';
 import 'native_streaming.dart';
@@ -34,14 +35,28 @@ import 'playback_trace.dart';
 import 'resource_loader.dart';
 import 'source_decision.dart';
 import 'stream_proxy.dart';
+import 'stream_window.dart';
 import 'streaming_diagnostics.dart';
+
+export 'download_audit.dart';
+export 'stream_window.dart';
 
 /// The only TDLib surface this file needs. Abstracted so the resolution logic
 /// can be tested without a native library.
 abstract class FileTransferApi {
   Future<FileState?> stat(int fileId);
-  Future<void> start(int fileId);
+
+  /// Starts the full download (offset 0, no limit). Only the
+  /// [DownloadCaller.fullDownload] rung may use this: for a play window it
+  /// asks TDLib for the whole file.
+  Future<void> start(
+    int fileId, {
+    DownloadCaller caller = DownloadCaller.unknown,
+    String cause = '',
+  });
+
   Future<void> cancel(int fileId);
+
   Stream<FileState> updates();
 
   /// Points the TDLib download window at [offset]..[offset+limit].
@@ -51,22 +66,66 @@ abstract class FileTransferApi {
   /// what lets the proxy serve a range AVPlayer asked for *now* — e.g. the
   /// tail of the file during a moov probe — instead of waiting for the
   /// sequential download to crawl there.
-  Future<void> startRange(int fileId, {required int offset, required int limit});
+  ///
+  /// [limit] is required to be finite for a play window. `0` (whole file) is
+  /// rejected by the production implementation so a call site cannot drift
+  /// back into "download 1.33 GB before the first frame".
+  Future<void> startRange(
+    int fileId, {
+    required int offset,
+    required int limit,
+    int priority = 16,
+    DownloadCaller caller = DownloadCaller.unknown,
+    String cause = '',
+  });
 
   /// Warms the cache for [fileId] at a priority below any play.
   ///
-  /// Deliberately a one-shot request with no observer: a preload must be able
-  /// to produce bytes and nothing else — no [PlaySource], no watcher, no
-  /// proxy. Callers that cannot express priority may degrade to a sequential
-  /// start; that is still a warm start and still cannot install a player.
-  Future<void> prefetch(int fileId) =>
-      startRange(fileId, offset: 0, limit: 0);
+  /// Deliberately a one-shot, bounded request with no observer: a preload must
+  /// be able to produce bytes and nothing else — no [PlaySource], no watcher,
+  /// no proxy. Bounded because a neighbour the user may never open has no
+  /// claim on more than the head of the file.
+  Future<void> prefetch(int fileId) => startRange(
+        fileId,
+        offset: 0,
+        limit: StreamWindow.preloadBytes,
+        priority: 2,
+        caller: DownloadCaller.preload,
+        cause: 'preload head',
+      );
 }
 
 class TdFileTransferApi implements FileTransferApi {
-  TdFileTransferApi(this.client);
+  TdFileTransferApi(
+    this.client, {
+    DownloadAudit? auditSink,
+  }) : audit = auditSink ?? DownloadAudit() {
+    // Attribution needs the file updates, and it needs *all* of them —
+    // including the ones for files no watcher is listening to (a preload).
+    // One subscription here is the only place that sees every transfer.
+    _auditSubscription = client.fileUpdates.map(FileState.fromJson).listen(
+      (state) {
+        audit.observe(
+          fileId: state.id,
+          offset: state.downloadOffset,
+          downloaded: state.downloadedSize,
+        );
+      },
+      onError: (Object _) {
+        // A broken update stream must not take the audit down with it; the
+        // transfer still has its own watchers.
+      },
+    );
+  }
 
   final TdClient client;
+
+  /// Every `downloadFile` this app sends, with the caller that sent it.
+  final DownloadAudit audit;
+
+  late final StreamSubscription<FileState> _auditSubscription;
+
+  Future<void> dispose() => _auditSubscription.cancel();
 
   @override
   Future<FileState?> stat(int fileId) async {
@@ -79,9 +138,21 @@ class TdFileTransferApi implements FileTransferApi {
   }
 
   @override
-  Future<void> start(int fileId) async {
+  Future<void> start(
+    int fileId, {
+    DownloadCaller caller = DownloadCaller.unknown,
+    String cause = '',
+  }) async {
     // priority 32 is the same value the probe chain uses: high enough to beat
     // thumbnail fetches, low enough not to starve the chat list.
+    audit.record(
+      fileId: fileId,
+      caller: caller,
+      offset: 0,
+      limit: 0,
+      priority: 32,
+      cause: cause.isEmpty ? 'whole file' : cause,
+    );
     final response = await client.request(
       downloadFile(fileId: fileId),
       timeout: const Duration(seconds: 60),
@@ -95,12 +166,28 @@ class TdFileTransferApi implements FileTransferApi {
     int fileId, {
     required int offset,
     required int limit,
+    int priority = 16,
+    DownloadCaller caller = DownloadCaller.unknown,
+    String cause = '',
   }) async {
+    if (limit <= 0) {
+      // The whole-file request is `start()`. Keeping this rejection here means
+      // a window call site cannot silently become an unbounded download.
+      throw VideoSourceException('窗口大小必须为正数（limit=$limit）');
+    }
     // Priority 16: a range the player is blocked on outranks prefetches but
     // stays below the "start playing" transfer. TDLib aligns offset handling
     // internally; the caller passes byte-exact windows.
+    audit.record(
+      fileId: fileId,
+      caller: caller,
+      offset: offset,
+      limit: limit,
+      priority: priority,
+      cause: cause,
+    );
     final response = await client.request(
-      downloadFile(fileId: fileId, offset: offset, limit: limit, priority: 16),
+      downloadFile(fileId: fileId, offset: offset, limit: limit, priority: priority),
       timeout: const Duration(seconds: 60),
     );
     final error = errorText(response);
@@ -111,13 +198,16 @@ class TdFileTransferApi implements FileTransferApi {
   Future<void> prefetch(int fileId) async {
     // Priority 2: below the play's 32 and below a range the proxy is blocked
     // on (16). TDLib serves one file per priority queue, so a preload can only
-    // ever use bandwidth the active play is not asking for.
-    final response = await client.request(
-      downloadFile(fileId: fileId, priority: 2),
-      timeout: const Duration(seconds: 30),
+    // ever use bandwidth the active play is not asking for. The window is
+    // bounded to the head — a neighbour is not a reason to pull a whole film.
+    await startRange(
+      fileId,
+      offset: 0,
+      limit: StreamWindow.preloadBytes,
+      priority: 2,
+      caller: DownloadCaller.preload,
+      cause: 'preload head',
     );
-    final error = errorText(response);
-    if (error != null) throw VideoSourceException(error);
   }
 
   @override
@@ -352,6 +442,7 @@ class VideoSourceResolver {
     StreamingDiagnostics? diagnostics,
     NativeStreamingTransport? nativeTransport,
     this.resourceLoaderPathWait = const Duration(seconds: 8),
+    this.windowBytes = StreamWindow.stepBytes,
   })  : _fileExists = fileExists ?? _defaultFileExists,
         _diagnostics = diagnostics ?? StreamingDiagnostics.instance,
         _nativeTransport = nativeTransport ?? MethodChannelStreamingTransport();
@@ -363,6 +454,11 @@ class VideoSourceResolver {
   /// the transport. This is a *path* wait, not a playback wait: V2 does not
   /// need bytes on disk to start, only a file to read from.
   final Duration resourceLoaderPathWait;
+
+  /// How many bytes one `downloadFile` may ask for. The play opens on
+  /// [StreamWindow.firstBytes] and every later window is this size, so a tap
+  /// can never turn into a whole-file request.
+  final int windowBytes;
 
   final FileTransferApi api;
 
@@ -902,7 +998,14 @@ class VideoSourceResolver {
       _diagnostics.noteSourceDecision(decision, generation: generation);
       try {
         await api.cancel(fileId);
-        await api.start(fileId);
+        await api.startRange(
+          fileId,
+          offset: 0,
+          limit: StreamWindow.firstWindow(facts.expectedBytes),
+          priority: 32,
+          caller: DownloadCaller.player,
+          cause: 'redownload',
+        );
       } on Object catch (e) {
         _diagnostics.noteDecision(
           candidate: false,
@@ -922,6 +1025,7 @@ class VideoSourceResolver {
       api,
       fileId,
       trustClaimedComplete: !decision.needsRedownload,
+      windowBytes: windowBytes,
       initial: existing,
       // Guarded by the generation captured above: a watcher left over from a
       // superseded play keeps receiving `updateFile` for its own file, and
@@ -936,10 +1040,29 @@ class VideoSourceResolver {
     StreamProxyServer? proxy;
     try {
       trace?.mark(PlaybackStage.downloadRequested);
-      // downloadFile answers as soon as TDLib accepts the transfer (a rejected
-      // file id fails here and feeds the repair loop); the bytes arrive
-      // through the update stream the watcher is already consuming.
-      await api.start(fileId);
+      // The first window is bounded, and it is bounded *before* the player
+      // asks for anything.
+      //
+      // This used to be `api.start(fileId)`, i.e. `downloadFile(offset: 0,
+      // limit: 0)` — "to the end of the file". TDLib accepted it and ran at
+      // priority 32 while AVPlayer was still initialising, so a 1.33 GB video
+      // had ~150 MB on disk seconds after the tap. That is the burst the
+      // device reports called "152 MB before playback"; it is bandwidth
+      // multiplied by however long initialisation took, not a constant, which
+      // is why it moved between 120 and 160 MB.
+      //
+      // A bounded head window still gives the player everything it needs for
+      // the first frame, and every later byte is asked for by the player's own
+      // request (see ResourceSupply / StreamProxyServer) or by the next
+      // continuation step.
+      await api.startRange(
+        fileId,
+        offset: 0,
+        limit: StreamWindow.firstWindow(facts.expectedBytes),
+        priority: 32,
+        caller: DownloadCaller.player,
+        cause: 'first window',
+      );
 
       if (transport == StreamTransport.resourceLoader) {
         // V2 has no startup gate. AVFoundation asks for the ranges it needs and
@@ -1538,7 +1661,14 @@ class VideoSourceResolver {
       // `winner` already listens to `abort`, so a watchdog firing during
       // `start()` cannot become an unhandled error.
       try {
-        await api.start(fileId);
+        // The one place a whole-file request is correct: this *is* the
+        // full-download rung, the user is waiting for a complete cache, and
+        // the caller badge says so in the audit.
+        await api.start(
+          fileId,
+          caller: DownloadCaller.fullDownload,
+          cause: 'full download wait',
+        );
       } on Object {
         // The abort future is nobody's business now; mark it handled so a late
         // watchdog does not surface as an unhandled async error.
@@ -1650,13 +1780,14 @@ class _MissingFile implements Exception {
 /// Backed by the same `updateFile` stream the wait loop consumes, filtered to
 /// one file id. Progress without a local path is ignored on purpose — the
 /// proxy reads that exact file, so bytes without a path are numbers, not data.
-class _LiveFileWatch implements FileProgressWatch {
+class _LiveFileWatch implements FileProgressWatch, WindowContinuation {
   _LiveFileWatch(
     this._api,
     this._fileId, {
     required FileState? initial,
     this.onState,
     this.trustClaimedComplete = true,
+    this.windowBytes = StreamWindow.stepBytes,
   }) {
     if (initial != null && initial.path.isNotEmpty) {
       _path = initial.path;
@@ -1696,6 +1827,17 @@ class _LiveFileWatch implements FileProgressWatch {
   /// measured. False for a file the decision layer flagged as short.
   final bool trustClaimedComplete;
 
+  /// Size of one download window. Every request this watch issues is bounded
+  /// by it, so a play can never ask TDLib for the whole file.
+  final int windowBytes;
+
+  /// `(offset, limit)` of the window TDLib was last given, and the offset the
+  /// reader last asked for — the two facts that answer "why was this window
+  /// opened" and "is it used up".
+  int _requestedFrom = -1;
+  int _requestedLimit = 0;
+  int _readOffset = -1;
+
   String _path = '';
   int _windowOffset = 0;
   int _prefix = 0;
@@ -1710,10 +1852,6 @@ class _LiveFileWatch implements FileProgressWatch {
   /// the proxy's point of view — the main `bytes=0-` response then sat on
   /// bytes that were already on disk and called it a stall.
   final ByteCoverage _present = ByteCoverage();
-
-  /// Set while a targeted window is in flight, so a sequential restore can be
-  /// skipped when the proxy asks for another window immediately after.
-  bool _windowSteered = false;
 
   final StreamController<void> _changes = StreamController<void>.broadcast();
   late final StreamSubscription<FileState> _subscription;
@@ -1771,19 +1909,100 @@ class _LiveFileWatch implements FileProgressWatch {
     if (!_canDownload) {
       throw VideoSourceException('流式播放不可用（该文件不允许下载）');
     }
-    _windowSteered = true;
+
     // 1 KB alignment is what TDLib's chunking expects; the cost is at most
     // 1023 bytes downloaded early.
-    final aligned = from & ~1023;
+    final aligned = from & StreamWindow.alignMask;
     final limit = end - aligned + 1;
-    await _api.startRange(_fileId, offset: aligned, limit: limit);
+    await _issueWindow(
+      aligned,
+      limit,
+      DownloadCaller.resourceLoader,
+      _readOffset >= 0 ? 'player=$_readOffset' : 'player=?',
+    );
+  }
+
+  /// Sends one bounded `downloadFile` and remembers it.
+  Future<void> _issueWindow(
+    int offset,
+    int limit,
+    DownloadCaller caller,
+    String cause,
+  ) async {
+    if (limit <= 0) return;
+    _requestedFrom = offset;
+    _requestedLimit = limit;
+    await _api.startRange(
+      _fileId,
+      offset: offset,
+      limit: limit,
+      // Priority 16: a window the reader is blocked on outranks a preload,
+      // stays below the first-window transfer.
+      priority: 16,
+      caller: caller,
+      cause: cause,
+    );
   }
 
   @override
   Future<void> resumeSequential() async {
-    if (!_windowSteered || _complete) return;
-    _windowSteered = false;
-    await _api.start(_fileId);
+    if (_complete || _expected <= 0) return;
+    final head = headBytes;
+    if (head >= _expected) return;
+    // The download TDLib is running still covers the byte the reader needs:
+    // re-asking would restart a transfer that is already producing it.
+    if (StreamWindow.windowCoversFrom(_requestedFrom, _requestedLimit, head) &&
+        !windowExhausted) {
+      return;
+    }
+    final (from, to) = StreamWindow.windowAt(head, _expected, size: windowBytes);
+
+    await _issueWindow(
+      from,
+      StreamWindow.limitFor(from, to),
+      DownloadCaller.proxy,
+      'sequential',
+    );
+  }
+
+  /// True when the window TDLib was given is fully on disk, so no further byte
+  /// will arrive until another window is requested.
+  ///
+  /// Derived from the bytes actually observed rather than from a "finished"
+  /// flag: TDLib does not announce "this window is done", it just goes quiet.
+  @override
+  bool get windowExhausted {
+    if (_complete || _requestedLimit <= 0 || _requestedFrom < 0) return false;
+    if (_present.covers(_requestedFrom, _requestedFrom + _requestedLimit - 1)) {
+      return true;
+    }
+    // TDLib caps `downloaded_size` at the requested limit and occasionally
+    // reports it a byte short; both mean the window is finished, and waiting
+    // for the missing byte would burn the whole stall budget on a transfer
+    // that has already stopped.
+    return _windowOffset == _requestedFrom && _prefix >= _requestedLimit - 1;
+  }
+
+  @override
+  Future<void> continueWindow({
+    DownloadCaller caller = DownloadCaller.resourceLoader,
+  }) async {
+    if (_complete || _expected <= 0) return;
+    if (!windowExhausted) return;
+    final next = _requestedFrom + _requestedLimit;
+    if (next >= _expected) return;
+    final (from, to) = StreamWindow.windowAt(next, _expected, size: windowBytes);
+    await _issueWindow(
+      from,
+      StreamWindow.limitFor(from, to),
+      caller,
+      'continue from $next',
+    );
+  }
+
+  @override
+  void markRead(int offset) {
+    _readOffset = offset;
   }
 
   /// Measures the file and folds the result in.

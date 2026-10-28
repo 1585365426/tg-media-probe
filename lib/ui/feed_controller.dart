@@ -772,6 +772,10 @@ class FeedController extends ChangeNotifier {
     }
 
     if (StreamingV2.supported) {
+      // Recorded on entry, not on failure: a V2 attempt that throws before the
+      // player exists used to leave `v2Attempted=false` in the report while
+      // the device log showed a `tgmedia://` session being opened.
+      _diagnostics.noteTransportStart('RESOURCE_LOADER');
       try {
         return await sources.resolveStreamV2(
           record.fileId,
