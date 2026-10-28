@@ -289,8 +289,11 @@ class Rig {
         api: api,
         stallTimeout: timeout,
         // The fake pool paths never exist on disk; the real resolver now
-        // verifies existence, so the rig answers for its own pool.
+        // verifies existence, so the rig answers for its own pool. Sizes too:
+        // a stat over a fake path cannot measure, and an unmeasurable file
+        // must never read as complete.
         fileExists: (_) async => true,
+        diskSizeOf: (_) async => 4096,
       ),
       chatTitles: const <int, String>{1: '测试频道'},
       defaultMuted: muted,

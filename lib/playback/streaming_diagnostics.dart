@@ -354,6 +354,19 @@ class StreamingDiagnostics extends ChangeNotifier {
   int _windowStart = 0;
   int _windowEnd = 0;
 
+  /// Bytes measured behind the file's path, or -1 when nothing was measured.
+  ///
+  /// Kept apart from [_downloadedBytes] on purpose. `downloaded_size` is
+  /// TDLib's count of what it has written; a `stat` is the length of the file.
+  /// Neither one alone answers "is the whole film here" — a pool file can be
+  /// full length with an unwritten middle — so the panel prints both and the
+  /// completion flag needs both.
+  int _diskBytes = -1;
+
+  /// A `completed` claim that the disk did not confirm. Reported, never used
+  /// to draw a progress bar.
+  String? _completionRefusal;
+
   bool _isDownloading = false;
   bool _isDownloadingCompleted = false;
 
@@ -443,6 +456,19 @@ class StreamingDiagnostics extends ChangeNotifier {
 
   int get totalBytes => _totalBytes;
   int get downloadedBytes => _downloadedBytes;
+
+  /// The measured length of the file behind the path, or -1 when unmeasured.
+  int get diskBytes => _diskBytes;
+
+  /// True only when the bytes behind the path reach the declared total *and*
+  /// TDLib's own completion claim agreed. Both halves are needed: see
+  /// [noteCompleted].
+  bool get diskCoversTotal =>
+      _totalBytes > 0 && _diskBytes >= 0 && _diskBytes >= _totalBytes;
+
+  /// Why a `completed` claim was not turned into `100%`, when it was refused.
+  String? get completionRefusal => _completionRefusal;
+
   int get headBytes => _headBytes;
   int get downloadOffset => _downloadOffset;
   int get windowStart => _windowStart;
@@ -668,6 +694,9 @@ class StreamingDiagnostics extends ChangeNotifier {
     _decisionExpectedSize = decision.facts.expectedBytes;
     _decisionDiskCovers = decision.facts.diskCoversExpected;
     _decisionRedownload = decision.needsRedownload;
+    // The decision already measured the file; the panel uses that measurement
+    // instead of leaving `disk` at "unknown" until a completion claim arrives.
+    if (decision.facts.diskSize >= 0) _diskBytes = decision.facts.diskSize;
     _note('playbackDecision=${decision.code} reason=${decision.reason} '
         'disk=${decision.facts.diskSize} expected=${decision.facts.expectedBytes}');
     notifyListeners();
@@ -1122,6 +1151,10 @@ class StreamingDiagnostics extends ChangeNotifier {
     _messageId = messageId;
     _totalBytes = totalBytes ?? 0;
     _downloadedBytes = 0;
+    // Measured length and the refused claim belong to the video that was
+    // played: a swipe must never inherit the previous file's evidence.
+    _diskBytes = -1;
+    _completionRefusal = null;
     _headBytes = 0;
     _downloadOffset = 0;
     _windowStart = 0;
@@ -1262,6 +1295,12 @@ class StreamingDiagnostics extends ChangeNotifier {
   }
 
   /// TDLib said bytes exist. Straight from `updateFile` / `updateFileProgress`.
+  ///
+  /// `completed` is recorded as a transfer state, never as a byte count and
+  /// never as "100%": the flag can be raised for a file whose bytes are short,
+  /// and rendering it turned a claim into a progress bar. Only
+  /// [noteCompleted] — which requires a measured length — can declare the file
+  /// whole.
   void updateTransfer({
     required int downloadedBytes,
     required int totalBytes,
@@ -1274,7 +1313,7 @@ class StreamingDiagnostics extends ChangeNotifier {
     _downloadedBytes = downloadedBytes;
     if (totalBytes > 0) _totalBytes = totalBytes;
     _downloadOffset = downloadOffset;
-    _isDownloadingCompleted = completed;
+    if (!completed) _isDownloadingCompleted = false;
     _isDownloading = isDownloading && !completed;
     if (downloadOffset == 0) {
       _headBytes = downloadedBytes;
@@ -1363,16 +1402,54 @@ class StreamingDiagnostics extends ChangeNotifier {
   }
 
   /// TDLib reported the whole file on disk.
-  void noteCompleted({int? totalBytes, int? generation}) {
+  ///
+  /// This used to be `_downloadedBytes = _totalBytes` — the flag copied into a
+  /// byte count. On device that printed `1.19 GB / 1.19 GB · 100%` seconds
+  /// after the tap on a file that had barely started, because a claim was
+  /// being rendered as a measurement.
+  ///
+  /// [diskBytes] is the real length behind the path. Completion is declared
+  /// only when it reaches [totalBytes]; otherwise the claim is recorded as
+  /// refused and the progress numbers stay where the transfer actually is.
+  void noteCompleted({
+    int? totalBytes,
+    int? diskBytes,
+    int? generation,
+  }) {
     if (_sealedResult || _stale(generation)) return;
+    if (totalBytes != null && totalBytes > 0) _totalBytes = totalBytes;
+    final measured = diskBytes ?? _diskBytes;
+    if (measured >= 0) _diskBytes = measured;
+    final confirmed = _totalBytes > 0 && measured >= _totalBytes;
+    if (!confirmed) {
+      _completionRefusal = 'claimed_complete disk=$measured total=$_totalBytes';
+      _isDownloading = true;
+      _note('completion refused: $_completionRefusal');
+      notifyListeners();
+      return;
+    }
     if (!_isDownloadingCompleted) {
       _isDownloadingCompleted = true;
       _downloadCompletedMillis = _elapsed();
     }
     _isDownloading = false;
-    if (totalBytes != null && totalBytes > 0) _totalBytes = totalBytes;
+    _completionRefusal = null;
     _headBytes = _totalBytes;
+    // The one place `downloadedBytes` may be raised to the total: a length
+    // that reaches it is the only evidence that the whole file is there.
     _downloadedBytes = _totalBytes;
+    notifyListeners();
+  }
+
+  /// A measured length behind the path, with no completion claim attached.
+  ///
+  /// Called from the source decision, which already stats the file: the panel
+  /// then shows what is on disk before the transfer finishes, instead of
+  /// waiting for a `completed` flag that may arrive as a lie or not at all.
+  void noteDiskMeasured(int bytes, {int? generation}) {
+    if (_sealedResult || _stale(generation)) return;
+    if (bytes < 0) return;
+    _diskBytes = bytes;
     notifyListeners();
   }
 
@@ -1496,6 +1573,10 @@ class StreamingDiagnostics extends ChangeNotifier {
             '${identityOk ? 'OK' : 'BUG'}',
         'total=$_totalBytes B downloaded=$_downloadedBytes B '
             '(${_percentString()})',
+        // Two different questions, two different numbers: TDLib's count of what
+        // it wrote, and the length actually behind the path.
+        'disk=$_diskBytes B ${diskCoversTotal ? 'FULL' : 'PARTIAL'}'
+            '${_completionRefusal == null ? '' : ' refused="$_completionRefusal"'}',
         'head=$_headBytes B downloadOffset=$_downloadOffset',
         'window=$_windowStart-$_windowEnd moves=$_windowMoves',
         // Who asked TDLib for bytes, and which request moved them. The header
@@ -1552,16 +1633,19 @@ class StreamingDiagnostics extends ChangeNotifier {
   /// * `toPlayer` — bytes actually handed to `AVAssetResourceLoadingDataRequest`
   ///   (what played);
   /// * `dlGrew` — bytes TDLib wrote for windows V2 asked for (what downloaded);
-  /// * `diskDownloaded` — TDLib's own `downloaded_size` of the file (what is
-  ///   on disk, which is what "进度" means).
+  /// * `diskDownloaded` — the length measured behind the path (`-1` when no
+  ///   stat has run). This is what "how much is really on disk" means, and it
+  ///   is deliberately not `downloaded_size`: a pool file can be full length
+  ///   with an unwritten middle, which is exactly how a 989 KB file was once
+  ///   reported as complete.
   ///
-  /// A play can have `toPlayer` > 0 with `diskDownloaded` well under the total,
-  /// and a request can exist with all three at zero.
+  /// A play can have `toPlayer` > 0 with `dlGrew` well under the total, and a
+  /// request can exist with all three at zero.
   String _v2BytesLine() {
     final grew = downloadAudit.grewBy(DownloadCaller.resourceLoader);
     return 'V2_BYTES dataRequests=$_rlRequests responds=$_rlResponds '
         'toPlayer=$_rlBytes dlGrew=$grew '
-        'diskDownloaded=$_downloadedBytes/$_totalBytes';
+        'diskDownloaded=${_diskBytes < 0 ? '-' : _diskBytes}/$_totalBytes';
   }
 
   /// The first failed read, as one readable line.
@@ -1827,6 +1911,9 @@ class StreamingDiagnostics extends ChangeNotifier {
         'recordSizeMismatch': recordSizeMismatch,
         'totalBytes': _totalBytes,
         'downloadedBytes': _downloadedBytes,
+        'diskBytes': _diskBytes,
+        'diskCoversTotal': diskCoversTotal,
+        'completionRefusal': _completionRefusal,
         'downloadedPercent':
             double.parse((downloadedPercent * 100).toStringAsFixed(1)),
         'headBytes': _headBytes,

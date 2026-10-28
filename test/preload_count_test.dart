@@ -148,6 +148,8 @@ void main() {
         sources: VideoSourceResolver(
           api: transfer,
           fileExists: (_) async => true,
+          // The pool paths are fake; the stat says a local file is 1024 B.
+          diskSizeOf: (_) async => 1024,
         ),
         preloadCount: preloadCount,
         pollInterval: null,

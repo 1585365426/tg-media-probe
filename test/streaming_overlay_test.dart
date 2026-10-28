@@ -85,6 +85,12 @@ void main() {
       downloadOffset: 0,
       completed: true,
     );
+    // FULL needs the measured length behind the path, not the claim alone:
+    // a `completed` flag on a short file was exactly the fake 100% bug.
+    diag.noteCompleted(
+      totalBytes: 2 * 1024 * 1024,
+      diskBytes: 2 * 1024 * 1024,
+    );
     diag.updatePlayer(
       position: const Duration(seconds: 5),
       duration: const Duration(seconds: 60),

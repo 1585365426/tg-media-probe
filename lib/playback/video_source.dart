@@ -516,11 +516,13 @@ class VideoSourceResolver {
     this.startupBufferBytes = StreamProxyServer.defaultStartupBufferBytes,
     this.proxyFactory,
     Future<bool> Function(String path)? fileExists,
+    Future<int> Function(String path)? diskSizeOf,
     StreamingDiagnostics? diagnostics,
     NativeStreamingTransport? nativeTransport,
     this.resourceLoaderPathWait = const Duration(seconds: 8),
     this.windowBytes = StreamWindow.stepBytes,
   })  : _fileExists = fileExists ?? _defaultFileExists,
+        _diskSizeOf = diskSizeOf ?? _defaultDiskSizeOf,
         _diagnostics = diagnostics ?? StreamingDiagnostics.instance,
         _nativeTransport = nativeTransport ?? MethodChannelStreamingTransport();
 
@@ -558,7 +560,22 @@ class VideoSourceResolver {
   /// error instead of "已被清理".
   final Future<bool> Function(String path) _fileExists;
 
+  /// Measures the bytes behind a path, or -1.
+  ///
+  /// Injected for the same reason as [_fileExists]: a test can describe a file
+  /// that exists with a known length without writing hundreds of megabytes to
+  /// a disk. On a device this is `File.length()`.
+  final Future<int> Function(String path) _diskSizeOf;
+
   static Future<bool> _defaultFileExists(String path) => File(path).exists();
+
+  static Future<int> _defaultDiskSizeOf(String path) async {
+    try {
+      return await File(path).length();
+    } on Object {
+      return -1;
+    }
+  }
 
   /// No byte growth for this long = the transfer is dead. This replaces the old
   /// fixed 15-second cap on the whole download, which failed every large video
@@ -825,17 +842,20 @@ class VideoSourceResolver {
 
   /// Reads every fact the decision is allowed to use.
   ///
-  /// `diskSize` is measured, never inferred from `downloaded_size`: the device
-  /// report showed a record at 100% with ~21 MB of bytes behind it, and only a
-  /// `stat` can tell those apart.
+  /// Two independent measurements: `diskSize` from a `stat`, `downloadedBytes`
+  /// from TDLib's counter. Neither is allowed to stand in for the other — the
+  /// device report showed a record at 100% with ~21 MB behind it, and a file
+  /// whose length reached the total with a hole in the middle. Completeness
+  /// needs both, and only [SourceFacts.isPlayableFromDisk] combines them.
   Future<SourceFacts> _factsFor(FileState? state, int fileId) async {
     if (state == null) return SourceFacts.missing(fileId);
     var exists = false;
-    // The size TDLib reports is the starting point, not the truth: a `stat`
-    // overwrites it whenever one is available. Starting here keeps a platform
-    // that will not stat (or a test double with no bytes behind its path) from
-    // reading as "zero bytes on disk" when the record says otherwise.
-    var diskSize = state.path.isNotEmpty ? state.size : -1;
+    // Measured, or unknown. It used to start at `state.size` — the size TDLib
+    // *declares* — and that single line is how a 989 KB file was reported as a
+    // complete `LOCAL_FILE`: whenever the stat failed, the declared total stood
+    // in for the bytes on disk. A stat that cannot run says "unknown" (-1), and
+    // unknown is never complete.
+    var diskSize = -1;
     if (state.path.isNotEmpty) {
       // The injected probe owns "does it exist"; `stat` owns "how big".
       // Keeping them separate is what lets a test describe a file that has no
@@ -843,12 +863,8 @@ class VideoSourceResolver {
       // complete because a record remembers it.
       exists = await _fileExists(state.path);
       if (exists) {
-        try {
-          final measured = (await File(state.path).stat()).size;
-          if (measured > 0) diskSize = measured;
-        } on Object {
-          // No real bytes behind the path: the record's size stands.
-        }
+        final measured = await _diskSizeOf(state.path);
+        if (measured > 0) diskSize = measured;
       } else {
         diskSize = -1;
       }
@@ -1188,6 +1204,9 @@ class VideoSourceResolver {
         state,
         generation: generation,
       ),
+      // Same measurement the decision layer uses: the watcher may not complete
+      // the file on a length it did not read itself.
+      diskSizeOf: _measureDisk,
     );
 
     StreamProxyServer? proxy;
@@ -1437,9 +1456,17 @@ class VideoSourceResolver {
             .firstWhere((_) => watch.isComplete)
             .timeout(const Duration(minutes: 30));
         if (watch.isComplete) {
-          trace?.mark(PlaybackStage.fileCompleted, bytes: watch.expectedBytes);
+          // The flag fired; the number that goes on screen is measured, not
+          // copied from the total. `noteCompleted` refuses to declare 100%
+          // without a length that reaches the end.
+          final disk = await _measureDisk(watch.localPath);
+          trace?.mark(
+            PlaybackStage.fileCompleted,
+            bytes: disk >= 0 ? disk : watch.expectedBytes,
+          );
           _diagnostics.noteCompleted(
             totalBytes: watch.expectedBytes,
+            diskBytes: disk,
             generation: generation,
           );
         }
@@ -1448,6 +1475,13 @@ class VideoSourceResolver {
         // or a timeout here must not disturb the play.
       }
     }());
+  }
+
+  /// Real byte length behind [path], or -1 when it cannot be measured.
+  Future<int> _measureDisk(String path) async {
+    if (path.isEmpty) return -1;
+    final measured = await _diskSizeOf(path);
+    return measured < 0 ? -1 : measured;
   }
 
   StreamProxyServer _defaultProxy(
@@ -1776,10 +1810,16 @@ class VideoSourceResolver {
         // never comes would turn a clear error into a long spinner.
         if (!completion.isCompleted) completion.complete(state);
         if (report) {
-          _diagnostics.noteCompleted(
-            totalBytes: expected,
-            generation: generation,
-          );
+          // Measured before it is printed: a full-download path still must not
+          // put "809 MB / 809 MB" on screen unless 809 MB are behind the path.
+          unawaited(() async {
+            final disk = await _measureDisk(state.path);
+            _diagnostics.noteCompleted(
+              totalBytes: expected,
+              diskBytes: disk,
+              generation: generation,
+            );
+          }());
         }
         return;
       }
@@ -1959,19 +1999,24 @@ class _LiveFileWatch implements FileProgressWatch, WindowContinuation {
     this.onState,
     this.trustClaimedComplete = true,
     this.windowBytes = StreamWindow.stepBytes,
-  }) {
+    Future<int> Function(String path)? diskSizeOf,
+  }) : diskSizeOf = diskSizeOf ?? VideoSourceResolver._defaultDiskSizeOf {
     if (initial != null && initial.path.isNotEmpty) {
       _path = initial.path;
       _windowOffset = initial.downloadOffset;
       _prefix = initial.downloadedSize;
+      _lastOffset = initial.downloadOffset;
+      _lastDownloaded = initial.downloadedSize;
       _present.add(_windowOffset, _windowOffset + _prefix - 1);
     }
     _expected = initial?.expectedSize ?? 0;
     // A record that claims completion while the bytes are short must not be
     // trusted twice: the decision layer already sent it back for a
     // re-download, and believing the claim here would serve holes as video.
-    _complete =
-        trustClaimedComplete && initial?.isCompleted == true && _path.isNotEmpty;
+    // `_claimedComplete` is kept only so a *measured* count can finish the
+    // job later — see [_countCovers].
+    _claimedComplete = initial?.isCompleted == true;
+    _complete = trustClaimedComplete && _claimedComplete && _countCovers;
     if (_complete && _expected > 0) _present.add(0, _expected - 1);
     _canDownload = initial?.canBeDownloaded ?? true;
     _subscription = _api.updates().listen(
@@ -1998,6 +2043,10 @@ class _LiveFileWatch implements FileProgressWatch, WindowContinuation {
   /// measured. False for a file the decision layer flagged as short.
   final bool trustClaimedComplete;
 
+  /// Measures the bytes behind the path; shared with the decision layer so one
+  /// play cannot measure the same file two different ways.
+  final Future<int> Function(String path) diskSizeOf;
+
   /// Size of one download window. Every request this watch issues is bounded
   /// by it, so a play can never ask TDLib for the whole file.
   final int windowBytes;
@@ -2016,6 +2065,25 @@ class _LiveFileWatch implements FileProgressWatch, WindowContinuation {
   bool _complete = false;
   bool _canDownload = true;
 
+  /// The last `download_offset` / `downloaded_size` TDLib reported, kept apart
+  /// from the window fields because they answer a different question: the
+  /// fields drive the readable map, these decide whether the whole file is
+  /// counted.
+  int _lastOffset = 0;
+  int _lastDownloaded = 0;
+
+  /// TDLib's `is_downloading_completed`. A claim, kept for the report; it never
+  /// on its own turns [_complete] on.
+  bool _claimedComplete = false;
+
+  /// `downloaded_size` counts the whole file from byte 0.
+  ///
+  /// A windowed transfer reports `offset=N, downloaded=limit`: true, and
+  /// meaningless for completeness. Zero-sized records are "unknown", not
+  /// "complete".
+  bool get _countCovers =>
+      _lastOffset == 0 && _expected > 0 && _lastDownloaded >= _expected;
+
   /// Every byte range TDLib has already written, across all window moves.
   ///
   /// The local file keeps what was downloaded; only the *window* moves. Using
@@ -2033,12 +2101,20 @@ class _LiveFileWatch implements FileProgressWatch, WindowContinuation {
     if (state.path.isNotEmpty) _path = state.path;
     if (state.expectedSize > _expected) _expected = state.expectedSize;
     _canDownload = state.canBeDownloaded;
-    if (state.isCompleted) {
+    _claimedComplete = state.isCompleted;
+    _lastOffset = state.downloadOffset;
+    _lastDownloaded = state.downloadedSize;
+    if (state.isCompleted && _countCovers) {
       _complete = true;
       _windowOffset = 0;
-      _prefix = state.downloadedSize > 0 ? state.downloadedSize : _expected;
+      _prefix = _lastDownloaded;
       if (_expected > 0) _present.add(0, _expected - 1);
     } else {
+      // The flag alone never widens the readable map. A file whose tail window
+      // was written first has the full length and a hole in the middle; adding
+      // `0..total-1` here handed the reader zero-filled bytes and AVPlayer
+      // answered "此视频无法解码" — and every later video inherited it,
+      // because the same claim was made again for each of them.
       _windowOffset = state.downloadOffset;
       _prefix = state.downloadedSize;
       if (_path.isNotEmpty && _prefix > 0) {
@@ -2188,26 +2264,24 @@ class _LiveFileWatch implements FileProgressWatch, WindowContinuation {
 
   /// Measures the file and folds the result in.
   ///
-  /// `updateFile` is the only thing that normally moves [_present], and it
-  /// stops the moment TDLib considers the transfer finished. A play that
-  /// starts after that point — the normal case for a cached 720 MB video —
-  /// then waits on a file that is already complete. One `stat` decides it.
+  /// `updateFile` is the only thing that normally moves [_present]. A play that
+  /// starts after TDLib stopped reporting the file would wait on silence, so
+  /// one `stat` is taken — but a stat is a *length*, and a TDLib pool file can
+  /// reach the full length with an unwritten middle. Completing on length
+  /// alone is what made a 1.19 GB video show `100%` seconds after the tap and
+  /// then fail to decode: `_present` was widened to the whole file while the
+  /// bytes were not there.
   ///
-  /// Only a size that reaches [_expected] is folded in as a full range: a
-  /// short file can be sparse (TDLib downloads windows), and treating
-  /// `0..size-1` as present would serve zero-filled holes as video.
+  /// So the length only completes the file when TDLib's own counter already
+  /// covers it. Otherwise the reading stays "not complete", the loader keeps
+  /// asking, and the window machinery keeps downloading.
   @override
   Future<void> refresh() async {
     if (_path.isEmpty) return;
     if (_complete && _expected > 0) return;
-    int size;
-    try {
-      size = await File(_path).length();
-    } on Object {
-      return;
-    }
+    final size = await diskSizeOf(_path);
     if (size <= 0) return;
-    if (_expected > 0 && size >= _expected) {
+    if (_expected > 0 && size >= _expected && _countCovers) {
       _complete = true;
       _windowOffset = 0;
       _prefix = size;

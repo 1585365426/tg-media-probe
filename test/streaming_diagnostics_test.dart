@@ -368,7 +368,12 @@ void main() {
       expect(diag.firstPlaybackMillis, 0);
 
       now = now.add(const Duration(milliseconds: 8500));
-      diag.noteCompleted(totalBytes: 100 * 1024 * 1024);
+      // A claim alone is not completion any more: the disk length has to reach
+      // the total, so this is what a real finished download reports.
+      diag.noteCompleted(
+        totalBytes: 100 * 1024 * 1024,
+        diskBytes: 100 * 1024 * 1024,
+      );
 
       expect(diag.downloadCompletedMillis, 8500);
       expect(diag.downloadCompletedMillis!,
@@ -1149,6 +1154,9 @@ void main() {
       // What AVFoundation asked for, and what it was handed.
       diag.noteResourceLoaderRequest(offset: 0, length: 2 * 1024 * 1024);
       diag.noteResourceLoaderRespond(bytes: 1024 * 1024, offset: 0);
+      // What a stat measured behind the path. Deliberately different from both
+      // of the other two: length is not "asked for" and not "served".
+      diag.noteDiskMeasured(8 * 1024 * 1024);
 
       final text = diag.acceptanceLines().join('\n');
       // A window request, not a whole-file one.
@@ -1156,7 +1164,7 @@ void main() {
       // Requested / handed to the player / on disk — three different counts.
       expect(text, contains('dlGrew=8388608'));
       expect(text, contains('toPlayer=1048576'));
-      expect(text, contains('diskDownloaded=0/737148928'));
+      expect(text, contains('diskDownloaded=8388608/737148928'));
       expect(text, contains('WHOLE_FILE_DOWNLOADS=0'));
     });
 

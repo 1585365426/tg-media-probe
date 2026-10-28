@@ -564,6 +564,9 @@ void main() {
       final api = ScriptedFile(sandbox);
       await File(api.path).writeAsBytes(List<int>.filled(api.expectedSize, 1));
       api.completed = true;
+      // TDLib's completed record carries the byte count too: the decision
+      // needs `downloaded_size >= expected` from offset 0, not only the flag.
+      api.downloaded = api.expectedSize;
       final resolver =
           VideoSourceResolver(api: api, fileExists: (_) async => true);
 

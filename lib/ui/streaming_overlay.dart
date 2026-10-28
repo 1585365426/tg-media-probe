@@ -51,8 +51,12 @@ class _Badge extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final verdict = source.verdict;
-    final complete = source.isDownloadingCompleted ||
-        (source.totalBytes > 0 && source.downloadedBytes >= source.totalBytes);
+    // `FULL` is a measurement, not a claim. It needs TDLib to have said the
+    // transfer finished *and* the length behind the path to reach the total:
+    // either half alone printed `1.19 GB / 1.19 GB · 100%` on a file that had
+    // barely started, and `downloadedBytes >= totalBytes` could never rescue
+    // it because that counter is the one being raised by the claim.
+    final complete = source.isDownloadingCompleted && source.diskCoversTotal;
     final mode = complete
         ? 'FULL'
         : (verdict == StreamingVerdict.streamingActive ? 'STREAM' : 'STREAM?');

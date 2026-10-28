@@ -109,14 +109,36 @@ class SourceFacts {
 
   bool get sizeKnown => expectedBytes > 0;
 
-  /// The bytes on disk cover the declared size. This — not the flag — is what
-  /// "complete" means here.
+  /// The file behind the path is at least as long as the declared size.
+  ///
+  /// Necessary, never sufficient. A TDLib pool file is written at whatever
+  /// offset the transfer happens to be on, so its **length** can reach the
+  /// total while the middle is still a hole — the first `moov`-at-the-tail
+  /// probe is enough to produce exactly that. Length is a lower bound on the
+  /// written range's end, not a count of the bytes in it.
   bool get diskCoversExpected =>
       expectedBytes > 0 && diskSize >= 0 && diskSize >= expectedBytes;
 
-  /// Playable from disk: a real path, a file behind it, and enough bytes.
+  /// TDLib's own byte counter covers the whole file from byte 0.
+  ///
+  /// `downloaded_size` is the prefix written from `download_offset`; a whole
+  /// file therefore reports `offset=0, downloaded=size`. This is the only
+  /// number in the record that is a *count* rather than a claim, which is why
+  /// completeness needs it and not just the length.
+  bool get countCoversExpected =>
+      downloadOffset == 0 && expectedBytes > 0 && downloadedBytes >= expectedBytes;
+
+  /// Playable from disk: a real path, a file behind it, enough length **and**
+  /// a byte count that reaches the end.
+  ///
+  /// Both halves are required. The device run that motivated this shipped a
+  /// 809 MB video showing `SRC LOCAL_FILE` at 989 KB on disk — the length test
+  /// passed on a file whose bytes were not there.
   bool get isPlayableFromDisk =>
-      path.isNotEmpty && pathExists && diskCoversExpected;
+      path.isNotEmpty &&
+      pathExists &&
+      diskCoversExpected &&
+      countCoversExpected;
 
   /// TDLib says finished but the bytes are short. Nothing will ever arrive
   /// for this file again, so waiting is guaranteed to fail: it has to be
@@ -126,7 +148,10 @@ class SourceFacts {
     // A record marked complete whose file is gone is as broken as one that is
     // short: both need a re-download, and neither will ever grow on its own.
     if (!pathExists) return true;
-    return diskSize >= 0 && diskSize < expectedBytes;
+    if (diskSize >= 0 && diskSize < expectedBytes) return true;
+    // Length reached the total but the counter did not: a hole in the middle.
+    // TDLib will not send those bytes again on its own.
+    return !countCoversExpected;
   }
 
   /// How many bytes are missing behind the "complete" claim.
