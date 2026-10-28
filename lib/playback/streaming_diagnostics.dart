@@ -239,6 +239,13 @@ class StreamingDiagnostics extends ChangeNotifier {
   int _rlStalls = 0;
   String? _rlContentInfo;
 
+  /// `(requestId, offset)` already counted, so the two producers of
+  /// `dataRequestCreated` (Swift per loading request, Dart per chunk) cannot
+  /// double the request count. Bounded like the event log.
+  final Set<String> _v2RequestKeys = <String>{};
+
+  static const int maxV2RequestKeys = 4000;
+
   /// The first read that failed, and what the native side said about it.
   ///
   /// Kept raw and kept once. "读取失败" on the error page is the end of a chain,
@@ -397,6 +404,15 @@ class StreamingDiagnostics extends ChangeNotifier {
   int? _firstRangeMillis;
   int? _proxyStartedMillis;
 
+  /// When the first V2 `dataRequestCreated` arrived.
+  ///
+  /// V2 has no port to bind, so [proxyStartedMillis] — V1's "the transport is
+  /// really up" marker — is never set on a resource-loader play. Without this
+  /// the verdict read `attempted=false` for a run that had already pushed
+  /// hundreds of megabytes into the player, and the panel reported
+  /// STREAMING_NOT_STARTED next to a playing video.
+  int? _v2StartedMillis;
+
   /// True between [startAcceptance] and the moment the verdict settles.
   bool _acceptanceRunning = false;
 
@@ -466,6 +482,25 @@ class StreamingDiagnostics extends ChangeNotifier {
   bool get diskCoversTotal =>
       _totalBytes > 0 && _diskBytes >= 0 && _diskBytes >= _totalBytes;
 
+  /// Whether the whole file is on disk, and how that was established.
+  ///
+  /// Two independent facts can prove it: TDLib's own completion claim, or a
+  /// measured length that reaches the total. The panel used to print only the
+  /// claim, so a play whose file was already whole read
+  /// `disk=162308586 B FULL` / `downloaded=100.0%` / `completed=false` — three
+  /// lines that cannot all be true. `completed` now means "the bytes are
+  /// there", and [completionEvidence] says which fact produced it.
+  bool get transferCompleted =>
+      _isDownloadingCompleted || diskCoversTotal;
+
+  /// `TDLIB` / `DISK` / `NONE` — never a bare boolean, so the source of the
+  /// claim stays visible in the report.
+  String get completionEvidence {
+    if (_isDownloadingCompleted) return 'TDLIB';
+    if (diskCoversTotal) return 'DISK';
+    return 'NONE';
+  }
+
   /// Why a `completed` claim was not turned into `100%`, when it was refused.
   String? get completionRefusal => _completionRefusal;
 
@@ -518,6 +553,7 @@ class StreamingDiagnostics extends ChangeNotifier {
   int? get first206Millis => _first206Millis;
   int? get firstRangeMillis => _firstRangeMillis;
   int? get proxyStartedMillis => _proxyStartedMillis;
+  int? get v2StartedMillis => _v2StartedMillis;
 
   /// Whether TDLib had already finished when the first frame played.
   bool get firstPlaybackCompleted => _firstPlaybackCompleted;
@@ -576,9 +612,18 @@ class StreamingDiagnostics extends ChangeNotifier {
     // proxy and never served a byte is a decision made before the pipeline
     // started, and the report has to say NOT_STARTED with a reason — calling
     // it STREAMING_FALLBACK was exactly the mislabel the device report caught.
+    //
+    // V2 has no proxy to bind, so its "did the transport run at all" evidence
+    // is the native loader's own event stream: a data request, or a respond.
+    // Reading only [proxyStartedMillis] made every resource-loader run look
+    // unstarted — 275 responds and 133 MB delivered to AVPlayer, reported as
+    // `req=0 resp=0 bytes=0` because nothing ever incremented those counters
+    // from the path that actually serves the bytes.
     final attempted = _proxyStartedMillis != null ||
+        _v2StartedMillis != null ||
         _rangeRequests > 0 ||
-        _rlRequests > 0;
+        _rlRequests > 0 ||
+        _rlResponds > 0;
     if (_fallback && !attempted) return StreamingVerdict.streamingNotStarted;
     if (_fallback) return StreamingVerdict.fallbackUsed;
     final atFirstPlayback = _firstPlaybackDownloadedBytes;
@@ -606,7 +651,7 @@ class StreamingDiagnostics extends ChangeNotifier {
     }
     // V2 has no status line: what proves the player was served from a partial
     // file is a data request that really carried bytes.
-    final servedV2 = _rlRequests > 0 && _rlBytes > 0;
+    final servedV2 = (_rlRequests > 0 || _rlResponds > 0) && _rlBytes > 0;
     if (!sawPartialContent && !servedV2) {
       return _forceTestAtPlay
           ? StreamingVerdict.streamingNotStarted
@@ -876,29 +921,41 @@ class StreamingDiagnostics extends ChangeNotifier {
   }
 
   /// Streaming V2: one `AVAssetResourceLoadingDataRequest`.
-  void noteResourceLoaderRequest({
-    required int offset,
-    required int length,
-    int? generation,
-  }) {
-    if (_sealedResult || _stale(generation)) return;
-    _rlRequests++;
-    _note('RL request #$_rlRequests offset=$offset len=$length');
-    notifyListeners();
-  }
-
-  /// Streaming V2: bytes that really went to the player.
-  void noteResourceLoaderRespond({
-    required int bytes,
-    required int offset,
-    int? generation,
-  }) {
-    if (_sealedResult || _stale(generation)) return;
-    _rlResponds++;
-    _rlBytes += bytes;
-    _note('RL respond #$_rlResponds offset=$offset bytes=$bytes '
-        'total=$_rlBytes');
-    notifyListeners();
+  ///
+  /// The counters below are fed from [noteResourceLoaderEvent] — the event
+  /// stream the native loader and the Dart supply both write to. There used to
+  /// be a second pair of methods (`noteResourceLoaderRequest` /
+  /// `noteResourceLoaderRespond`) that no production path ever called, so
+  /// `_rlRequests` stayed 0 through a 275-respond play and the verdict read
+  /// STREAMING_NOT_STARTED over a playing video. One source of truth now.
+  void _countV2Event(String name, Map<String, Object?> fields) {
+    switch (name) {
+      case 'dataRequestCreated':
+        // Two producers write this name: Swift once per AVPlayer loading
+        // request, Dart once per chunk it serves. The pair
+        // `(requestId, offset)` identifies one read, so both land once.
+        final requestId = _fieldInt(fields['requestId']) ?? -1;
+        final offset = _fieldInt(fields['requestedOffset']) ??
+            _fieldInt(fields['offset']) ??
+            -1;
+        final key = '$requestId|$offset';
+        if (_v2RequestKeys.add(key)) {
+          if (_v2RequestKeys.length > maxV2RequestKeys) {
+            _v2RequestKeys.remove(_v2RequestKeys.first);
+          }
+          _rlRequests++;
+        }
+        _v2StartedMillis ??= _elapsed();
+      case 'respond':
+        _rlResponds++;
+        final bytes = _fieldInt(fields['respondBytes']) ??
+            _fieldInt(fields['bytes']) ??
+            0;
+        if (bytes > 0) _rlBytes += bytes;
+      case 'supplyError':
+      case 'waitTimeout':
+        _rlStalls++;
+    }
   }
 
   /// Streaming V2: a data request gave up, with the reason the supply gave.
@@ -986,6 +1043,7 @@ class StreamingDiagnostics extends ChangeNotifier {
     int? generation,
   }) {
     if (_sealedResult || _stale(generation)) return;
+    _countV2Event(name, fields);
     if (_rlLog.length >= maxResourceLoaderEvents) _rlLog.removeAt(0);
     _rlLog.add(ResourceLoaderEvent(
       name: name,
@@ -1177,6 +1235,7 @@ class StreamingDiagnostics extends ChangeNotifier {
     _proxyUrl = null;
     _firstRangeMillis = null;
     _proxyStartedMillis = null;
+    _v2StartedMillis = null;
     _fallback = false;
     _fallbackReason = null;
     _firstPlaybackDownloadedBytes = null;
@@ -1197,6 +1256,7 @@ class StreamingDiagnostics extends ChangeNotifier {
     _rlBytes = 0;
     _rlStalls = 0;
     _rlContentInfo = null;
+    _v2RequestKeys.clear();
     _rlLog.clear();
     // Per play: the first failed read and the reason a V2-only play stopped
     // belong to the video the user tapped, not to the session.
@@ -1582,8 +1642,13 @@ class StreamingDiagnostics extends ChangeNotifier {
         // Who asked TDLib for bytes, and which request moved them. The header
         // line is the counter; the calls below it are the evidence.
         ...downloadAudit.summary(max: 4),
+        // `completed` says whether the bytes are there; the evidence suffix
+        // says which fact proved it. A file that was already whole when the
+        // play started never produces a completion update, and the panel used
+        // to print `disk=… FULL` / `100.0%` / `completed=false` together.
         'isDownloading=${_isDownloading ? 'true' : 'false'} '
-            'completed=${_isDownloadingCompleted ? 'true' : 'false'}',
+            'completed=${transferCompleted ? 'true' : 'false'} '
+            'evidence=$completionEvidence',
         'range=${_lastRange ?? '-'} requests=$_rangeRequests '
             'status=${_lastStatus ?? '-'} 206x$_partialContentCount',
         'range truncated=$_truncatedCount forward=$_forwardRangeRequests '
@@ -1675,10 +1740,27 @@ class StreamingDiagnostics extends ChangeNotifier {
   List<String> acceptanceLines() {
     final verdict = this.verdict;
     final lines = <String>[verdict.code];
-    // Forced-test failure marker: the acceptance must not read a full download
-    // as a pass, whatever else the run produced.
+    // A forced run made on a file that was already 100% on disk before the
+    // play started cannot measure streaming at all: the resource loader served
+    // it, the player played it, and neither fact says anything about
+    // play-while-downloading. Reported as INVALID rather than FAILED — "the
+    // pipeline broke" and "the test had nothing to prove" are different
+    // sentences, and the device report's `fileComplete=true` /
+    // `downloadedAtFirstPlayback=155 MB` is the second one.
+    //
+    // Gated on the resolver's own pre-play measurement (`fileComplete`), not on
+    // "the total was reached before the first frame": a file that finishes
+    // during the first two seconds of a real stream is a different case and
+    // must keep the FAILED marker.
+    final completeBeforePlay = _decisionFileComplete == true;
     if (_forceTestAtPlay &&
+        completeBeforePlay &&
+        verdict != StreamingVerdict.streamingActive) {
+      lines.add('STREAMING_TEST_INVALID: file_complete_before_play');
+    } else if (_forceTestAtPlay &&
         verdict == StreamingVerdict.fullDownloadBeforePlayback) {
+      // Forced-test failure marker: the acceptance must not read a full
+      // download as a pass, whatever else the run produced.
       lines.add('STREAMING_TEST_FAILED: '
           'FULL_DOWNLOAD_OCCURRED_BEFORE_PLAYBACK');
     }
@@ -1763,9 +1845,18 @@ class StreamingDiagnostics extends ChangeNotifier {
           'file=${_fileId ?? '-'}');
     }
     final completed = _downloadCompletedMillis;
-    lines.add(completed == null
-        ? 'completedAt=-'
-        : 'completedAt=${_seconds(completed)}');
+    // A file that was already whole when the play started produces no
+    // completion update, so `-` would read as "never finished". It did finish
+    // — before this play began, which is itself the reason the run cannot
+    // measure streaming.
+    final preexistingCompletion = completed == null &&
+        (_decisionFileComplete == true ||
+            ((_firstPlaybackTotalBytes ?? 0) > 0 &&
+                (_firstPlaybackDownloadedBytes ?? 0) >=
+                    (_firstPlaybackTotalBytes ?? 0)));
+    lines.add(completed != null
+        ? 'completedAt=${_seconds(completed)}'
+        : (preexistingCompletion ? 'completedAt=before_play' : 'completedAt=-'));
     final first206 = _first206Millis;
     lines.add(first206 == null
         ? 'first206=-'
@@ -1816,8 +1907,18 @@ class StreamingDiagnostics extends ChangeNotifier {
     // The explicit "did anything ask for the whole file" answer. Kept separate
     // from the audit header because it is an acceptance criterion, not a
     // counter: `WHOLE_FILE_DOWNLOADS=0` with `bounded` growth is the pass.
+    //
+    // Split by caller, because under B+ the play's own download *is* one
+    // whole-file request and it belongs to the Downloader. A single
+    // `WHOLE_FILE_DOWNLOADS=1` line read like a breach on every normal play.
     lines.add('WHOLE_FILE_DOWNLOADS=${downloadAudit.unboundedCalls.length} '
+        'byDownloader=${downloadAudit.unboundedCallsByDownloader.length} '
+        'byOther=${downloadAudit.unboundedCallsByOther.length} '
         'wholeFileAllowed=${downloadAudit.wholeFileAllowed ? 'true' : 'false'}');
+    if (downloadAudit.unboundedCallsByOther.isNotEmpty) {
+      lines.add('WHOLE_FILE_BY_OTHER: '
+          '${downloadAudit.unboundedCallsByOther.map((c) => '${c.caller.label} file=${c.fileId}').join(', ')}');
+    }
     // V2-only: which window the resource loader ran on, what it moved, and the
     // first read that failed. `v1Attempted=false` above is the "V1 was not
     // called" half; these lines are the "what V2 actually did" half.

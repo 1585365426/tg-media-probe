@@ -391,6 +391,20 @@ class DownloadAudit {
   List<DownloadCall> get unboundedCalls =>
       _calls.where((c) => c.unbounded).toList();
 
+  /// Whole-file requests sent by the Downloader — the B+ design, not a breach.
+  ///
+  /// The distinction matters for reading a report: under B+ the play *is* one
+  /// whole-file download, so `WHOLE_FILE_DOWNLOADS=1` from `DOWNLOADER` is the
+  /// expected shape. What must stay at zero is [unboundedCallsByOther] — a
+  /// player, resource loader, proxy or preload asking for the whole film.
+  List<DownloadCall> get unboundedCallsByDownloader =>
+      _calls.where((c) => c.unbounded && c.caller == DownloadCaller.downloader)
+          .toList();
+
+  List<DownloadCall> get unboundedCallsByOther => _calls
+      .where((c) => c.unbounded && c.caller != DownloadCaller.downloader)
+      .toList();
+
   /// `PLAYER:159383552 RESOURCE_LOADER:16777216 …`, largest first.
   String growthSummary() {
     final byCaller = <DownloadCaller, int>{};

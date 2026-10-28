@@ -66,6 +66,13 @@ class FullDownloadJob {
   FullDownloadState state = FullDownloadState.running;
   String? failureReason;
 
+  /// Why this job needed no TDLib request, when it did not.
+  ///
+  /// `already_on_disk`: the measured file already reaches the expected size, so
+  /// the download was satisfied before it was sent. Recorded so the report can
+  /// tell "the downloader ran" from "the downloader had nothing to do".
+  String? shortcut;
+
   bool get isRunning => state == FullDownloadState.running;
 }
 
@@ -171,6 +178,29 @@ class TelegramMediaDownloader {
         ? expectedSize - diskSize
         : expectedSize;
 
+    // Nothing to download: the file already reaches the expected size.
+    //
+    // Sending `downloadFile` anyway is not harmless. TDLib re-opens the
+    // transfer for that file and reports `is_downloading_completed = false`
+    // while it re-checks, which is how the device report ended up printing
+    // `disk=162308586 B FULL`, `downloaded=100.0%` and `completed=false` at
+    // once — and how a play on a finished video kept a WHOLE_FILE call and a
+    // `grew=0` line in the audit.
+    if (expectedSize > 0 && diskSize >= expectedSize) {
+      final job = _jobs[fileId] ??= FullDownloadJob(
+        fileId: fileId,
+        chatId: chatId,
+        messageId: messageId,
+        generation: generation,
+        expectedSize: expectedSize,
+        startedAt: DateTime.now(),
+      );
+      job.state = FullDownloadState.completed;
+      job.failureReason = null;
+      job.shortcut = 'already_on_disk';
+      return job;
+    }
+
     if (remaining > 0) {
       final free = await _freeBytes();
       if (free >= 0) {
@@ -209,6 +239,7 @@ class TelegramMediaDownloader {
     );
     job.state = FullDownloadState.running;
     job.failureReason = null;
+    job.shortcut = null;
     audit.tag(
       chatId: chatId,
       messageId: messageId,

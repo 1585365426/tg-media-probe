@@ -1151,9 +1151,19 @@ void main() {
         offset: 0,
         downloaded: 8 * 1024 * 1024,
       );
-      // What AVFoundation asked for, and what it was handed.
-      diag.noteResourceLoaderRequest(offset: 0, length: 2 * 1024 * 1024);
-      diag.noteResourceLoaderRespond(bytes: 1024 * 1024, offset: 0);
+      // What AVFoundation asked for, and what it was handed — through the same
+      // event stream the native loader and the Dart supply really write.
+      diag.noteResourceLoaderEvent('dataRequestCreated', fields: {
+        'requestId': 1,
+        'requestedOffset': 0,
+        'requestedLength': 2 * 1024 * 1024,
+      });
+      diag.noteResourceLoaderEvent('respond', fields: {
+        'requestId': 1,
+        'respondCount': 1,
+        'respondBytes': 1024 * 1024,
+        'currentOffset': 0,
+      });
       // What a stat measured behind the path. Deliberately different from both
       // of the other two: length is not "asked for" and not "served".
       diag.noteDiskMeasured(8 * 1024 * 1024);
@@ -1269,6 +1279,157 @@ void main() {
 
       expect(diag.downloadAudit.count, 0);
       expect(diag.downloadAudit.chatId, 0);
+    });
+  });
+
+  // The device report that produced these tests: 275 responds and 133 MB handed
+  // to AVPlayer, printed as `req=0 resp=0 bytes=0` with the verdict
+  // STREAMING_NOT_STARTED — because the counters were written by two methods no
+  // production path called.
+  group('V2 counters come from the events that really happen', () {
+    /// One `dataRequestCreated` + one `respond`, as the supply emits them.
+    void serve(StreamingDiagnostics diag, int requestId, int offset, int bytes) {
+      diag.noteResourceLoaderEvent('dataRequestCreated', fields: {
+        'requestId': requestId,
+        'requestedOffset': offset,
+        'requestedLength': bytes,
+        'currentOffset': offset,
+      });
+      diag.noteResourceLoaderEvent('respond', fields: {
+        'requestId': requestId,
+        'respondCount': 1,
+        'respondBytes': bytes,
+        'currentOffset': offset,
+      });
+    }
+
+    test('the native event stream is what the counters read', () {
+      final diag = StreamingDiagnostics();
+      diag.beginPlay(fileId: 5626, streaming: true, totalBytes: 4000);
+      diag.notePlayerSource(
+        isStreaming: true,
+        url: 'tgmedia://video/5626_7',
+        sourceLabel: 'RESOURCE_LOADER',
+      );
+      serve(diag, 39, 0, 1024);
+      serve(diag, 39, 1024, 1024);
+
+      expect(diag.resourceLoaderRequests, 2);
+      expect(diag.resourceLoaderResponds, 2);
+      expect(diag.resourceLoaderBytes, 2048);
+
+      final panel = diag.panelLines().join('\n');
+      expect(panel, contains('v2 sessions=0 req=2 resp=2 bytes=2048'));
+      expect(panel, contains('V2_BYTES dataRequests=2 responds=2 toPlayer=2048'));
+      expect(panel, isNot(contains('req=0 resp=0 bytes=0')));
+    });
+
+    test('one loading request served in chunks is not counted twice', () {
+      // Swift emits `dataRequest` per AVPlayer loading request, Dart emits
+      // `dataRequestCreated` per chunk it serves. The pair (requestId, offset)
+      // is one read, whatever produced it.
+      final diag = StreamingDiagnostics();
+      diag.beginPlay(fileId: 1, streaming: true, totalBytes: 4096);
+      diag.noteResourceLoaderEvent('dataRequestCreated', fields: {
+        'requestId': 7,
+        'offset': 0,
+        'length': 4096,
+        'currentOffset': 0,
+      });
+      diag.noteResourceLoaderEvent('dataRequestCreated', fields: {
+        'requestId': 7,
+        'requestedOffset': 0,
+        'requestedLength': 4096,
+      });
+
+      expect(diag.resourceLoaderRequests, 1);
+    });
+
+    test('a play on a complete file is not "streaming never started"', () async {
+      // The exact shape of the device report: the file was already 100% on
+      // disk, streaming was forced anyway, and the resource loader really
+      // served the player.
+      final diag = StreamingDiagnostics();
+      diag.setForceStreamingTest(true);
+      diag.beginPlay(fileId: 5626, streaming: true, totalBytes: 162308586);
+      diag.noteDecision(
+        preference: true,
+        force: true,
+        candidate: true,
+        proxyAvailable: true,
+        fileComplete: true,
+        decision: 'STREAM',
+        reason: 'complete_file_served_by_resource_loader',
+      );
+      diag.notePlayerSource(
+        isStreaming: true,
+        url: 'tgmedia://video/5626_7',
+        sourceLabel: 'RESOURCE_LOADER',
+      );
+      serve(diag, 39, 0, 524288);
+      diag.noteDiskMeasured(162308586);
+      diag.updateTransfer(
+        downloadedBytes: 162308586,
+        totalBytes: 162308586,
+        downloadOffset: 0,
+        completed: false,
+      );
+      diag.updatePlayer(
+        position: const Duration(seconds: 43),
+        duration: const Duration(seconds: 64),
+        isPlaying: true,
+        isBuffering: false,
+      );
+
+      // Streaming ran; the file was whole before it did. The verdict says the
+      // second thing, and the acceptance refuses to call the run a failure of
+      // the pipeline.
+      expect(diag.verdict, StreamingVerdict.fullDownloadBeforePlayback);
+      final report = diag.acceptanceLines().join('\n');
+      expect(report, isNot(contains('STREAMING_TEST_FAILED')));
+      expect(report, contains('STREAMING_TEST_INVALID: file_complete_before_play'));
+      expect(report, contains('completedAt=before_play'));
+      expect(report, contains('responds=1 respondBytes=524288'));
+      expect(report, contains('WHOLE_FILE_DOWNLOADS=0 byDownloader=0 byOther=0'));
+
+      final panel = diag.panelLines().join('\n');
+      // Three lines that cannot all be true used to appear together.
+      expect(panel, contains('disk=162308586 B FULL'));
+      expect(panel, contains('completed=true evidence=DISK'));
+    });
+
+    test('a downloader whole-file request is reported as the design, not a breach',
+        () {
+      final diag = StreamingDiagnostics();
+      diag.beginPlay(fileId: 5626, streaming: true, totalBytes: 4096);
+      diag.downloadAudit.record(
+        fileId: 5626,
+        caller: DownloadCaller.downloader,
+        offset: 0,
+        limit: 0,
+        priority: 32,
+        cause: 'b+ auto full download',
+      );
+
+      final report = diag.acceptanceLines().join('\n');
+      expect(report, contains('WHOLE_FILE_DOWNLOADS=1 byDownloader=1 byOther=0'));
+      expect(report, isNot(contains('WHOLE_FILE_BY_OTHER')));
+    });
+
+    test('a whole-file request from a play window is named', () {
+      final diag = StreamingDiagnostics();
+      diag.beginPlay(fileId: 5626, streaming: true, totalBytes: 4096);
+      diag.downloadAudit.record(
+        fileId: 5626,
+        caller: DownloadCaller.player,
+        offset: 0,
+        limit: 0,
+        priority: 32,
+      );
+
+      final report = diag.acceptanceLines().join('\n');
+      expect(report, contains('WHOLE_FILE_DOWNLOADS=1 byDownloader=0 byOther=1'));
+      expect(report, contains('WHOLE_FILE_BY_OTHER: PLAYER file=5626'));
     });
   });
 }

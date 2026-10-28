@@ -227,4 +227,52 @@ void main() {
       }
     });
   });
+
+  group('the verdict is computed from evidence something actually writes', () {
+    // The device report printed `req=0 resp=0 bytes=0` and
+    // STREAMING_NOT_STARTED over a video that had just played 43 s, because the
+    // V2 counters were incremented by two methods no production path called.
+    // A counter the panel reads must be written from the event stream; a
+    // second writer is how the first one silently dies.
+    final diag = File('$root/lib/playback/streaming_diagnostics.dart');
+    final body = _code(diag.readAsStringSync());
+
+    test('V2 counters are written in exactly one place', () {
+      int count(String needle) =>
+          needle.allMatches(body).length;
+      expect(count('_rlRequests++'), 1,
+          reason: '_rlRequests 只能在一个地方自增，否则会有一路永远为 0');
+      expect(count('_rlResponds++'), 1,
+          reason: '_rlResponds 只能在一个地方自增');
+      expect(count('_rlBytes +=') <= 1, isTrue,
+          reason: '_rlBytes 只能在一个地方累加');
+      // …and that place is the event handler both producers write to.
+      expect(body.contains('_countV2Event(name, fields)'), isTrue,
+          reason: 'V2 计数必须由 noteResourceLoaderEvent 统一驱动');
+    });
+
+    test('the resource-loader evidence counts as "attempted"', () {
+      // V2 has no port to bind, so `proxyStartedMillis` is never set on a
+      // resource-loader play. Reading only that marker made every V2 run look
+      // unstarted.
+      final verdict = _memberBody(
+        File('$root/lib/playback/streaming_diagnostics.dart')
+            .readAsStringSync(),
+        '  StreamingVerdict get verdict {',
+      );
+      expect(verdict.contains('_v2StartedMillis'), isTrue,
+          reason: 'verdict 的 attempted 必须含 V2 的启动证据');
+      expect(verdict.contains('_rlResponds'), isTrue,
+          reason: 'verdict 必须认 responds —— 那是真正交给播放器的字节');
+    });
+
+    test('the panel never prints disk FULL next to completed=false', () {
+      // The three-way `completed` (TDLIB / DISK / NONE) is what keeps
+      // `disk=162308586 B FULL` and `completed=false` from appearing together.
+      expect(body.contains('evidence=\$completionEvidence'), isTrue,
+          reason: 'completed 必须带证据来源，不能只回一个布尔');
+      expect(body.contains('completed=\${_isDownloadingCompleted ?'), isFalse,
+          reason: 'completed 只看 TDLib 的 claim，会把已完整的文件报成未完成');
+    });
+  });
 }
