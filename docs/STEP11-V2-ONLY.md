@@ -83,4 +83,12 @@ finalSource=LOCAL_FILE 且 diskDownloaded < total
 
 ## 五、CI
 
-见文末回填。
+| 项 | 值 |
+|---|---|
+| run | 40633713459 |
+| 提交 | `e421382` |
+| 结果 | build-ipa ✓ 6m7s，analyze 无问题 |
+| IPA | `TGMediaProbe-step11-v2only.ipa` 20,042,134 B |
+| SHA256 | `a483a494536b62748a03c5177097ed1054df0e1fb8cf0c238be06811e43a15ff` |
+
+`flutter test` 938 passed / 1 skipped（+6：控制器 1、决策 2、诊断 3）。
