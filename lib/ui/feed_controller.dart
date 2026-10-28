@@ -789,23 +789,27 @@ class FeedController extends ChangeNotifier {
           onProgress: onProgress,
         );
       } on VideoSourceTimeout {
-        // The transfer itself is not moving. V1 reads the same file through a
-        // different path, so it gets one attempt (see
-        // [_recoverFromStreamFailure]) — but the answer is never "download the
-        // whole file".
         _failedStreamTransport = StreamTransport.resourceLoader;
+        _diagnostics.noteTransportAttempt('RESOURCE_LOADER', failed: true);
+        _diagnostics.noteV2OnlyStop('timeout');
         rethrow;
-      } on VideoSourceException {
+      } on VideoSourceException catch (e) {
         _failedStreamTransport = StreamTransport.resourceLoader;
+        _diagnostics.noteTransportAttempt('RESOURCE_LOADER', failed: true);
+        _diagnostics.noteV2OnlyStop(e.message);
         rethrow;
       } on Object catch (e) {
-        // No bridge, a refused session, or a native error: the transport is
-        // unavailable, the video is not. Say so and use V1.
+        _failedStreamTransport = StreamTransport.resourceLoader;
         _diagnostics.noteTransportAttempt('RESOURCE_LOADER', failed: true);
         _diagnostics.noteResourceLoader(
-          'v2 unavailable: $e',
+          'v2 failed: $e',
           generation: generation,
         );
+        _diagnostics.noteV2OnlyStop('$e');
+        // V2-only: a native error is this play's error. There is no second
+        // transport to hide behind, and no download to make it look better.
+        // Re-thrown as-is so the user sees the transport's own reason.
+        if (StreamingV2.v2Only) rethrow;
         _diagnostics.noteDecision(
           candidate: true,
           decision: 'STREAM',
@@ -815,9 +819,9 @@ class FeedController extends ChangeNotifier {
       }
     }
 
-    // Last transport before giving up: the loopback proxy. Recorded first so a
-    // failure here reads as "V1 failed" and not as "V2 failed" — the recovery
-    // would otherwise try V1 twice.
+    // Only reachable when this build has no V2 bridge at all (or V2-only is
+    // switched off in code): the loopback proxy is then the only streaming
+    // transport that exists, not a fallback from a V2 failure.
     _failedStreamTransport = StreamTransport.httpProxy;
     return sources.resolveStream(
       record.fileId,
@@ -976,8 +980,10 @@ class FeedController extends ChangeNotifier {
       return PlaySource.file(facts.path);
     }
 
-    // 2. V2 failed — the loopback proxy reads the same file another way.
-    if (_failedStreamTransport != StreamTransport.httpProxy) {
+    // 2. V2-only builds stop here. The proxy is not tried: a V2 failure is
+    //    the play's failure, not a reason to start a second transport inside
+    //    the same tap.
+    if (!StreamingV2.v2Only && _failedStreamTransport != StreamTransport.httpProxy) {
       final v1 = await _tryV1(record, generation, trace);
       if (v1 != null) return v1;
       if (!_ownsRecord(generation, record)) return null;
@@ -1030,6 +1036,10 @@ class FeedController extends ChangeNotifier {
           ? PlaybackSourceKind.resourceLoader
           : PlaybackSourceKind.httpProxy,
       v2Supported: StreamingV2.supported,
+      // V2-only: the ladder has one rung. `httpProxy` would name a transport
+      // this build never reaches, and the report would then claim a V1 attempt
+      // that never happened.
+      allowProxy: !StreamingV2.v2Only,
     );
     _diagnostics.noteSourceDecision(decision, generation: generation);
 
@@ -1045,10 +1055,6 @@ class FeedController extends ChangeNotifier {
     }
 
     if (decision.source == PlaybackSourceKind.httpProxy) {
-      // A resource-loader play that never became ready is one transport's
-      // failure, not the video's: the loopback proxy reads the same growing
-      // file through a completely different path, so it is worth one attempt
-      // before giving up on streaming entirely.
       _diagnostics.noteResourceLoader(
         'v2 player failed, retrying with V1',
         generation: generation,
@@ -1069,7 +1075,17 @@ class FeedController extends ChangeNotifier {
         reason: decision.reason,
         generation: generation,
       );
-      _fail('流式播放失败，已停止下载');
+      _fail(
+        failed.isResourceLoader
+            // The message names the transport that failed, because in a
+            // V2-only build there is no second one to blame.
+            ? 'V2 流式播放失败，已停止（未回退 V1，未整文件下载）'
+            : '流式播放失败，已停止下载',
+        failure: RequestFailure.generic,
+        kind: failed.isResourceLoader
+            ? PlaybackFailure.resourceLoading
+            : PlaybackFailure.downloadStalled,
+      );
     }
     return null;
   }

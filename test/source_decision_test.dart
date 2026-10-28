@@ -173,6 +173,32 @@ void main() {
       expect(d.reason, 'v2_failed_try_v1');
     });
 
+    test('in a V2-only build a V2 failure stops, it does not try V1', () {
+      final d = decideAfterTransportFailure(
+        video(disk: 20 * 1024 * 1024, claimed: false),
+        failed: PlaybackSourceKind.resourceLoader,
+        v2Supported: true,
+        allowProxy: false,
+      );
+      expect(d.source, PlaybackSourceKind.stop);
+      expect(d.code, 'STOP');
+      // Naming `httpProxy` here would make the report claim a transport that
+      // this build cannot reach.
+      expect(d.reason, 'v2_failed_no_v1');
+    });
+
+    test('V2-only still plays a file that finished while it was failing', () {
+      // The local-file case is not a transport: same bytes, read from disk.
+      final d = decideAfterTransportFailure(
+        video(disk: 756031238),
+        failed: PlaybackSourceKind.resourceLoader,
+        v2Supported: true,
+        allowProxy: false,
+      );
+      expect(d.source, PlaybackSourceKind.localFile);
+      expect(d.reason, 'completed_while_stream_was_failing');
+    });
+
     test('V1 failing on a short file stops the play', () {
       final d = decideAfterTransportFailure(
         video(disk: 20 * 1024 * 1024, claimed: false),

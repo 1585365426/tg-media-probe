@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/widgets.dart' show AppLifecycleState, Orientation;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:tg_media_probe/data/media_record.dart';
+import 'package:tg_media_probe/playback/native_streaming.dart' show StreamingV2;
 import 'package:tg_media_probe/playback/player_slot.dart';
 import 'package:tg_media_probe/playback/video_source.dart';
 import 'package:tg_media_probe/td/td_error_kind.dart';
@@ -550,6 +551,34 @@ void main() {
       // *different* file id — the device report's `#2 file=2221 limit=WHOLE_FILE`.
       expect(rig.api.startCalls, 0, reason: 'no_file_record 不得触发整文件下载');
       expect(rig.api.windowCallers, isEmpty);
+    });
+  });
+
+  group('V2-only', () {
+    tearDown(() => StreamingV2.enabledOverride = null);
+
+    test('a V2 play that cannot open a session stops instead of trying V1',
+        () async {
+      // V2-only is the production policy; the host platform has no bridge, so
+      // the resolver fails exactly the way a broken session does on a device.
+      StreamingV2.enabledOverride = true;
+      final rig = Rig(pages: <List<MediaRecord>>[
+        <MediaRecord>[video(1)],
+      ]);
+      await rig.controller.load();
+
+      expect(rig.controller.phase, FeedPhase.error);
+      // The two things the switch exists to remove: a second transport inside
+      // the same tap, and a download that makes the failure look like a play.
+      expect(rig.controller.diagnostics.v1Attempted, isFalse,
+          reason: 'V2-only：V2 失败后不得调用 V1');
+      expect(rig.controller.diagnostics.v2Attempted, isTrue);
+      expect(rig.api.startCalls, 0, reason: 'V2 失败不得触发整文件下载');
+      expect(
+        rig.api.windowCallers.where((c) => c == DownloadCaller.proxy),
+        isEmpty,
+        reason: 'proxy 窗口意味着 V1 被启动过',
+      );
     });
   });
 

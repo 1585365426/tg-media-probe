@@ -1123,6 +1123,85 @@ void main() {
       expect(text, contains('limit=16777216'));
     });
 
+    test('V2 request, V2 bytes and disk bytes stay three separate numbers', () {
+      final diag = StreamingDiagnostics();
+      diag.beginPlay(fileId: 703, streaming: true, totalBytes: 703 * 1024 * 1024);
+      diag.notePlayerSource(
+        isStreaming: true,
+        url: 'tgmedia://video/s/1/2/703',
+        sourceLabel: 'RESOURCE_LOADER',
+      );
+
+      // What V2 asked TDLib for.
+      diag.downloadAudit.record(
+        fileId: 703,
+        caller: DownloadCaller.resourceLoader,
+        offset: 0,
+        limit: 16 * 1024 * 1024,
+        priority: 16,
+        cause: 'player=0',
+      );
+      diag.downloadAudit.observe(
+        fileId: 703,
+        offset: 0,
+        downloaded: 8 * 1024 * 1024,
+      );
+      // What AVFoundation asked for, and what it was handed.
+      diag.noteResourceLoaderRequest(offset: 0, length: 2 * 1024 * 1024);
+      diag.noteResourceLoaderRespond(bytes: 1024 * 1024, offset: 0);
+
+      final text = diag.acceptanceLines().join('\n');
+      // A window request, not a whole-file one.
+      expect(text, contains('V2_WINDOW offset=0 limit=16777216'));
+      // Requested / handed to the player / on disk — three different counts.
+      expect(text, contains('dlGrew=8388608'));
+      expect(text, contains('toPlayer=1048576'));
+      expect(text, contains('diskDownloaded=0/737148928'));
+      expect(text, contains('WHOLE_FILE_DOWNLOADS=0'));
+    });
+
+    test('the first read error is kept once, with its raw text', () {
+      final diag = StreamingDiagnostics();
+      diag.beginPlay(fileId: 9, streaming: true, totalBytes: 4096);
+
+      diag.noteReadError(
+        source: 'supplyError',
+        code: 'DOWNLOAD_STALLED',
+        message: 'TDLib 已 20 秒没有写入新数据',
+        offset: 1024,
+        requestId: 3,
+        served: 512,
+      );
+      // A later failure must not replace the first one: the first is the
+      // reason the play broke, the rest are consequences.
+      diag.noteReadError(
+        source: 'playerFailed',
+        message: 'Cannot Open',
+        offset: 2048,
+      );
+
+      expect(diag.firstReadError!['source'], 'supplyError');
+      expect(diag.firstReadError!['code'], 'DOWNLOAD_STALLED');
+      final text = diag.acceptanceLines().join('\n');
+      expect(text, contains('FIRST_READ_ERROR source=supplyError'));
+      expect(text, contains('requestId=3'));
+      expect(text, contains('offset=1024'));
+      expect(text, isNot(contains('Cannot Open')));
+    });
+
+    test('a V2-only stop is recorded, and V1 is still not attempted', () {
+      final diag = StreamingDiagnostics();
+      diag.beginPlay(fileId: 11, streaming: true);
+      diag.noteTransportStart('RESOURCE_LOADER');
+      diag.noteTransportAttempt('RESOURCE_LOADER', failed: true);
+      diag.noteV2OnlyStop('媒体数据无法读取');
+
+      final text = diag.acceptanceLines().join('\n');
+      expect(text, contains('V2_ONLY_STOP=媒体数据无法读取'));
+      expect(text, contains('v1Attempted=false'));
+      expect(diag.v1Attempted, isFalse);
+    });
+
     test('the whole-file guard prints its own verdict', () {
       final diag = StreamingDiagnostics();
       diag.beginPlay(fileId: 7, streaming: true);

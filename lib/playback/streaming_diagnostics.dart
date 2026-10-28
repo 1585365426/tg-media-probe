@@ -239,6 +239,17 @@ class StreamingDiagnostics extends ChangeNotifier {
   int _rlStalls = 0;
   String? _rlContentInfo;
 
+  /// The first read that failed, and what the native side said about it.
+  ///
+  /// Kept raw and kept once. "读取失败" on the error page is the end of a chain,
+  /// and the answer to "where did it break" is the *first* `supplyError` or
+  /// `playerFailed`, not the last retry — a report that only has the final
+  /// text cannot tell a decode refusal from a range the loader never served.
+  Map<String, Object?>? _firstReadError;
+
+  /// Why the play stopped without a second transport, when V2-only is on.
+  String? _v2StopReason;
+
   /// The exact URL the player opened in STREAM_HTTP mode.
   String? _proxyUrl;
 
@@ -454,6 +465,14 @@ class StreamingDiagnostics extends ChangeNotifier {
   int get resourceLoaderStalls => _rlStalls;
   int get resourceLoaderSessions => _rlSessions;
   String? get resourceLoaderContentInfo => _rlContentInfo;
+
+  /// The first read that failed, in the native side's own words. Null when
+  /// nothing failed.
+  Map<String, Object?>? get firstReadError =>
+      _firstReadError == null ? null : Map<String, Object?>.unmodifiable(_firstReadError!);
+
+  /// Why a V2-only play stopped, when it did.
+  String? get v2StopReason => _v2StopReason;
   int get stalls => _stalls;
   String? get lastStallReason => _lastStallReason;
 
@@ -861,6 +880,50 @@ class StreamingDiagnostics extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// The first failed read, kept once and kept raw.
+  ///
+  /// This is the line that answers "读取失败发生在哪一环": a `supplyError` means
+  /// the loader could not produce the bytes the player asked for, while a
+  /// `playerFailed` means the bytes were there and AVFoundation refused them.
+  /// The error page shows one string for both, so without this the two are
+  /// indistinguishable after the fact.
+  void noteReadError({
+    required String source,
+    String? code,
+    String? message,
+    int? offset,
+    int? requestId,
+    int? served,
+    int? generation,
+  }) {
+    if (_firstReadError != null) return;
+    if (_stale(generation)) return;
+    _firstReadError = <String, Object?>{
+      'source': source,
+      'code': code,
+      'message': message,
+      'offset': offset,
+      'requestId': requestId,
+      'served': served,
+      'atMillis': _elapsed(),
+    };
+    _note('FIRST READ ERROR $source code=${code ?? '-'} '
+        'offset=${offset ?? '-'} msg=${_sanitize(message ?? '')}');
+    notifyListeners();
+  }
+
+  /// A V2-only play stopped instead of falling back.
+  ///
+  /// Recorded because the *absence* of V1 and of a whole-file request is the
+  /// acceptance criterion now: a report has to be able to show that the play
+  /// ended deliberately, not that it silently turned into something else.
+  void noteV2OnlyStop(String reason, {int? generation}) {
+    if (_stale(generation)) return;
+    _v2StopReason = _sanitize(reason);
+    _note('V2_ONLY stop: $_v2StopReason');
+    notifyListeners();
+  }
+
   /// Streaming V2 free-form event (session open/close, steering, off-by-default
   /// platform refusal). Kept as text because it is read by a human on a device.
   void noteResourceLoader(String text, {int? generation}) {
@@ -904,9 +967,28 @@ class StreamingDiagnostics extends ChangeNotifier {
       generation: generation ?? _generation,
       elapsedMillis: _elapsed(),
     ));
+    // The two events that mean "a read did not finish" are captured here, at
+    // the moment they arrive. Later events keep overwriting the log; the first
+    // failure is the one that explains the play.
+    if (name == 'supplyError' || name == 'playerFailed') {
+      noteReadError(
+        source: name,
+        code: fields['code'] as String?,
+        message: (fields['message'] as String?) ??
+            (fields['error'] as String?) ??
+            (fields['reason'] as String?),
+        offset: _fieldInt(fields['offset']) ?? _fieldInt(fields['requestedOffset']),
+        requestId: _fieldInt(fields['requestId']),
+        served: _fieldInt(fields['served']),
+        generation: generation,
+      );
+    }
     _note('RL $name ${fields.entries.map((e) => '${e.key}=${e.value}').join(' ')}');
     notifyListeners();
   }
+
+  static int? _fieldInt(Object? value) =>
+      value is int ? value : (value is num ? value.toInt() : null);
 
   /// The tapped list item, as the local index has it.
   ///
@@ -1083,6 +1165,10 @@ class StreamingDiagnostics extends ChangeNotifier {
     _rlStalls = 0;
     _rlContentInfo = null;
     _rlLog.clear();
+    // Per play: the first failed read and the reason a V2-only play stopped
+    // belong to the video the user tapped, not to the session.
+    _firstReadError = null;
+    _v2StopReason = null;
     _moov = MoovPosition.unknown;
     _playerCreatedMillis = null;
     _playerReadyMillis = null;
@@ -1424,6 +1510,11 @@ class StreamingDiagnostics extends ChangeNotifier {
         if (_playerSourceType == 'RESOURCE_LOADER' || _rlRequests > 0) ...[
           'v2 sessions=$_rlSessions req=$_rlRequests resp=$_rlResponds '
               'bytes=$_rlBytes stalls=$_rlStalls',
+          // The window V2 is running on, and the three byte counts that used
+          // to be reported as one number.
+          _v2WindowLine(),
+          _v2BytesLine(),
+          'firstReadError=${firstReadError == null ? '-' : _firstReadErrorLine()}',
           // The last few V2 events, oldest first: the sequence that answers
           // "did it wait for growth or did it finish short".
           for (final event in _rlLog.reversed.take(6).toList().reversed)
@@ -1445,6 +1536,43 @@ class StreamingDiagnostics extends ChangeNotifier {
   static String _sanitize(String text) {
     final clean = redactText(text).replaceAll(RegExp(r'\s+'), ' ').trim();
     return clean.length <= 160 ? clean : '${clean.substring(0, 160)}…';
+  }
+
+  /// The TDLib window the resource loader is currently on.
+  String _v2WindowLine() {
+    final call = downloadAudit.lastCallFor(DownloadCaller.resourceLoader);
+    if (call == null) return 'V2_WINDOW offset=- limit=-';
+    return 'V2_WINDOW offset=${call.offset} '
+        'limit=${call.limit <= 0 ? 'WHOLE_FILE' : call.limit} '
+        'grew=${call.grew} cause="${call.cause}"';
+  }
+
+  /// Three counts that must not be confused with each other:
+  ///
+  /// * `toPlayer` — bytes actually handed to `AVAssetResourceLoadingDataRequest`
+  ///   (what played);
+  /// * `dlGrew` — bytes TDLib wrote for windows V2 asked for (what downloaded);
+  /// * `diskDownloaded` — TDLib's own `downloaded_size` of the file (what is
+  ///   on disk, which is what "进度" means).
+  ///
+  /// A play can have `toPlayer` > 0 with `diskDownloaded` well under the total,
+  /// and a request can exist with all three at zero.
+  String _v2BytesLine() {
+    final grew = downloadAudit.grewBy(DownloadCaller.resourceLoader);
+    return 'V2_BYTES dataRequests=$_rlRequests responds=$_rlResponds '
+        'toPlayer=$_rlBytes dlGrew=$grew '
+        'diskDownloaded=$_downloadedBytes/$_totalBytes';
+  }
+
+  /// The first failed read, as one readable line.
+  String _firstReadErrorLine() {
+    final error = _firstReadError;
+    if (error == null) return 'none';
+    return 'source=${error['source']} code=${error['code'] ?? '-'} '
+        'offset=${error['offset'] ?? '-'} '
+        'requestId=${error['requestId'] ?? '-'} '
+        'served=${error['served'] ?? '-'} '
+        'msg="${_sanitize('${error['message'] ?? ''}')}"';
   }
 
   /// The one-screen acceptance result, in the shape the task asks for.
@@ -1601,6 +1729,18 @@ class StreamingDiagnostics extends ChangeNotifier {
     // block "152 MB appeared" is an observation; with it, it is a named call.
     lines.add('DOWNLOAD_AUDIT calls=${downloadAudit.count} '
         'unbounded=${downloadAudit.unboundedCalls.length}');
+    // The explicit "did anything ask for the whole file" answer. Kept separate
+    // from the audit header because it is an acceptance criterion, not a
+    // counter: `WHOLE_FILE_DOWNLOADS=0` with `bounded` growth is the pass.
+    lines.add('WHOLE_FILE_DOWNLOADS=${downloadAudit.unboundedCalls.length} '
+        'wholeFileAllowed=${downloadAudit.wholeFileAllowed ? 'true' : 'false'}');
+    // V2-only: which window the resource loader ran on, what it moved, and the
+    // first read that failed. `v1Attempted=false` above is the "V1 was not
+    // called" half; these lines are the "what V2 actually did" half.
+    lines.add(_v2WindowLine());
+    lines.add(_v2BytesLine());
+    lines.add('FIRST_READ_ERROR ${_firstReadErrorLine()}');
+    lines.add('V2_ONLY_STOP=${_v2StopReason ?? '-'}');
     // The hard guard's own verdict. `AUTO_FULL_DOWNLOAD_BLOCKED=0` is a pass
     // only when nothing tried; a non-zero count with no FULL_DOWNLOAD bytes is
     // also a pass — the code path existed and was stopped, which is exactly
@@ -1768,6 +1908,13 @@ class StreamingDiagnostics extends ChangeNotifier {
           'bytes': _rlBytes,
           'stalls': _rlStalls,
           'contentInfo': _rlContentInfo,
+          // What this loader asked TDLib for and what it moved, next to the
+          // bytes it handed the player. Three counts, three meanings.
+          'window': downloadAudit.lastCallFor(DownloadCaller.resourceLoader)?.toJson(),
+          'downloadedForWindows':
+              downloadAudit.grewBy(DownloadCaller.resourceLoader),
+          'firstReadError': _firstReadError,
+          'v2OnlyStop': _v2StopReason,
           // The ordered events, each stamped with chat/message/file/generation
           // — the part of the report that answers "did it wait for growth or
           // did it finish short".

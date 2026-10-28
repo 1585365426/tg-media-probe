@@ -296,10 +296,15 @@ PlaybackDecision decidePlaybackSource(
 /// [fullDownload] is deliberately unreachable from here. Waiting for a whole
 /// film is a choice the user makes, not something a failed transport gets to
 /// decide.
+/// [allowProxy] is false in V2-only builds: a resource-loader failure then has
+/// no transport rung left, and the answer is [PlaybackSourceKind.stop]. The
+/// local-file case above still applies — that is the same bytes read from
+/// disk, not a different transport and not a download.
 PlaybackDecision decideAfterTransportFailure(
   SourceFacts facts, {
   required PlaybackSourceKind failed,
   required bool v2Supported,
+  bool allowProxy = true,
 }) {
   // A local file the player refused is not a transport problem: the bytes are
   // all there and the decoder still said no. Asking for the same file again
@@ -328,6 +333,16 @@ PlaybackDecision decideAfterTransportFailure(
   }
   switch (failed) {
     case PlaybackSourceKind.resourceLoader:
+      if (!allowProxy) {
+        // V2-only: the resource loader was the only automatic streaming path,
+        // so its failure is the end of the play. Saying `httpProxy` here would
+        // make the report claim a transport that is not reachable.
+        return PlaybackDecision(
+          source: PlaybackSourceKind.stop,
+          reason: 'v2_failed_no_v1',
+          facts: facts,
+        );
+      }
       // A bridge that exists but did not install leaves exactly one
       // transport-level attempt: the loopback proxy, on the same bytes.
       return PlaybackDecision(

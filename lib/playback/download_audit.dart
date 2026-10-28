@@ -296,6 +296,19 @@ class DownloadAudit {
     if (reached > call.reached) call.reached = reached;
   }
 
+  /// The most recent request [caller] sent, or null if it sent none.
+  ///
+  /// The panel prints it as the live V2 window: "what did the resource loader
+  /// ask TDLib for, right now" is a different question from "what grew", and
+  /// answering the second one while the first is unreadable is how a window
+  /// request ends up looking like a download.
+  DownloadCall? lastCallFor(DownloadCaller caller) {
+    for (var i = _calls.length - 1; i >= 0; i--) {
+      if (_calls[i].caller == caller) return _calls[i];
+    }
+    return null;
+  }
+
   /// Total bytes TDLib wrote because of [caller].
   int grewBy(DownloadCaller caller) => _calls
       .where((c) => c.caller == caller)

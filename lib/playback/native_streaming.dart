@@ -33,6 +33,18 @@ class StreamingV2 {
 
   /// The player source label the diagnostics report for a V2 play.
   static const String sourceLabel = 'RESOURCE_LOADER';
+
+  /// V2 is the only automatic streaming path.
+  ///
+  /// With this on, a play that cannot stream through the resource loader ends
+  /// in an error page: it does not try the loopback proxy, and it does not
+  /// download the file. The proxy is still in the repository and still tested
+  /// — it is simply no longer reachable from the play path, so a device run
+  /// has one streaming branch to read instead of three.
+  ///
+  /// Not a runtime preference: flipping it back is a code change with a test
+  /// run, not a switch a report can be blamed on.
+  static const bool v2Only = true;
 }
 
 /// `MethodChannel` implementation of the native transport.
