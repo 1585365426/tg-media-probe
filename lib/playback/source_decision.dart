@@ -23,7 +23,7 @@
 /// the diagnostics.
 library;
 
-/// The four transports a play can end up on.
+/// The transports a play can end up on.
 enum PlaybackSourceKind {
   /// Read the file at its path. No proxy, no resource loader.
   localFile,
@@ -34,8 +34,22 @@ enum PlaybackSourceKind {
   /// Loopback HTTP range proxy (V1).
   httpProxy,
 
-  /// Wait for the whole file, then play it.
+  /// Wait for the whole file, then play it. Only reachable from
+  /// [decidePlaybackSource] — i.e. before any stream was attempted. A stream
+  /// that *failed* never lands here.
   fullDownload,
+
+  /// Give up on this play and say so. The device report is the reason this
+  /// value exists: "no transport left" used to mean "download the whole
+  /// file", which turned a 4.9 MB proxy stall into a 593 MB download and a
+  /// 162-second wait before the video even started.
+  stop,
+
+  /// Streaming could not even start: TDLib has no record for the id, or the
+  /// size is unknown. Distinct from [fullDownload] on purpose — "the id the
+  /// tile carried is stale" and "the user asked for a complete cache" are not
+  /// the same instruction, and only the second one may download a film.
+  streamingNotStarted,
 }
 
 /// Everything the decision is allowed to look at.
@@ -148,7 +162,7 @@ class PlaybackDecision {
   final bool needsRedownload;
 
   /// The string the diagnostics report uses (`LOCAL_FILE`, `RESOURCE_LOADER`,
-  /// `HTTP_PROXY`, `FULL_DOWNLOAD`).
+  /// `HTTP_PROXY`, `FULL_DOWNLOAD`, `STOP`).
   String get code {
     switch (source) {
       case PlaybackSourceKind.localFile:
@@ -159,6 +173,10 @@ class PlaybackDecision {
         return 'HTTP_PROXY';
       case PlaybackSourceKind.fullDownload:
         return 'FULL_DOWNLOAD';
+      case PlaybackSourceKind.stop:
+        return 'STOP';
+      case PlaybackSourceKind.streamingNotStarted:
+        return 'STREAMING_NOT_STARTED';
     }
   }
 
@@ -176,7 +194,8 @@ class PlaybackDecision {
 ///
 /// Order matters and is the specification:
 ///
-/// 1. no record / no size → full download (nothing honest to serve);
+/// 1. no record / no size → streaming not started (nothing honest to serve,
+///    and not an instruction to download);
 /// 2. a playable complete file → local file, whatever else is true;
 /// 3. streaming switched off → full download;
 /// 4. V2 available → resource loader (a short-but-claimed-complete file is
@@ -193,16 +212,21 @@ PlaybackDecision decidePlaybackSource(
   required bool forceStreaming,
   required bool v2Supported,
 }) {
+  // No record / no size: streaming cannot start, and that is a *verdict*.
+  // It used to be `fullDownload`, which the controller read as an instruction
+  // and answered with `downloadFile(limit: 0)` — on a 24 MB video whose tile
+  // id had gone stale, that downloaded the file under a different id and
+  // reported `finalSource=LOCAL_FILE` with `localFileExists=false`.
   if (!facts.hasRecord) {
     return PlaybackDecision(
-      source: PlaybackSourceKind.fullDownload,
+      source: PlaybackSourceKind.streamingNotStarted,
       reason: 'no_file_record',
       facts: facts,
     );
   }
   if (!facts.sizeKnown) {
     return PlaybackDecision(
-      source: PlaybackSourceKind.fullDownload,
+      source: PlaybackSourceKind.streamingNotStarted,
       reason: 'unknown_size',
       facts: facts,
     );
@@ -264,7 +288,14 @@ PlaybackDecision decidePlaybackSource(
 ///
 /// A complete file after a failed stream is a success, not a step down:
 /// return [PlaybackSourceKind.localFile]. A moved-but-incomplete file goes to
-/// the other stream. Nothing left goes to the full download.
+/// the other stream. **Nothing left goes to [PlaybackSourceKind.stop]** — the
+/// second device report is why: after V1 stalled, "nothing left" meant
+/// `fullDownload`, and a 4.9 MB proxy stall became 593 MB downloaded and
+/// 162 seconds before the first frame.
+///
+/// [fullDownload] is deliberately unreachable from here. Waiting for a whole
+/// film is a choice the user makes, not something a failed transport gets to
+/// decide.
 PlaybackDecision decideAfterTransportFailure(
   SourceFacts facts, {
   required PlaybackSourceKind failed,
@@ -272,17 +303,18 @@ PlaybackDecision decideAfterTransportFailure(
 }) {
   // A local file the player refused is not a transport problem: the bytes are
   // all there and the decoder still said no. Asking for the same file again
-  // would loop, so this case is decided before "is it complete".
+  // would loop, so this case is decided before "is it complete" — and
+  // re-downloading it would be the same bytes into the same decoder.
   if (failed == PlaybackSourceKind.localFile) {
     return PlaybackDecision(
-      source: PlaybackSourceKind.fullDownload,
+      source: PlaybackSourceKind.stop,
       reason: 'local_file_refused_by_decoder',
       facts: facts,
     );
   }
   if (!facts.hasRecord || !facts.sizeKnown) {
     return PlaybackDecision(
-      source: PlaybackSourceKind.fullDownload,
+      source: PlaybackSourceKind.stop,
       reason: 'record_lost_after_failure',
       facts: facts,
     );
@@ -305,15 +337,19 @@ PlaybackDecision decideAfterTransportFailure(
         needsRedownload: facts.isShorterThanClaimed,
       );
     case PlaybackSourceKind.httpProxy:
+      // Both streaming transports failed on a file that is still short. The
+      // honest next state is an error, not a download.
       return PlaybackDecision(
-        source: PlaybackSourceKind.fullDownload,
-        reason: 'v1_failed_full_download',
+        source: PlaybackSourceKind.stop,
+        reason: 'v1_failed_stop',
         facts: facts,
       );
     case PlaybackSourceKind.localFile:
     case PlaybackSourceKind.fullDownload:
+    case PlaybackSourceKind.stop:
+    case PlaybackSourceKind.streamingNotStarted:
       return PlaybackDecision(
-        source: PlaybackSourceKind.fullDownload,
+        source: PlaybackSourceKind.stop,
         reason: 'nothing_left_to_try',
         facts: facts,
       );

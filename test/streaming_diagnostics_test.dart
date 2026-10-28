@@ -1123,6 +1123,32 @@ void main() {
       expect(text, contains('limit=16777216'));
     });
 
+    test('the whole-file guard prints its own verdict', () {
+      final diag = StreamingDiagnostics();
+      diag.beginPlay(fileId: 7, streaming: true);
+      // A play that never attempted a stream starts with the door open.
+      var text = diag.acceptanceLines().join('\n');
+      expect(text, contains('AUTO_FULL_DOWNLOAD_BLOCKED=0'));
+      expect(text, contains('wholeFileAllowed=true'));
+      expect(text, contains('revokedBy=-'));
+
+      diag.forbidWholeFile('streaming:V2');
+      diag.downloadAudit.noteBlockedWholeFile(
+        fileId: 7,
+        caller: DownloadCaller.fullDownload,
+        cause: 'full download wait',
+      );
+
+      text = diag.acceptanceLines().join('\n');
+      expect(text, contains('AUTO_FULL_DOWNLOAD_BLOCKED=1'));
+      expect(text, contains('wholeFileAllowed=false'));
+      expect(text, contains('revokedBy=streaming:V2'));
+      expect(text, contains('FULL_DOWNLOAD_GUARD fired'));
+      expect(text, contains('caller=FULL_DOWNLOAD'));
+      // The guard firing is not a download: nothing was recorded as growth.
+      expect(diag.downloadAudit.count, 0);
+    });
+
     test('a whole-file request shows up as UNBOUNDED, not as a window', () {
       final diag = StreamingDiagnostics();
       diag.beginPlay(fileId: 7, streaming: false);

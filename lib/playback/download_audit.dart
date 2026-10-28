@@ -160,9 +160,66 @@ class DownloadAudit {
 
   int _seq = 0;
 
+  /// Whether a whole-file `downloadFile` (`limit: 0`) may be sent at all.
+  ///
+  /// A play starts with this **allowed** and loses it the moment a streaming
+  /// transport is entered ([forbidWholeFile]). From that point on, "the stream
+  /// failed" must never be allowed to become "download the whole film".
+  ///
+  /// The device report is why this exists as a hard stop rather than a
+  /// convention: a 4.9 MB proxy stall on a 622 MB video became
+  /// `caller=FULL_DOWNLOAD limit=WHOLE_FILE grew=622067712`,
+  /// `downloadedAtFirstPlayback=593 MB`, `firstPlayback=162.3 s`. Every layer
+  /// that decision passed through *chose* it deliberately; nothing refused it.
+  bool wholeFileAllowed = true;
+
+  String? _wholeFileRevokedBy;
+
+  /// The whole-file requests refused during this play, one line each. A
+  /// non-empty list means some code path tried to download a film to get a
+  /// first frame, and was stopped.
+  final List<String> _blocked = <String>[];
+
   List<DownloadCall> get calls => List<DownloadCall>.unmodifiable(_calls);
 
   int get count => _calls.length;
+
+  /// Why the whole-file door was closed, for the report.
+  String? get wholeFileRevokedBy => _wholeFileRevokedBy;
+
+  List<String> get blockedWholeFile => List<String>.unmodifiable(_blocked);
+
+  int get blockedWholeFileCount => _blocked.length;
+
+  /// Closes the whole-file door for the rest of the play.
+  void forbidWholeFile(String why) {
+    if (!wholeFileAllowed) return;
+    wholeFileAllowed = false;
+    _wholeFileRevokedBy = why;
+  }
+
+  /// Opens it again — called once per play, by the controller, before the
+  /// transport chain starts.
+  ///
+  /// Deliberately not part of [reset]: `beginPlay` runs again on every
+  /// `_streamOnce` retry, and a retry must not reopen a door the failed
+  /// attempt closed.
+  void allowWholeFile() {
+    wholeFileAllowed = true;
+    _wholeFileRevokedBy = null;
+    _blocked.clear();
+  }
+
+  /// Records a refused whole-file attempt. The caller throws with the same
+  /// words, so the panel and the exception cannot disagree.
+  void noteBlockedWholeFile({
+    required int fileId,
+    required DownloadCaller caller,
+    required String cause,
+  }) {
+    _blocked.add('file=$fileId caller=${caller.label} '
+        'cause="${cause.isEmpty ? '-' : cause}"');
+  }
 
   /// Stamps the identity every following call is attributed to.
   void tag({int? chatId, int? messageId, int? generation}) {
@@ -275,11 +332,21 @@ class DownloadAudit {
 
   /// The lines the diagnostics panel and the acceptance report print.
   List<String> summary({int max = 8}) {
-    if (_calls.isEmpty) return const <String>['DOWNLOAD AUDIT: no calls'];
     final lines = <String>[
-      'DOWNLOAD AUDIT calls=${_calls.length} '
-          'unbounded=${unboundedCalls.length} growthByCaller=${growthSummary()}',
+      if (_calls.isEmpty)
+        'DOWNLOAD AUDIT: no calls'
+      else
+        'DOWNLOAD AUDIT calls=${_calls.length} '
+            'unbounded=${unboundedCalls.length} growthByCaller=${growthSummary()}',
     ];
+    // A guard that fired with no request behind it is still the most important
+    // thing in this block — printing "no calls" and stopping would hide it.
+    if (_calls.isEmpty) {
+      for (final blocked in _blocked) {
+        lines.add('  AUTO_FULL_DOWNLOAD_BLOCKED $blocked');
+      }
+      return lines;
+    }
     final recent = _calls.length <= max
         ? _calls
         : _calls.sublist(_calls.length - max);
@@ -297,6 +364,9 @@ class DownloadAudit {
       final who = unbounded.map((c) => c.caller.label).toSet().join(',');
       lines.add('  UNBOUNDED=${unbounded.length} callers=$who');
     }
+    for (final blocked in _blocked) {
+      lines.add('  AUTO_FULL_DOWNLOAD_BLOCKED $blocked');
+    }
     return lines;
   }
 
@@ -305,5 +375,6 @@ class DownloadAudit {
     _open.clear();
     _last.clear();
     _seq = 0;
+    // `wholeFileAllowed` is *not* reset here on purpose — see [allowWholeFile].
   }
 }

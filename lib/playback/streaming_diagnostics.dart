@@ -315,6 +315,16 @@ class StreamingDiagnostics extends ChangeNotifier {
   /// Where the `moov` atom sits, scanned from the bytes on disk.
   MoovPosition _moov = MoovPosition.unknown;
 
+  /// The last FILE_ID_RESOLVE snapshot — see [noteFileIdResolve].
+  int? _resolveClickedId;
+  int? _resolveRecordId;
+  int? _resolveResolvedId;
+  int? _resolveTdlibId;
+  int? _resolveMessageId;
+  int? _resolveGeneration;
+  String? _resolveUniqueId;
+  final List<String> _remaps = <String>[];
+
   /// Player lifecycle, with the clock of this play.
   int? _playerCreatedMillis;
   int? _playerReadyMillis;
@@ -678,6 +688,69 @@ class StreamingDiagnostics extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Closes the whole-file door for the rest of this play.
+  ///
+  /// Called the moment a streaming transport is entered. From then on a
+  /// `downloadFile(limit: 0)` is refused at the api and recorded as
+  /// [blockedWholeFileCount] — including one attempted by a future code path
+  /// that has not been written yet.
+  void forbidWholeFile(String why) {
+    downloadAudit.forbidWholeFile(why);
+    _note('forbidWholeFile=$why');
+  }
+
+  /// How many whole-file requests were refused during this play.
+  int get blockedWholeFileCount => downloadAudit.blockedWholeFileCount;
+
+  bool get wholeFileAllowed => downloadAudit.wholeFileAllowed;
+
+  /// Opens the whole-file door. Called once per play by the controller — a
+  /// retry of the same play must not reopen it.
+  void allowWholeFile() {
+    downloadAudit.allowWholeFile();
+  }
+
+  /// Which id the user tapped, which id the record carried, which id the
+  /// resolver used, and which id TDLib answered for.
+  ///
+  /// The device report that prompted this printed `record file=4999` and
+  /// `no_file_record` in the same block, then downloaded `file=2221`. Without
+  /// these four numbers side by side, "the record exists" and "the record was
+  /// not found" are both true statements about different ids.
+  void noteFileIdResolve({
+    required int clickedFileId,
+    required int recordFileId,
+    required int resolvedFileId,
+    required int tdlibFileId,
+    int? messageId,
+    int? generation,
+    String? fileUniqueId,
+  }) {
+    _resolveClickedId = clickedFileId;
+    _resolveRecordId = recordFileId;
+    _resolveResolvedId = resolvedFileId;
+    _resolveTdlibId = tdlibFileId;
+    _resolveMessageId = messageId;
+    _resolveGeneration = generation;
+    _resolveUniqueId = fileUniqueId;
+    _note('fileIdResolve clicked=$clickedFileId record=$recordFileId '
+        'resolved=$resolvedFileId tdlib=$tdlibFileId');
+  }
+
+  /// The resolver swapped one file id for another. Always printed: a play that
+  /// downloads a different file than the one tapped has to say so.
+  void noteFileIdRemap({
+    required int oldId,
+    required int newId,
+    required String reason,
+  }) {
+    _remaps.add('old=$oldId new=$newId reason=$reason');
+    _note('fileIdRemap old=$oldId new=$newId reason=$reason');
+    notifyListeners();
+  }
+
+  List<String> get fileIdRemaps => List<String>.unmodifiable(_remaps);
+
   /// What the player finally opened.
   void noteFinalSource(String source) {
     if (_sealedResult) return;
@@ -846,6 +919,7 @@ class StreamingDiagnostics extends ChangeNotifier {
     required int messageId,
     required int sizeBytes,
   }) {
+    if (_recordFileId != fileId) _remaps.clear();
     _recordFileId = fileId;
     _recordMessageId = messageId;
     _recordSizeBytes = sizeBytes;
@@ -1036,6 +1110,16 @@ class StreamingDiagnostics extends ChangeNotifier {
     _v1Attempted = false;
     _v1Failed = false;
     _finalSource = null;
+    _resolveClickedId = null;
+    _resolveRecordId = null;
+    _resolveResolvedId = null;
+    _resolveTdlibId = null;
+    _resolveMessageId = null;
+    _resolveGeneration = null;
+    _resolveUniqueId = null;
+    // `_remaps` is deliberately *not* cleared here: `beginPlay` runs again on
+    // every `_streamOnce` retry, and a retry is exactly when a remap happens
+    // (4999 → 2221). It is cleared per navigation, in [noteRecordSnapshot].
     // The download audit belongs to the play, not to the process: a report has
     // to answer "which requests did *this* play send", not "which requests has
     // the app ever sent".
@@ -1411,6 +1495,16 @@ class StreamingDiagnostics extends ChangeNotifier {
       'playbackDecision=${_playbackDecision ?? '-'}',
       'playbackDecisionReason=${_playbackDecisionReason ?? '-'}',
       'finalSource=${_finalSource ?? _playerSourceType ?? '-'}',
+      // `LOCAL_FILE` next to `localFileExists=false / localFileSize=-1` is a
+      // contradiction, not a nuance: nothing was on disk, so nothing could
+      // have been opened from disk. The device report had exactly that pair.
+      if ((_finalSource ?? '') == 'LOCAL_FILE' &&
+          ((_decisionLocalSize ?? -1) < 0 ||
+              (_decisionExpectedSize ?? 0) <= 0 ||
+              (_decisionLocalSize ?? 0) < (_decisionExpectedSize ?? 0)))
+        'FINAL_SOURCE_INCONSISTENT: finalSource=LOCAL_FILE '
+            'localFileSize=${_decisionLocalSize ?? -1} '
+            'expectedFileSize=${_decisionExpectedSize ?? 0}',
       'localFileExists=${_decisionLocalSize == null ? '-' : (_decisionLocalSize! > 0 ? 'true' : 'false')}',
       'localFileSize=${_decisionLocalSize ?? '-'}',
       'expectedFileSize=${_decisionExpectedSize ?? '-'}',
@@ -1507,6 +1601,17 @@ class StreamingDiagnostics extends ChangeNotifier {
     // block "152 MB appeared" is an observation; with it, it is a named call.
     lines.add('DOWNLOAD_AUDIT calls=${downloadAudit.count} '
         'unbounded=${downloadAudit.unboundedCalls.length}');
+    // The hard guard's own verdict. `AUTO_FULL_DOWNLOAD_BLOCKED=0` is a pass
+    // only when nothing tried; a non-zero count with no FULL_DOWNLOAD bytes is
+    // also a pass — the code path existed and was stopped, which is exactly
+    // what the guard is for.
+    lines.add('AUTO_FULL_DOWNLOAD_BLOCKED=${downloadAudit.blockedWholeFileCount} '
+        'wholeFileAllowed=${downloadAudit.wholeFileAllowed ? 'true' : 'false'} '
+        'revokedBy=${downloadAudit.wholeFileRevokedBy ?? '-'}');
+    if (downloadAudit.blockedWholeFileCount > 0) {
+      lines.add('FULL_DOWNLOAD_GUARD fired: '
+          '${downloadAudit.blockedWholeFile.join(' | ')}');
+    }
     lines.add('DOWNLOAD_GROWTH ${downloadAudit.growthSummary()}');
     final largest = downloadAudit.largest;
     if (largest != null) {
@@ -1533,6 +1638,19 @@ class StreamingDiagnostics extends ChangeNotifier {
         ? 'IDENTITY=OK'
         : 'IDENTITY=BUG: clicked=${_clickedFileId ?? '-'} '
             'active=${_activeFileId ?? '-'} player=${_playerFileId ?? '-'}');
+    // The four ids side by side. A report that says "record exists" and
+    // "no_file_record" at once is describing two different ids, and this line
+    // is where that becomes visible instead of contradictory.
+    lines.add('FILE_ID_RESOLVE: clickedFileId=${_resolveClickedId ?? '-'} '
+        'recordFileId=${_resolveRecordId ?? '-'} '
+        'resolvedFileId=${_resolveResolvedId ?? '-'} '
+        'tdlibFileId=${_resolveTdlibId ?? '-'} '
+        'fileUniqueId=${_resolveUniqueId ?? '-'} '
+        'messageId=${_resolveMessageId ?? '-'} '
+        'generation=${_resolveGeneration ?? '-'}');
+    for (final remap in _remaps) {
+      lines.add('FILE_ID_REMAP $remap');
+    }
     lines.add(_forwardRangeRequests == 0
         ? 'tailRequests=0 NO_TAIL_REQUEST'
         : 'tailRequests=$_forwardRangeRequests');
@@ -1639,6 +1757,9 @@ class StreamingDiagnostics extends ChangeNotifier {
           'growthByCaller': downloadAudit.growthSummary(),
           'unboundedCalls': downloadAudit.unboundedCalls.length,
           'largest': downloadAudit.largest?.toJson(),
+          'wholeFileAllowed': downloadAudit.wholeFileAllowed,
+          'wholeFileRevokedBy': downloadAudit.wholeFileRevokedBy,
+          'blockedWholeFile': downloadAudit.blockedWholeFile,
         },
         'resourceLoader': <String, Object?>{
           'sessions': _rlSessions,

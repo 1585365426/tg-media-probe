@@ -172,6 +172,10 @@ class FakeTransferApi implements FileTransferApi {
   /// When true, `start()` raises a TDLib error.
   bool failOnStart = false;
 
+  /// When true, `stat` answers `null` for every id — TDLib has no record at
+  /// all, which is the state the device report called `no_file_record`.
+  bool noRecord = false;
+
   final StreamController<FileState> _updates =
       StreamController<FileState>.broadcast();
   final Set<int> cancelled = <int>{};
@@ -179,9 +183,13 @@ class FakeTransferApi implements FileTransferApi {
   int statCalls = 0;
   final List<int> startedIds = <int>[];
 
+  /// Callers of every bounded window (i.e. everything except a preload).
+  final List<DownloadCaller> windowCallers = <DownloadCaller>[];
+
   @override
   Future<FileState?> stat(int fileId) async {
     statCalls++;
+    if (noRecord) return null;
     if (alreadyLocal.contains(fileId)) {
       return FileState(
         id: fileId,
@@ -225,6 +233,9 @@ class FakeTransferApi implements FileTransferApi {
   /// The warm start (prefetch) sends offset 0 / limit 0 through here. It is a
   /// real TDLib request and nothing else: no completion update, no path, so a
   /// preload can never turn into "ready to play".
+  /// A bounded window. TDLib answers it with the same growing file, but it is
+  /// **not** a whole-file request — [startCalls] must not move, because that
+  /// counter is what the acceptance assertion "no FULL_DOWNLOAD" reads.
   @override
   Future<void> startRange(int fileId, {required int offset, required int limit, int priority = 16, DownloadCaller caller = DownloadCaller.unknown, String cause = ''}) async {
     // A preload is a real TDLib request and nothing else: no completion
@@ -233,9 +244,20 @@ class FakeTransferApi implements FileTransferApi {
       startedIds.add(fileId);
       return;
     }
-    // Any other caller is the play opening its first bounded window; TDLib
-    // answers it exactly like a full start.
-    await start(fileId, caller: caller, cause: cause);
+    windowCallers.add(caller);
+    startedIds.add(fileId);
+    if (failOnStart) throw VideoSourceException('TDLib error 400: FILE_ID_INVALID');
+    if (autoComplete) {
+      _updates.add(FileState(
+        id: fileId,
+        size: 4096,
+        expectedSize: 4096,
+        downloadedSize: 4096,
+        isCompleted: true,
+        path: '/tmp/pool/$fileId',
+        canBeDownloaded: true,
+      ));
+    }
   }
   @override
   Future<void> cancel(int fileId) async {
@@ -496,7 +518,7 @@ void main() {
       expect(rig.controller.error, contains('FILE_ID_INVALID'));
     });
 
-    test('a decode failure says the video cannot be decoded', () async {
+    test('a player that cannot load ends the play with an error', () async {
       final rig = Rig(pages: <List<MediaRecord>>[
         <MediaRecord>[video(1)],
       ]);
@@ -504,9 +526,66 @@ void main() {
       await rig.controller.load();
 
       expect(rig.controller.phase, FeedPhase.error);
-      expect(rig.controller.error, '此视频无法解码');
+      // The end of the transport ladder is an error, not "download the whole
+      // file and try again": V2 and V1 both failed on a file that is still
+      // growing, so there is nothing left that does not involve downloading
+      // the film.
+      expect(rig.controller.error, '流式播放失败，已停止下载');
+      expect(rig.controller.phase, isNot(FeedPhase.ready));
       // A player that failed to load must not stay live.
       expect(rig.ledger.live, 0);
+    });
+  });
+
+  group('a video with no TDLib record', () {
+    test('stops instead of downloading the whole file', () async {
+      final rig = Rig(pages: <List<MediaRecord>>[
+        <MediaRecord>[video(1)],
+      ]);
+      rig.api.noRecord = true;
+      await rig.controller.load();
+
+      expect(rig.controller.phase, FeedPhase.error);
+      // `no_file_record` used to be answered with a full download under a
+      // *different* file id — the device report's `#2 file=2221 limit=WHOLE_FILE`.
+      expect(rig.api.startCalls, 0, reason: 'no_file_record 不得触发整文件下载');
+      expect(rig.api.windowCallers, isEmpty);
+    });
+  });
+
+  group('a failed stream never downloads the video', () {
+    test('a refused stream ends the play and sends no whole-file request',
+        () async {
+      final rig = Rig(pages: <List<MediaRecord>>[
+        <MediaRecord>[video(1)],
+      ]);
+      // Every TDLib request fails: the transport has nothing to work with.
+      rig.api.failOnStart = true;
+      await rig.controller.load();
+
+      expect(rig.controller.phase, FeedPhase.error);
+      // The device defect in one assertion: a failed stream used to end in
+      // `start()` → `downloadFile(limit: 0)`, and a 622 MB video downloaded to
+      // 593 MB before the user saw an error or a frame.
+      expect(rig.api.startCalls, 0,
+          reason: '流式失败后不得请求整文件');
+      expect(rig.controller.phase, isNot(FeedPhase.ready));
+    });
+
+    test('a stalled stream ends the play instead of waiting out the file',
+        () async {
+      final rig = Rig(
+        pages: <List<MediaRecord>>[
+          <MediaRecord>[video(1)],
+        ],
+        autoComplete: false,
+        timeout: const Duration(milliseconds: 120),
+      );
+      await rig.controller.load();
+
+      expect(rig.controller.phase, FeedPhase.error);
+      expect(rig.api.startCalls, 0,
+          reason: 'stall 之后不得退化成整文件下载');
     });
   });
 

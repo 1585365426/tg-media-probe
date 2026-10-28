@@ -205,4 +205,58 @@ void main() {
       1,
     );
   });
+
+  group('the whole-file door', () {
+    test('a new play starts with it open, a stream closes it for good', () {
+      final audit = DownloadAudit();
+      expect(audit.wholeFileAllowed, isTrue);
+
+      audit.forbidWholeFile('streaming:V2');
+      expect(audit.wholeFileAllowed, isFalse);
+      expect(audit.wholeFileRevokedBy, 'streaming:V2');
+
+      // A second reason must not overwrite the first: the report needs the
+      // transport that closed the door, not the last one to try.
+      audit.forbidWholeFile('streaming:V1');
+      expect(audit.wholeFileRevokedBy, 'streaming:V2');
+    });
+
+    test('a refused request is recorded with its caller and names the line', () {
+      final audit = DownloadAudit()
+        ..forbidWholeFile('streaming:V1');
+      audit.noteBlockedWholeFile(
+        fileId: 27588,
+        caller: DownloadCaller.fullDownload,
+        cause: 'full download wait',
+      );
+
+      expect(audit.blockedWholeFileCount, 1);
+      final line = audit.summary().firstWhere(
+            (l) => l.contains('AUTO_FULL_DOWNLOAD_BLOCKED'),
+          );
+      expect(line, contains('file=27588'));
+      expect(line, contains('caller=FULL_DOWNLOAD'));
+      expect(line, contains('full download wait'));
+    });
+
+    test('only the controller reopens it, once per play', () {
+      final audit = DownloadAudit()
+        ..forbidWholeFile('streaming:V2')
+        ..noteBlockedWholeFile(
+          fileId: 7,
+          caller: DownloadCaller.fullDownload,
+          cause: '',
+        );
+
+      // `reset` runs again on every `_streamOnce` retry. Reopening the door
+      // there would make a retry undo the guard the failed attempt installed.
+      audit.reset();
+      expect(audit.wholeFileAllowed, isFalse);
+
+      audit.allowWholeFile();
+      expect(audit.wholeFileAllowed, isTrue);
+      expect(audit.wholeFileRevokedBy, isNull);
+      expect(audit.blockedWholeFileCount, 0);
+    });
+  });
 }

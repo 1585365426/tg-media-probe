@@ -1,6 +1,9 @@
 import 'dart:async';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:tg_media_probe/data/media_record.dart';
+import 'package:tg_media_probe/playback/media_metadata.dart';
+import 'package:tg_media_probe/playback/streaming_diagnostics.dart';
 import 'package:tg_media_probe/playback/video_source.dart';
 import 'package:tg_media_probe/td/td_models.dart';
 
@@ -69,6 +72,68 @@ class ScriptedApi implements FileTransferApi {
   Stream<FileState> updates() => _updates.stream;
 
   Future<void> close() => _updates.close();
+}
+
+
+/// A TDLib that has no record for the id the tile carried, and one for the id
+/// the message actually points at.
+///
+/// This is the shape of the device report: `record file=4999` printed by the
+/// diagnostics, `no_file_record` from the decision layer, and a whole-file
+/// download of `file=2221` afterwards.
+class RemappingApi implements FileTransferApi {
+  RemappingApi({required this.realId, this.completeOnReal = true});
+
+  final int realId;
+  final bool completeOnReal;
+  final List<int> statIds = <int>[];
+  final List<int> started = <int>[];
+
+  @override
+  Future<void> prefetch(int fileId) async {}
+
+  @override
+  Future<FileState?> stat(int fileId) async {
+    statIds.add(fileId);
+    if (fileId != realId) return null; // TDLib has no such file id
+    return FileState(
+      id: realId,
+      size: completeOnReal ? 2048 : 0,
+      expectedSize: 2048,
+      downloadedSize: completeOnReal ? 2048 : 0,
+      isCompleted: completeOnReal,
+      path: completeOnReal ? '/pool/$realId' : '',
+      canBeDownloaded: true,
+    );
+  }
+
+  @override
+  Future<void> start(int fileId,
+      {DownloadCaller caller = DownloadCaller.unknown, String cause = ''}) async {
+    started.add(fileId);
+  }
+
+  @override
+  Future<void> startRange(int fileId,
+      {required int offset,
+      required int limit,
+      int priority = 16,
+      DownloadCaller caller = DownloadCaller.unknown,
+      String cause = ''}) async {}
+
+  @override
+  Future<void> cancel(int fileId) async {}
+
+  @override
+  Stream<FileState> updates() => const Stream<FileState>.empty();
+}
+
+class FixedLookup implements MediaMetadataLookup {
+  FixedLookup(this.record);
+  final MediaRecord? record;
+
+  @override
+  Future<MediaRecord?> fetch(int chatId, int messageId) async => record;
 }
 
 void main() {
@@ -300,4 +365,56 @@ void main() {
       expect(await resolver.resolve(23), '/pool/23');
       expect(api.started, isEmpty);
     });
+
+  group('a stale file id', () {
+    test('is repaired from the message before anything is downloaded',
+        () async {
+      final api = RemappingApi(realId: 2221);
+      final diagnostics = StreamingDiagnostics();
+      final resolver = VideoSourceResolver(
+        api: api,
+        diagnostics: diagnostics,
+        metadata: FixedLookup(const MediaRecord(
+          chatId: 1,
+          messageId: 2,
+          fileId: 2221,
+          kind: MediaKind.video,
+          sizeBytes: 2048,
+        )),
+        fileExists: (_) async => true,
+      );
+
+      final source = await resolver.resolveStream(4999, chatId: 1, messageId: 2);
+
+      // Nothing was asked of TDLib for the dead id: the record was re-read
+      // first. The device log had `#1 file=4999 limit=WHOLE_FILE grew=0` — a
+      // request spent on an id TDLib had already disowned.
+      expect(api.started, isEmpty);
+      expect(api.statIds, <int>[4999, 2221]);
+      expect(source.path, '/pool/2221');
+      expect(diagnostics.fileIdRemaps.single, contains('old=4999 new=2221'));
+    });
+
+    test('with no message to re-read stops as STREAMING_NOT_STARTED', () async {
+      final api = RemappingApi(realId: 2221);
+      final diagnostics = StreamingDiagnostics();
+      final resolver = VideoSourceResolver(
+        api: api,
+        diagnostics: diagnostics,
+        fileExists: (_) async => true,
+      );
+
+      await expectLater(
+        resolver.resolveStream(4999, chatId: 1, messageId: 2),
+        throwsA(isA<StreamingNotStarted>()),
+      );
+      // The whole point: no record is not a reason to download the file.
+      expect(api.started, isEmpty);
+      final text = diagnostics.acceptanceLines().join('\n');
+      expect(text, contains('FILE_ID_RESOLVE:'));
+      expect(text, contains('recordFileId='));
+      expect(text, contains('STREAMING_NOT_STARTED'));
+      expect(text, isNot(contains('playbackDecision=FULL_DOWNLOAD')));
+    });
+  });
 }

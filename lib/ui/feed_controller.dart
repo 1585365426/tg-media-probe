@@ -597,9 +597,18 @@ class FeedController extends ChangeNotifier {
     await _activate(record, _claim(record));
   }
 
+  /// Opens the whole-file door for this play, and only this play.
+  ///
+  /// Outside a play the door is irrelevant: `TdFileTransferApi` is only used by
+  /// the player path. Inside one, the door closes as soon as a streaming
+  /// transport is entered (see `VideoSourceResolver._streamOnce`), so a failed
+  /// stream cannot reach `downloadFile(limit: 0)`. The only play that keeps it
+  /// open end-to-end is the one where the user turned streaming off — that is
+  /// an instruction, not a fallback.
   Future<void> _activate(MediaRecord record, int generation) async {
     if (!_ownsRecord(generation, record)) return;
 
+    _diagnostics.allowWholeFile();
     _fallbackOccurred = false;
     _phase = FeedPhase.buffering;
     _notify();
@@ -640,12 +649,13 @@ class FeedController extends ChangeNotifier {
         () => _resolvePlaySource(record, generation, trace),
       );
     } on VideoSourceTimeout catch (e) {
-      // Streaming could not deliver (stall or ceiling). The full-download
-      // path is the honest fallback: same bytes, no transport, and the
-      // position and list stay exactly where they are. Only if that also fails
-      // does the user see an error.
-      final path = await _fallbackFullDownload(record, trace, e, generation);
-      if (path == null) {
+      // A stream failed. Re-measure the file, try the other transport, and if
+      // that fails too, stop — this is the one place the device report says
+      // must never answer "download the whole file". A 4.9 MB proxy stall on a
+      // 622 MB video used to become 593 MB downloaded and 162 seconds before
+      // the first frame.
+      source = await _recoverFromStreamFailure(record, trace, e, generation);
+      if (source == null) {
         if (!_ownsRecord(generation, record)) return;
         _fail(
           e.message,
@@ -654,10 +664,9 @@ class FeedController extends ChangeNotifier {
         );
         return;
       }
-      source = PlaySource.file(path);
     } on VideoSourceException catch (e) {
-      final path = await _fallbackFullDownload(record, trace, e, generation);
-      if (path == null) {
+      source = await _recoverFromStreamFailure(record, trace, e, generation);
+      if (source == null) {
         if (!_ownsRecord(generation, record)) return;
         _fail(
           e.message,
@@ -666,10 +675,9 @@ class FeedController extends ChangeNotifier {
         );
         return;
       }
-      source = PlaySource.file(path);
     } on Object catch (e) {
-      final path = await _fallbackFullDownload(record, trace, e, generation);
-      if (path == null) {
+      source = await _recoverFromStreamFailure(record, trace, e, generation);
+      if (source == null) {
         if (!_ownsRecord(generation, record)) return;
         _fail(
           '$e',
@@ -678,7 +686,6 @@ class FeedController extends ChangeNotifier {
         );
         return;
       }
-      source = PlaySource.file(path);
     }
 
     // Null means a newer navigation already started — or this one was
@@ -692,14 +699,11 @@ class FeedController extends ChangeNotifier {
     }
 
     // Install from the top of the transport chain downwards:
-    // V2 (resource loader) → V1 (loopback proxy) → local file. A transport
-    // that never produced a ready player is disposed before the next one is
-    // tried, so the slot never holds two sources and the user never sees a
-    // "无法连接服务器" from a transport that was already replaced.
+    // V2 (resource loader) → V1 (loopback proxy) → local file → error. A
+    // transport that never produced a ready player is disposed before the next
+    // one is tried, so the slot never holds two sources and the user never
+    // sees a "无法连接服务器" from a transport that was already replaced.
     var current = source;
-    // The chain is a ladder, not a loop: a local file that fails to decode must
-    // not send the play back down into another full download.
-    var fullDownloadTried = false;
     while (true) {
       _activeSource = current;
       _registerActiveFile(current, record);
@@ -718,14 +722,12 @@ class FeedController extends ChangeNotifier {
         record,
         generation,
         trace,
-        fullDownloadTried: fullDownloadTried,
       );
       if (!_ownsRecord(generation, record)) {
         await next?.dispose();
         return;
       }
       if (next == null) return;
-      if (!next.isStreaming) fullDownloadTried = true;
       current = next;
     }
     source = current;
@@ -787,9 +789,14 @@ class FeedController extends ChangeNotifier {
           onProgress: onProgress,
         );
       } on VideoSourceTimeout {
-        // The transfer itself is not moving; V1 would wait on the same bytes.
+        // The transfer itself is not moving. V1 reads the same file through a
+        // different path, so it gets one attempt (see
+        // [_recoverFromStreamFailure]) — but the answer is never "download the
+        // whole file".
+        _failedStreamTransport = StreamTransport.resourceLoader;
         rethrow;
       } on VideoSourceException {
+        _failedStreamTransport = StreamTransport.resourceLoader;
         rethrow;
       } on Object catch (e) {
         // No bridge, a refused session, or a native error: the transport is
@@ -808,6 +815,10 @@ class FeedController extends ChangeNotifier {
       }
     }
 
+    // Last transport before giving up: the loopback proxy. Recorded first so a
+    // failure here reads as "V1 failed" and not as "V2 failed" — the recovery
+    // would otherwise try V1 twice.
+    _failedStreamTransport = StreamTransport.httpProxy;
     return sources.resolveStream(
       record.fileId,
       chatId: record.chatId,
@@ -853,9 +864,7 @@ class FeedController extends ChangeNotifier {
       _diagnostics.notePlayerCreated(generation: generation);
       await player.activate(source.url);
       if (!_ownsRecord(generation, record)) return false;
-      _diagnostics.noteFinalSource(source.isResourceLoader
-          ? 'RESOURCE_LOADER'
-          : (source.isStreaming ? 'HTTP_PROXY' : 'LOCAL_FILE'));
+      _diagnostics.noteFinalSource(source.origin);
       _diagnostics.notePlayerReady(generation: generation);
       trace.mark(PlaybackStage.playerInitialized);
       return true;
@@ -878,7 +887,107 @@ class FeedController extends ChangeNotifier {
     }
   }
 
-  /// One step down the transport chain: V2 → V1 → full download → error.
+  /// The streaming transport that last failed in this play, so a recovery can
+  /// tell "V2 failed, V1 is still worth a try" from "V1 failed, there is
+  /// nothing left".
+  StreamTransport? _failedStreamTransport;
+
+  /// Tries V1 on the current record. Null means the proxy refused too.
+  ///
+  /// Shared by the two places that may still reach it — a V2 player that never
+  /// installed, and a V2 resolve that timed out — so both name the attempt the
+  /// same way in the report.
+  Future<PlaySource?> _tryV1(
+    MediaRecord record,
+    int generation,
+    PlaybackTrace trace,
+  ) async {
+    _diagnostics.noteTransportStart('HTTP_PROXY');
+    try {
+      final v1 = await sources.resolveStream(
+        record.fileId,
+        chatId: record.chatId,
+        messageId: record.messageId,
+        // The served Content-Type comes from the message's own mime type;
+        // guessing mp4 for a webm is another way to make AVPlayer refuse.
+        mimeType: record.mimeType,
+        trace: trace,
+        onRecordRefreshed: _absorbRefreshed,
+        onProgress: (update) {
+          if (update.stage != SourceStage.fetching) return;
+          if (!_owns(generation)) return;
+          _bufferFraction = update.fraction;
+          _notify();
+        },
+      );
+      if (!_ownsRecord(generation, record)) {
+        await v1.dispose();
+        return null;
+      }
+      _diagnostics.noteTransportAttempt('HTTP_PROXY', failed: false);
+      _diagnostics.noteDecision(
+        proxyAvailable: true,
+        decision: 'STREAM',
+        reason: 'v1_after_v2_failure',
+        generation: generation,
+      );
+      return v1;
+    } on Object catch (e) {
+      _failedStreamTransport = StreamTransport.httpProxy;
+      _diagnostics.noteTransportAttempt('HTTP_PROXY', failed: true);
+      _diagnostics.noteFallback('V1 也失败：$e');
+      return null;
+    }
+  }
+
+  /// What a failed stream may do next. In order, and nothing else:
+  ///
+  /// 1. the file finished while the transport was failing → play it from disk;
+  /// 2. V2 was the one that failed → one attempt on V1;
+  /// 3. otherwise → null, and the caller shows an error.
+  ///
+  /// There used to be a step before 1 — "no stream was possible, so wait for
+  /// the whole file" — and the device report is what removed it: a 24 MB video
+  /// whose tiled `file_id` had gone stale reported `no_file_record`, downloaded
+  /// the whole file through a *different* id, and filed it as `LOCAL_FILE` with
+  /// `localFileExists=false`. A play that cannot stream says
+  /// `STREAMING_NOT_STARTED` and stops; it does not download the film.
+  Future<PlaySource?> _recoverFromStreamFailure(
+    MediaRecord record,
+    PlaybackTrace trace,
+    Object failure,
+    int generation,
+  ) async {
+    if (!_ownsRecord(generation, record)) return null;
+
+    _diagnostics.noteFallback('$failure');
+    final facts = await sources.inspect(record.fileId);
+    if (!_ownsRecord(generation, record)) return null;
+
+    // 1. The bytes arrived while the transport was dying.
+    if (facts.isPlayableFromDisk) {
+      _diagnostics.noteDecision(
+        proxyAvailable: false,
+        decision: 'LOCAL_FILE',
+        reason: 'completed_while_stream_was_failing',
+        generation: generation,
+      );
+      trace.note = '流式失败后文件已完整，改用本地文件';
+      return PlaySource.file(facts.path);
+    }
+
+    // 2. V2 failed — the loopback proxy reads the same file another way.
+    if (_failedStreamTransport != StreamTransport.httpProxy) {
+      final v1 = await _tryV1(record, generation, trace);
+      if (v1 != null) return v1;
+      if (!_ownsRecord(generation, record)) return null;
+    }
+
+    // 3. Nothing left that does not involve downloading the film.
+    return null;
+  }
+
+  /// One step down the transport chain: V2 → V1 → local file → error.
   ///
   /// The next rung is chosen from a fresh reading of the file, not from the
   /// rung that failed. The device report is the reason: V2 failed to install,
@@ -888,13 +997,18 @@ class FeedController extends ChangeNotifier {
   /// 754,966,576 bytes and carried 20,496,682.
   ///
   /// A complete file here is not a step down at all. It is the answer.
+  ///
+  /// **`FULL_DOWNLOAD` is not a rung.** It used to be the last one, and the
+  /// device measurement is what removed it: V1 stalled at 4.9 MB on a 622 MB
+  /// video, the ladder answered with `start()` → `downloadFile(limit: 0)`,
+  /// and the user waited 162 seconds to watch a file download to 593 MB
+  /// first. The end of this ladder is an error.
   Future<PlaySource?> _nextTransportAfter(
     PlaySource failed,
     MediaRecord record,
     int generation,
-    PlaybackTrace trace, {
-    bool fullDownloadTried = false,
-  }) async {
+    PlaybackTrace trace,
+  ) async {
     // A local file that will not decode is the end of the chain: the bytes are
     // all there and the player still refused them.
     if (!failed.isStreaming) {
@@ -903,6 +1017,7 @@ class FeedController extends ChangeNotifier {
       }
       return null;
     }
+    _fallbackOccurred = true;
     _diagnostics.noteTransportAttempt(
       failed.isResourceLoader ? 'RESOURCE_LOADER' : 'HTTP_PROXY',
       failed: true,
@@ -929,7 +1044,7 @@ class FeedController extends ChangeNotifier {
       return PlaySource.file(facts.path);
     }
 
-    if (decision.source == PlaybackSourceKind.httpProxy && !fullDownloadTried) {
+    if (decision.source == PlaybackSourceKind.httpProxy) {
       // A resource-loader play that never became ready is one transport's
       // failure, not the video's: the loopback proxy reads the same growing
       // file through a completely different path, so it is worth one attempt
@@ -938,59 +1053,25 @@ class FeedController extends ChangeNotifier {
         'v2 player failed, retrying with V1',
         generation: generation,
       );
-      try {
-        final v1 = await sources.resolveStream(
-          record.fileId,
-          chatId: record.chatId,
-          messageId: record.messageId,
-          mimeType: record.mimeType,
-          trace: trace,
-          onRecordRefreshed: _absorbRefreshed,
-          onProgress: (update) {
-            if (update.stage != SourceStage.fetching) return;
-            if (!_owns(generation)) return;
-            _bufferFraction = update.fraction;
-            _notify();
-          },
-        );
-        if (!_ownsRecord(generation, record)) {
-          await v1.dispose();
-          return null;
-        }
-        _diagnostics.noteTransportAttempt('HTTP_PROXY', failed: false);
-        _diagnostics.noteDecision(
-          proxyAvailable: true,
-          decision: 'STREAM',
-          reason: 'v1_after_v2_player_failure',
-          generation: generation,
-        );
-        return v1;
-      } on Object catch (e) {
-        _diagnostics.noteTransportAttempt('HTTP_PROXY', failed: true);
-        _diagnostics.noteFallback('V1 也失败：$e');
-      }
+      final v1 = await _tryV1(record, generation, trace);
+      if (v1 != null) return v1;
+      if (!_ownsRecord(generation, record)) return null;
     }
 
-    if (fullDownloadTried) {
-      if (_ownsRecord(generation, record) && phase != FeedPhase.error) {
-        _fail('此视频无法解码');
-      }
-      return null;
+    // Nothing streamable is left, and the file is still short. The honest next
+    // state is an error. It used to be `_fallbackFullDownload` here, and that
+    // is where the device report's 593 MB / 162 s came from: one transport
+    // stalled on a 622 MB video, and the "fallback" answered by downloading
+    // all of it before showing a frame.
+    if (_ownsRecord(generation, record) && phase != FeedPhase.error) {
+      _diagnostics.noteDecision(
+        decision: 'STOP',
+        reason: decision.reason,
+        generation: generation,
+      );
+      _fail('流式播放失败，已停止下载');
     }
-
-    // Nothing streamable is left: the whole file, then the error screen.
-    final path = await _fallbackFullDownload(
-      record,
-      trace,
-      'player_initialization_failed',
-      generation,
-    );
-    if (path == null) {
-      if (_ownsRecord(generation, record)) _fail('此视频无法解码');
-      return null;
-    }
-    if (!_ownsRecord(generation, record)) return null;
-    return PlaySource.file(path);
+    return null;
   }
 
   /// Marks the growing file behind a stream as in-use and names the transport
@@ -1019,48 +1100,6 @@ class FeedController extends ChangeNotifier {
   void _releaseActiveFile(PlaySource source) {
     if (!source.isStreaming) return;
     if (source.isResourceLoader) player.activeFiles?.release(source.path);
-  }
-
-  /// The streaming path gave up: fall back to the full download the old
-  /// pipeline used, with the same position/list guarantees. Returns null when
-  /// the fallback also failed — the caller then reports the *streaming*
-  /// error, which is the one that describes what actually happened.
-  Future<String?> _fallbackFullDownload(
-    MediaRecord record,
-    PlaybackTrace trace,
-    Object cause,
-    int generation,
-  ) async {
-    trace.mark(PlaybackStage.streamingFallback);
-    trace.note = '流式失败，改用完整下载';
-    _diagnostics.noteFallback('$cause');
-    // Keep the resolver's stable token when it has one; only name the branch
-    // when the failure came from somewhere that did not set a reason.
-    _diagnostics.noteDecision(
-      decision: 'FALLBACK',
-      reason: _diagnostics.decisionReason ?? 'stream_error',
-    );
-    _fallbackOccurred = true;
-    try {
-      return await sources.resolve(
-        record.fileId,
-        chatId: record.chatId,
-        messageId: record.messageId,
-        trace: trace,
-        onRecordRefreshed: _absorbRefreshed,
-        forPlayback: true,
-        onProgress: (update) {
-          if (update.stage != SourceStage.fetching) return;
-          // A fallback that the user already left must not keep painting the
-          // buffering ring on a different video.
-          if (!_ownsRecord(generation, record)) return;
-          _bufferFraction = update.fraction;
-          _notify();
-        },
-      );
-    } on Object {
-      return null;
-    }
   }
 
   /// Warms the next [preloadCount] items — a transfer each, nothing else.
@@ -1281,10 +1320,12 @@ class FeedController extends ChangeNotifier {
   }
 
   /// A real decoder failure (AVPlayerItem.status == failed) is one recoverable
-  /// event: fall back to the full download once while the position and list
-  /// hold, and only surface an error when even that fails. `waitingToPlayAt-
-  /// SpecifiedRate` and a slow proxy wait never reach here — they are not
-  /// errors, and the buffering UI already covers them.
+  /// event: if the file finished downloading while the stream was playing, the
+  /// same bytes can be opened from disk. It is **not** a reason to download the
+  /// rest of the film — this used to call [_fallbackFullDownload], which on a
+  /// 622 MB video meant a decoder hiccup turned into a multi-hundred-megabyte
+  /// download. `waitingToPlayAtSpecifiedRate` and a slow proxy wait never reach
+  /// here; they are not errors, and the buffering UI already covers them.
   Future<void> _checkDecoderError(PlayerHandle? active) async {
     final reporter = active is PlayerErrorReporter ? active as PlayerErrorReporter : null;
     if (reporter == null) return;
@@ -1296,24 +1337,30 @@ class FeedController extends ChangeNotifier {
     _lastTrace?.note = 'decoder error (${errorText.length} chars)';
     final record = current;
     if (record == null) return;
-    // The recovery below awaits a whole fallback download. The video the user
-    // is watching when it finishes may be a different one, so the generation
-    // is taken now and re-checked before anything is installed.
+    // The recovery below awaits a file measurement. The video the user is
+    // watching when it finishes may be a different one, so the generation is
+    // taken now and re-checked before anything is installed.
     final generation = _generation;
     final source = _activeSource;
     if (source != null && source.isStreaming) {
       final trace = _lastTrace;
       if (trace != null && !trace.has(PlaybackStage.streamingFallback)) {
-        final path =
-            await _fallbackFullDownload(record, trace, error, generation);
-        if (path != null && _ownsRecord(generation, record)) {
-          _diagnostics.notePlayerSource(isStreaming: false, url: path);
-          await player.activate(path);
+        final facts = await sources.inspect(record.fileId);
+        if (_ownsRecord(generation, record) && facts.isPlayableFromDisk) {
+          _diagnostics.noteDecision(
+            proxyAvailable: true,
+            decision: 'LOCAL_FILE',
+            reason: 'decoder_error_file_now_complete',
+            generation: generation,
+          );
+          trace.mark(PlaybackStage.streamingFallback);
+          _diagnostics.notePlayerSource(isStreaming: false, url: facts.path);
+          await player.activate(facts.path);
           if (!_ownsRecord(generation, record)) return;
           // The transport served its purpose: release its port / session
           // instead of leaving it behind for the rest of the session.
           await _disposeActiveSource();
-          _activeSource = PlaySource.file(path);
+          _activeSource = PlaySource.file(facts.path);
           _notify();
           return;
         }

@@ -95,14 +95,17 @@ void main() {
       expect(d.needsRedownload, isTrue);
     });
 
-    test('no TDLib record goes to the full download', () {
+    test('no TDLib record is STREAMING_NOT_STARTED, not a download', () {
       final d = decide(const SourceFacts.missing(42));
-      expect(d.source, PlaybackSourceKind.fullDownload);
-      expect(d.code, 'FULL_DOWNLOAD');
+      // The device defect: this used to be fullDownload, and the controller
+      // answered it with downloadFile(limit: 0) for a 24 MB video whose tile
+      // id had gone stale.
+      expect(d.source, PlaybackSourceKind.streamingNotStarted);
+      expect(d.code, 'STREAMING_NOT_STARTED');
       expect(d.reason, 'no_file_record');
     });
 
-    test('an unknown size goes to the full download', () {
+    test('an unknown size is STREAMING_NOT_STARTED, not a download', () {
       const facts = SourceFacts(
         fileId: 7,
         expectedBytes: 0,
@@ -111,7 +114,7 @@ void main() {
         diskSize: 100,
       );
       expect(decide(facts).reason, 'unknown_size');
-      expect(decide(facts).source, PlaybackSourceKind.fullDownload);
+      expect(decide(facts).source, PlaybackSourceKind.streamingNotStarted);
     });
 
     test('without a V2 bridge a growing file falls to HTTP_PROXY', () {
@@ -130,7 +133,8 @@ void main() {
 
     test('force never invents a stream out of an unknown size', () {
       const facts = SourceFacts(fileId: 7, expectedBytes: 0);
-      expect(decide(facts, force: true).source, PlaybackSourceKind.fullDownload);
+      expect(decide(facts, force: true).source,
+          PlaybackSourceKind.streamingNotStarted);
     });
 
     test('a file one byte short is not complete', () {
@@ -169,14 +173,17 @@ void main() {
       expect(d.reason, 'v2_failed_try_v1');
     });
 
-    test('V1 failing sends a short file to the full download', () {
+    test('V1 failing on a short file stops the play', () {
       final d = decideAfterTransportFailure(
         video(disk: 20 * 1024 * 1024, claimed: false),
         failed: PlaybackSourceKind.httpProxy,
         v2Supported: true,
       );
-      expect(d.source, PlaybackSourceKind.fullDownload);
-      expect(d.reason, 'v1_failed_full_download');
+      // The device report in one assertion: this used to be fullDownload, and
+      // a 4.9 MB proxy stall on a 622 MB video became 593 MB downloaded.
+      expect(d.source, PlaybackSourceKind.stop);
+      expect(d.reason, 'v1_failed_stop');
+      expect(d.code, 'STOP');
     });
 
     test('a local file the decoder refused is the end of the chain', () {
@@ -185,7 +192,7 @@ void main() {
         failed: PlaybackSourceKind.localFile,
         v2Supported: true,
       );
-      expect(d.source, PlaybackSourceKind.fullDownload);
+      expect(d.source, PlaybackSourceKind.stop);
       expect(d.reason, 'local_file_refused_by_decoder');
     });
 

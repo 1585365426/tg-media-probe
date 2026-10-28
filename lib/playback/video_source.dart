@@ -137,12 +137,61 @@ class TdFileTransferApi implements FileTransferApi {
     return fileFromResponse(response);
   }
 
+  /// [stat], but a TDLib *rejection* is an error instead of `null`.
+  ///
+  /// The two cases look identical through [stat] and mean opposite things:
+  ///
+  /// * `null` — TDLib has no record **yet**; the id is fine, the metadata is
+  ///   still loading.
+  /// * `FILE_ID_INVALID` / `FILE NOT FOUND` — the id itself is stale; only a
+  ///   re-read of the message can fix it.
+  ///
+  /// Collapsing both into `null` is what produced
+  /// `candidateReason=no_file_record` on a video whose record the diagnostics
+  /// had just printed, followed by a whole-file download of a *different* file
+  /// id once the repair ran.
+  ///
+  /// Not part of [FileTransferApi]: a test double's `stat` already means "no
+  /// record", and widening the interface would force twelve fakes to grow a
+  /// method that does the same thing. [VideoSourceResolver._statStrict] uses it
+  /// when the api is the real one.
+  Future<FileState?> statStrict(int fileId) async {
+    final response = await client.request(
+      getFile(fileId),
+      timeout: const Duration(seconds: 20),
+    );
+    final error = errorText(response);
+    if (error != null) {
+      // `stat` swallows this into `null`, which reads as "nothing yet". A
+      // rejected id is not nothing: it is the reason the file the user tapped
+      // is reachable only through the message.
+      throw VideoSourceException(error);
+    }
+    return fileFromResponse(response);
+  }
+
   @override
   Future<void> start(
     int fileId, {
     DownloadCaller caller = DownloadCaller.unknown,
     String cause = '',
   }) async {
+    // The last door before the wire. `limit: 0` means "down to the end of the
+    // file", and once a play has entered a streaming transport that answer is
+    // never acceptable: 4.9 MB of proxy stall used to turn into 622 MB of
+    // download and a 162-second wait for the first frame. Refusing here means
+    // no future call site can reintroduce it by accident.
+    if (!audit.wholeFileAllowed) {
+      audit.noteBlockedWholeFile(
+        fileId: fileId,
+        caller: caller,
+        cause: cause,
+      );
+      throw VideoSourceException(
+        'AUTO_FULL_DOWNLOAD_BLOCKED（流式播放期间禁止整文件下载，'
+        'caller=${caller.label}）',
+      );
+    }
     // priority 32 is the same value the probe chain uses: high enough to beat
     // thumbnail fetches, low enough not to starve the chat list.
     audit.record(
@@ -286,7 +335,12 @@ enum PlaySourceKind {
 }
 
 class PlaySource {
-  const PlaySource.file(this.path)
+  /// [origin] is what the diagnostics report as `finalSource`. It defaults to
+  /// `LOCAL_FILE`, which is right for a file that was already complete on
+  /// disk; a file that only exists because something waited out a whole
+  /// download must say `FULL_DOWNLOAD` — otherwise a 593 MB download to get a
+  /// first frame is filed as if the video had always been local.
+  const PlaySource.file(this.path, {this.origin = 'LOCAL_FILE'})
       : url = path,
         kind = PlaySourceKind.file,
         proxy = null,
@@ -296,7 +350,8 @@ class PlaySource {
   const PlaySource.stream(this.url, this.path, this.proxy)
       : kind = PlaySourceKind.httpStream,
         session = null,
-        onDispose = null;
+        onDispose = null,
+        origin = 'HTTP_PROXY';
 
   /// V2: [url] is a `tgmedia://` URL the native loader answers, [path] is the
   /// growing TDLib file and [session] owns the byte supply.
@@ -306,7 +361,12 @@ class PlaySource {
     this.session, [
     this.onDispose,
   ])  : kind = PlaySourceKind.resourceLoader,
-        proxy = null;
+        proxy = null,
+        origin = 'RESOURCE_LOADER';
+
+  /// The label `finalSource` carries: `LOCAL_FILE`, `FULL_DOWNLOAD`,
+  /// `HTTP_PROXY` or `RESOURCE_LOADER`.
+  final String origin;
 
   /// What the player opens: a local path, a loopback URL (V1) or a
   /// `tgmedia://` URL (V2). Never a Telegram cloud URL.
@@ -357,6 +417,23 @@ enum StreamTransport {
 
   /// V2: AVAssetResourceLoader.
   resourceLoader,
+}
+
+/// Streaming never started, and not because a transport failed.
+///
+/// The message carries the decision reason verbatim (`no_file_record`,
+/// `unknown_size`) so the screen and the acceptance report name the same
+/// thing. This exception exists to be *not* a fallback trigger: before it, the
+/// resolver signalled this case with a plain [VideoSourceException], the
+/// controller caught that with the same handler it uses for a stalled proxy,
+/// and the handler's answer was `downloadFile(limit: 0)`.
+class StreamingNotStarted extends VideoSourceException {
+  StreamingNotStarted(this.reason)
+      : super(reason == 'unknown_size'
+            ? '流式播放未启动（文件大小未知）'
+            : '流式播放未启动（$reason）');
+
+  final String reason;
 }
 
 /// The absolute ceiling was hit: the transfer was still being attempted when
@@ -717,7 +794,7 @@ class VideoSourceResolver {
           decision: 'LOCAL_FILE',
           reason: 'streaming_disabled_by_preference',
         );
-        return PlaySource.file(path);
+        return PlaySource.file(path, origin: 'FULL_DOWNLOAD');
       });
     }
     final future = _streamWithRepair(
@@ -732,6 +809,18 @@ class VideoSourceResolver {
     );
     inflight[fileId] = future;
     return future.whenComplete(() => inflight.remove(fileId));
+  }
+
+  /// Reads the TDLib record, keeping "rejected id" and "no record yet" apart.
+  ///
+  /// [TdFileTransferApi.stat] answers `null` for both; that collapse is what
+  /// let a stale `file_id` look like a video with no record, which the decision
+  /// layer then read as "nothing honest to serve" — and the answer to that used
+  /// to be a whole-file download under the *repaired* id.
+  Future<FileState?> _statStrict(int fileId) {
+    final api = this.api;
+    if (api is TdFileTransferApi) return api.statStrict(fileId);
+    return api.stat(fileId);
   }
 
   /// Reads every fact the decision is allowed to use.
@@ -880,6 +969,14 @@ class VideoSourceResolver {
           throw VideoSourceException('文件已失效（TDLib 返回 ${e.message}），消息里也取不到新文件');
         }
         if (fresh.fileId != activeId) {
+          // The id moved. Recorded as its own line: a play that downloads a
+          // different file than the one tapped has to say so, and this is the
+          // only place that knows both ids.
+          _diagnostics.noteFileIdRemap(
+            oldId: activeId,
+            newId: fresh.fileId,
+            reason: 'tabled_id_rejected_re_read_message',
+          );
           activeId = fresh.fileId;
           trace?.mark(PlaybackStage.fileIdRefreshed, bytes: fresh.sizeBytes);
           trace?.note = 'file_id 已从消息重新获取';
@@ -887,6 +984,9 @@ class VideoSourceResolver {
         }
         onRecordRefreshed?.call(fresh);
         continue;
+      } on StreamingNotStarted {
+        // A decision, not a transport failure: no repair, no retry, no download.
+        rethrow;
       } on VideoSourceStalled {
         rethrow;
       } on VideoSourceTimeout {
@@ -916,12 +1016,39 @@ class VideoSourceResolver {
     trace?.mark(PlaybackStage.resolveStarted);
     onProgress?.call(const VideoSourceUpdate(stage: SourceStage.probing));
 
-    final existing = await api.stat(fileId);
+    // One id repair per attempt. Thrown as [_MissingFile] so the caller's loop
+    // re-reads the message, exactly like a TDLib rejection does.
+    var repairedId = false;
+
+    FileState? existing;
+    try {
+      // `statStrict`, not `stat`: a rejected id must be repairable, and
+      // swallowing the error into `null` is what made a stale `file_id` look
+      // like a video with no TDLib record at all.
+      existing = await _statStrict(fileId);
+    } on VideoSourceException catch (e) {
+      final text = e.message;
+      if (_looksMissing(text.toUpperCase())) {
+        throw _MissingFile(text);
+      }
+      rethrow;
+    }
     if (existing != null) {
       trace?.mark(PlaybackStage.fileRecordKnown,
           bytes: existing.downloadedSize);
       if (existing.expectedSize > 0) trace?.expectedBytes = existing.expectedSize;
     }
+    // Who asked for which id, and which id TDLib actually answered for. A
+    // report that prints "record exists" and "no_file_record" in the same
+    // block is describing two different ids; this line is where that shows.
+    _diagnostics.noteFileIdResolve(
+      clickedFileId: _diagnostics.clickedFileId ?? fileId,
+      recordFileId: _diagnostics.recordFileId ?? fileId,
+      resolvedFileId: fileId,
+      tdlibFileId: existing?.id ?? 0,
+      messageId: messageId,
+      generation: _diagnostics.generation,
+    );
     // Start of a new play's evidence: ids and total come from TDLib's own file
     // record, never from a UI assumption. `streamingEnabled` flips to true
     // later, only if the resolver really takes the streaming branch.
@@ -973,23 +1100,41 @@ class VideoSourceResolver {
       return PlaySource.file(facts.path);
     }
 
-    // Nothing honest to serve yet: no record, or no size to put in
-    // Content-Range. The caller's full-download path owns both.
-    if (decision.source == PlaybackSourceKind.fullDownload) {
+    // No record, or no size to put in Content-Range. This is *not* an
+    // instruction to download the whole file any more. The device report:
+    //
+    //   record file=4999 size=24316497 ... match=YES
+    //   candidateReason=no_file_record
+    //   playbackDecision=FULL_DOWNLOAD
+    //   DOWNLOAD AUDIT #1 file=4999 limit=WHOLE_FILE grew=0
+    //                    #2 file=2221 limit=WHOLE_FILE grew=24316497
+    //
+    // The record existed; TDLib just did not answer for that id, and `stat`
+    // turned the rejection into the same `null` it uses for "nothing yet". The
+    // id had moved to 2221, and the only code that could have noticed was the
+    // repair loop — which never ran, because "no record" was treated as a
+    // transport verdict instead of a stale id.
+    if (decision.source == PlaybackSourceKind.streamingNotStarted ||
+        decision.source == PlaybackSourceKind.fullDownload) {
+      // A missing record is a repairable id problem: re-read the message and
+      // let the caller's repair loop re-resolve. It gets exactly one attempt.
+      if (!repairedId && metadata != null && chatId != null && messageId != null) {
+        repairedId = true;
+        trace?.errorCategory = 'streamingUnavailable';
+        throw _MissingFile('no_file_record（TDLib 无 file_id=$fileId 的记录）');
+      }
       trace?.mark(PlaybackStage.streamingModeSelected);
       trace?.errorCategory = 'streamingUnavailable';
       _diagnostics.noteDecision(
         candidate: false,
         candidateReason: decision.reason,
-        decision: 'FALLBACK',
+        decision: 'STREAMING_NOT_STARTED',
         reason: decision.reason,
         generation: generation,
       );
-      throw VideoSourceException(
-        decision.reason == 'unknown_size'
-            ? '流式播放不可用（文件大小未知）'
-            : '流式播放不可用（${decision.reason}）',
-      );
+      // Not a fallback: there is nothing to fall back *to* that does not
+      // involve downloading the file. The play stops and the screen says why.
+      throw StreamingNotStarted(decision.reason);
     }
 
     // TDLib says finished, the disk says otherwise. Nothing more will ever be
@@ -1021,6 +1166,14 @@ class VideoSourceResolver {
     trace?.mark(PlaybackStage.streamingModeSelected);
     _diagnostics.noteDecision(candidate: true, generation: generation);
     _diagnostics.noteStreamingSelected(generation: generation);
+    // A stream is really being attempted from here, so the whole-file door
+    // closes for the rest of this play. Set *after* the decision, not before:
+    // "size unknown / no record" is a play that never had a stream, and it
+    // must still be able to wait for the file. What is forbidden is a *failed*
+    // stream deciding to download the film.
+    _diagnostics.forbidWholeFile(
+      transport == StreamTransport.resourceLoader ? 'streaming:V2' : 'streaming:V1',
+    );
     final watch = _LiveFileWatch(
       api,
       fileId,
@@ -1473,6 +1626,11 @@ class VideoSourceResolver {
           throw VideoSourceException('文件已失效（TDLib 返回 ${e.message}），消息里也取不到新文件');
         }
         if (fresh.fileId != activeId) {
+          _diagnostics.noteFileIdRemap(
+            oldId: activeId,
+            newId: fresh.fileId,
+            reason: 'tdlib_rejected_id_re_read_message',
+          );
           activeId = fresh.fileId;
           trace?.mark(PlaybackStage.fileIdRefreshed, bytes: fresh.sizeBytes);
           trace?.note = 'file_id 已从消息重新获取';
@@ -1529,7 +1687,18 @@ class VideoSourceResolver {
     trace?.mark(PlaybackStage.resolveStarted);
     onProgress?.call(const VideoSourceUpdate(stage: SourceStage.probing));
 
-    final existing = await api.stat(fileId);
+    FileState? existing;
+    try {
+      // `statStrict` first: a rejected id must reach the repair loop *before*
+      // a `downloadFile` is sent for it. The device log had
+      // `#1 caller=FULL_DOWNLOAD file=4999 ... grew=0` — one request spent on
+      // an id TDLib had already disowned.
+      existing = await _statStrict(fileId);
+    } on VideoSourceException catch (e) {
+      final text = e.message;
+      if (_looksMissing(text.toUpperCase())) throw _MissingFile(text);
+      rethrow;
+    }
     if (existing != null) {
       trace?.mark(PlaybackStage.fileRecordKnown,
           bytes: existing.downloadedSize);
@@ -1661,13 +1830,15 @@ class VideoSourceResolver {
       // `winner` already listens to `abort`, so a watchdog firing during
       // `start()` cannot become an unhandled error.
       try {
-        // The one place a whole-file request is correct: this *is* the
-        // full-download rung, the user is waiting for a complete cache, and
-        // the caller badge says so in the audit.
+        // The one place a whole-file request is correct: the play never had a
+        // stream to fail (unknown size, no record, streaming switched off) and
+        // the user is waiting for a complete cache. The caller badge says so
+        // in the audit, and [DownloadAudit.wholeFileAllowed] is the gate that
+        // keeps a *failed* stream from reaching this line.
         await api.start(
           fileId,
           caller: DownloadCaller.fullDownload,
-          cause: 'full download wait',
+          cause: 'whole file: no stream attempted',
         );
       } on Object {
         // The abort future is nobody's business now; mark it handled so a late
@@ -1982,6 +2153,16 @@ class _LiveFileWatch implements FileProgressWatch, WindowContinuation {
     // that has already stopped.
     return _windowOffset == _requestedFrom && _prefix >= _requestedLimit - 1;
   }
+
+  /// The window TDLib was last given. Printed in the stall message so a device
+  /// report says whether a stall happened *inside* a window or at its edge —
+  /// the 4.9 MB proxy stall cannot be told apart from a spent window without
+  /// these two numbers.
+  @override
+  int get windowFrom => _requestedFrom;
+
+  @override
+  int get windowLimit => _requestedLimit;
 
   @override
   Future<void> continueWindow({

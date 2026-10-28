@@ -192,6 +192,16 @@ abstract class WindowContinuation {
   /// The offset the reader is waiting on, recorded so a download request can
   /// name the player's own request it was issued for.
   void markRead(int offset);
+
+  /// The window TDLib was last given. `-1` / `0` before the first request.
+  ///
+  /// Read by the stall message: "stopped growing at 4.9 MB" means two very
+  /// different things depending on whether the window was `0+16 MB` (the
+  /// transfer died inside its window) or `0+4.9 MB` (the window was spent and
+  /// nobody extended it).
+  int get windowFrom;
+
+  int get windowLimit;
 }
 
 /// One HTTP exchange, recorded so a device report can show what the player
@@ -1081,8 +1091,19 @@ class StreamProxyServer {
     );
     if (!ok) {
       throw StreamProxyException(
-          '播放数据停止增长（$cursor，可读 ${watch.headBytes}B，$_windowLabel）');
+          '播放数据停止增长（$cursor，可读 ${watch.headBytes}B，$_windowLabel'
+          '${_windowNumbers()}）');
     }
+  }
+
+  /// `，窗口 from+limit 已尽=true/false` — the two numbers that separate "the
+  /// transfer died inside its window" from "the window was spent".
+  String _windowNumbers() {
+    final Object extension = watch;
+    if (extension is! WindowContinuation) return '';
+    final from = extension.windowFrom;
+    final limit = extension.windowLimit;
+    return '，窗口 $from+$limit 已尽=${extension.windowExhausted}';
   }
 
   /// Waits until [ready] is true. Three ways out, and nothing else:
