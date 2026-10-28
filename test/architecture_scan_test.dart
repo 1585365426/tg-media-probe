@@ -275,4 +275,46 @@ void main() {
           reason: 'completed 只看 TDLib 的 claim，会把已完整的文件报成未完成');
     });
   });
+
+  group('a stuck play must still produce a verdict', () {
+    // Two device runs ended with a frozen screen and no report. Both were the
+    // same shape: some await that never completes, and no deadline anywhere
+    // above it. These gates keep the deadlines in place.
+    test('the player load has a deadline', () {
+      final code = _code(
+        File('$root/lib/playback/player_slot.dart').readAsStringSync(),
+      );
+      expect(code.contains('await handle.load().timeout('), isTrue,
+          reason: 'handle.load() 没有超时：AVPlayer 等不到字节就永远不返回，'
+              '整场播放既无首帧也无错误');
+      expect(code.contains('loadTimeout'), isTrue,
+          reason: '超时值必须可配置，测试才能不等 25 秒');
+    });
+
+    test('waiting for the whole file stops when the download is dead', () {
+      final body = _code(
+        _memberBody(
+          File('$root/lib/ui/feed_controller.dart').readAsStringSync(),
+          '  Future<PlaySource?> _waitForFullDownload(',
+        ),
+      );
+      expect(body.contains('FullDownloadState.failed'), isTrue,
+          reason: '_waitForFullDownload 必须读取 Downloader 的失败裁决，'
+              '否则一个死掉的传输会让它空等 30 分钟');
+    });
+
+    test('the downloader watches for silence', () {
+      final code = _code(
+        File('$root/lib/playback/downloader.dart').readAsStringSync(),
+      );
+      expect(code.contains('DOWNLOAD_STALL'), isTrue,
+          reason: '没有停滞检测，TDLib 停下之后没有任何层知道');
+      expect(code.contains('_api.stat('), isTrue,
+          reason: '判定停滞前必须向 TDLib 复核一次，否则会重启一条健康的传输');
+      // And it still may not send a ranged window — that stays the player's
+      // deletion, not the download authority's new toy.
+      expect(code.contains('startRange('), isFalse,
+          reason: 'Downloader 仍然只发整文件请求');
+    });
+  });
 }

@@ -906,10 +906,16 @@ class FeedController extends ChangeNotifier {
       // The player's own message is the only thing that says *why* the item
       // never became ready — keep it verbatim instead of a generic line.
       _diagnostics.notePlayerFailed('$e', generation: generation);
+      // A load that ran out of time is not a decoder failure: the loader was
+      // still waiting for bytes. The report has to separate the two, because
+      // the fix is different (more bytes vs. a different file).
+      final timedOut = e is PlayerError && e.cause is PlayerLoadTimeout;
       _diagnostics.noteDecision(
         proxyAvailable: source.isStreaming,
         decision: 'FALLBACK',
-        reason: 'player_initialization_failed',
+        reason: timedOut
+            ? 'player_load_timeout'
+            : 'player_initialization_failed',
         generation: generation,
       );
       trace.note = source.isResourceLoader
@@ -1045,6 +1051,23 @@ class FeedController extends ChangeNotifier {
         session?.resolvedFileId = record.fileId;
         trace.mark(PlaybackStage.fileCompleted, bytes: facts.diskSize);
         return PlaySource.file(facts.path);
+      }
+      // A transfer the Downloader has given up on will never produce the
+      // missing bytes. Waiting the full budget for it is how a dead download
+      // became half an hour of spinner with no report: the stall watchdog
+      // declares it failed in about a minute, and this loop has to read that
+      // verdict instead of polling past it.
+      final job = sources.downloader.jobFor(record.fileId);
+      if (job != null && job.state == FullDownloadState.failed) {
+        _diagnostics.noteDecision(
+          proxyAvailable: false,
+          decision: 'STOP',
+          reason: 'download_failed_while_waiting:'
+              '${job.failureReason ?? '-'}',
+          generation: generation,
+        );
+        trace.note = '整文件下载已失败：${job.failureReason ?? '未知原因'}';
+        return null;
       }
       await Future<void>.delayed(const Duration(milliseconds: 500));
     }

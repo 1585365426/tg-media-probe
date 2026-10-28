@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:tg_media_probe/playback/playback_lifecycle.dart';
@@ -26,6 +28,7 @@ class FakePlayer implements PlayerHandle {
     this.tracker, {
     required this.loadDelay,
     required this.failLoad,
+    this.hangLoad = false,
   });
 
   @override
@@ -33,6 +36,9 @@ class FakePlayer implements PlayerHandle {
   final PlayingTracker tracker;
   final Duration loadDelay;
   final bool failLoad;
+
+  /// Never completes `load()`: AVPlayer waiting for bytes it never got.
+  final bool hangLoad;
 
   bool _playing = false;
   bool _disposed = false;
@@ -46,6 +52,7 @@ class FakePlayer implements PlayerHandle {
 
   @override
   Future<void> load() async {
+    if (hangLoad) return Completer<void>().future;
     if (loadDelay > Duration.zero) await Future<void>.delayed(loadDelay);
     if (failLoad) throw StateError('cannot decode $path');
     _loaded = true;
@@ -78,10 +85,15 @@ class FakePlayer implements PlayerHandle {
 }
 
 class FakeFactory implements PlayerFactory {
-  FakeFactory(this.tracker, {this.slowPaths = const <String>{}});
+  FakeFactory(
+    this.tracker, {
+    this.slowPaths = const <String>{},
+    this.hangingPaths = const <String>{},
+  });
 
   final PlayingTracker tracker;
   final Set<String> slowPaths;
+  final Set<String> hangingPaths;
 
   @override
   PlayerHandle create(String path) => FakePlayer(
@@ -91,6 +103,7 @@ class FakeFactory implements PlayerFactory {
             ? const Duration(milliseconds: 50)
             : Duration.zero,
         failLoad: path.contains('broken'),
+        hangLoad: hangingPaths.contains(path),
       );
 }
 
@@ -206,5 +219,34 @@ void main() {
       expect(controller.liveCount, 0);
       expect(binder.lastReason, 'tab:0');
     });
+  });
+
+  test('a load that never finishes fails instead of hanging the play', () async {
+    // The device shape this comes from: a 638 MB file at 0.1 %, AVPlayer
+    // waiting for a `moov` box at the far end, `initialize()` never returning.
+    // Without a deadline the play produced no frame, no error, no fallback —
+    // and therefore no diagnostics to look at.
+    final hanging = FakeFactory(tracker, hangingPaths: {'stuck.mp4'});
+    final slot = SinglePlayerController(
+      factory: hanging,
+      activeFiles: ActiveFileRegistry(),
+      loadTimeout: const Duration(milliseconds: 40),
+    );
+
+    Object? thrown;
+    try {
+      await slot.activate('stuck.mp4');
+    } on Object catch (e) {
+      thrown = e;
+    }
+
+    expect(thrown, isA<PlayerError>());
+    final error = thrown! as PlayerError;
+    // The cause has to name the timeout: "will not decode" and "still waiting
+    // for bytes" lead to different work, and a generic PlayerError hides which
+    // one happened.
+    expect(error.cause, isA<PlayerLoadTimeout>());
+    expect('${error.cause}', contains('没有就绪'));
+    expect(slot.liveCount, 0, reason: 'a timed-out handle must be released');
   });
 }

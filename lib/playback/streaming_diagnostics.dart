@@ -333,6 +333,10 @@ class StreamingDiagnostics extends ChangeNotifier {
   /// Where the `moov` atom sits, scanned from the bytes on disk.
   MoovPosition _moov = MoovPosition.unknown;
 
+  /// `moov` box span, when the scan could compute it (`-1` otherwise).
+  int _moovStart = -1;
+  int _moovEnd = -1;
+
   /// The last FILE_ID_RESOLVE snapshot — see [noteFileIdResolve].
   int? _resolveClickedId;
   int? _resolveRecordId;
@@ -356,6 +360,13 @@ class StreamingDiagnostics extends ChangeNotifier {
 
   int _totalBytes = 0;
   int _downloadedBytes = 0;
+
+  /// Last time `downloaded` actually grew, as wall-clock millis.
+  ///
+  /// The question a frozen play has to answer is "is anything still arriving",
+  /// and a percentage cannot answer it: 0.1 % looks identical whether TDLib is
+  /// writing or dead. This is the number that tells them apart.
+  int _lastGrowthAt = 0;
   int _headBytes = 0;
   int _downloadOffset = 0;
   int _windowStart = 0;
@@ -586,6 +597,16 @@ class StreamingDiagnostics extends ChangeNotifier {
 
   String _percentString() =>
       '${(downloadedPercent * 100).toStringAsFixed(1)}%';
+
+  /// Seconds since the download last moved. `-` before the first byte.
+  ///
+  /// Read together with `isDownloading`: `true` + a growing silence is exactly
+  /// the "0.1 % and frozen" shape, and it is the only pair that can say it.
+  String get transferSilenceSeconds {
+    if (_lastGrowthAt == 0) return '-';
+    final ms = DateTime.now().millisecondsSinceEpoch - _lastGrowthAt;
+    return '${ms <= 0 ? 0 : (ms / 1000).floor()}';
+  }
 
   /// `match=YES/NO/-` for the panel: `-` means one side has no size yet, so
   /// the comparison would be a guess.
@@ -1150,6 +1171,21 @@ class StreamingDiagnostics extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Same verdict, plus the box offsets when the layout allowed computing them.
+  ///
+  /// A tail-moov report has to name *where* the tail starts: "moov=afterMdat"
+  /// alone cannot be told apart from "the player is waiting for a box 638 MB
+  /// away", and that distance is the whole diagnosis.
+  void noteMoovScan(MoovScan scan, {int? generation}) {
+    if (_sealedResult || _stale(generation)) return;
+    _moov = scan.position;
+    _moovStart = scan.start;
+    _moovEnd = scan.end;
+    _note('moov=${scan.position.name} at=${scan.start}..${scan.end} '
+        'len=${scan.length}');
+    notifyListeners();
+  }
+
   /// Records why the play failed. Called once, from the failure path, so the
   /// panel and the exported report name the same reason the user was shown.
   void noteFailure(PlaybackFailure kind, {String? message, int? generation}) {
@@ -1263,6 +1299,8 @@ class StreamingDiagnostics extends ChangeNotifier {
     _firstReadError = null;
     _v2StopReason = null;
     _moov = MoovPosition.unknown;
+    _moovStart = -1;
+    _moovEnd = -1;
     _playerCreatedMillis = null;
     _playerReadyMillis = null;
     _playerFailedMillis = null;
@@ -1370,6 +1408,10 @@ class StreamingDiagnostics extends ChangeNotifier {
     int? generation,
   }) {
     if (_sealedResult || _stale(generation)) return;
+    if (downloadedBytes > _downloadedBytes ||
+        downloadOffset != _downloadOffset) {
+      _lastGrowthAt = DateTime.now().millisecondsSinceEpoch;
+    }
     _downloadedBytes = downloadedBytes;
     if (totalBytes > 0) _totalBytes = totalBytes;
     _downloadOffset = downloadOffset;
@@ -1642,17 +1684,23 @@ class StreamingDiagnostics extends ChangeNotifier {
         // Who asked TDLib for bytes, and which request moved them. The header
         // line is the counter; the calls below it are the evidence.
         ...downloadAudit.summary(max: 4),
+        // What the stall watchdog saw, in its own words. Without these lines a
+        // report of a frozen play says "0.1 %" and nothing else; with them it
+        // says whether TDLib was silent, for how long, and what was done.
+        for (final note in downloadAudit.notes) 'event $note',
         // `completed` says whether the bytes are there; the evidence suffix
         // says which fact proved it. A file that was already whole when the
         // play started never produces a completion update, and the panel used
         // to print `disk=… FULL` / `100.0%` / `completed=false` together.
         'isDownloading=${_isDownloading ? 'true' : 'false'} '
             'completed=${transferCompleted ? 'true' : 'false'} '
-            'evidence=$completionEvidence',
+            'evidence=$completionEvidence '
+            'silent=${transferSilenceSeconds}s',
         'range=${_lastRange ?? '-'} requests=$_rangeRequests '
             'status=${_lastStatus ?? '-'} 206x$_partialContentCount',
         'range truncated=$_truncatedCount forward=$_forwardRangeRequests '
-            'moov=${_moov.name}',
+            'moov=${_moov.name}'
+            '${_moovStart >= 0 ? ' moovAt=$_moovStart..$_moovEnd' : ''}',
         if (_playerSourceType == 'RESOURCE_LOADER' || _rlRequests > 0) ...[
           'v2 sessions=$_rlSessions req=$_rlRequests resp=$_rlResponds '
               'bytes=$_rlBytes stalls=$_rlStalls',

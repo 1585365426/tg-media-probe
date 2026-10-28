@@ -14,6 +14,7 @@ import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:tg_media_probe/data/media_record.dart';
 import 'package:tg_media_probe/playback/playback_trace.dart';
+import 'package:tg_media_probe/playback/mp4_probe.dart';
 import 'package:tg_media_probe/playback/streaming_diagnostics.dart';
 import 'package:tg_media_probe/playback/video_source.dart';
 import 'package:tg_media_probe/td/td_models.dart';
@@ -1430,6 +1431,56 @@ void main() {
       final report = diag.acceptanceLines().join('\n');
       expect(report, contains('WHOLE_FILE_DOWNLOADS=1 byDownloader=0 byOther=1'));
       expect(report, contains('WHOLE_FILE_BY_OTHER: PLAYER file=5626'));
+    });
+  });
+
+  group('a frozen play still produces evidence', () {
+    // The device report this comes from: `512 KB / 638 MB (0.1 %)`, no frame,
+    // and nothing in the panel that says whether TDLib was still writing.
+    test('silence is published next to isDownloading', () {
+      final diag = StreamingDiagnostics();
+      diag.beginPlay(fileId: 7, streaming: true, totalBytes: 638582784);
+      diag.updateTransfer(
+        downloadedBytes: 524288,
+        totalBytes: 638582784,
+        downloadOffset: 0,
+        completed: false,
+        isDownloading: true,
+      );
+
+      final panel = diag.panelLines().join('\n');
+      // `true` plus a growing silence is the whole diagnosis: the job says it
+      // is running and no byte is arriving.
+      expect(panel, contains('isDownloading=true'));
+      expect(panel, contains('silent='));
+      expect(panel, contains('0.1%'));
+    });
+
+    test('watchdog events reach the panel verbatim', () {
+      final diag = StreamingDiagnostics();
+      diag.beginPlay(fileId: 7, streaming: true, totalBytes: 638582784);
+      diag.downloadAudit.note(
+        'DOWNLOAD_STALL file=7 age=15s retries=1/3 reached=524288 '
+        'expected=638582784',
+      );
+
+      final panel = diag.panelLines().join('\n');
+      expect(panel, contains('event DOWNLOAD_STALL file=7'));
+      expect(panel, contains('reached=524288'));
+    });
+
+    test('a tail moov reports where that tail starts', () {
+      final diag = StreamingDiagnostics();
+      diag.beginPlay(fileId: 7, streaming: true, totalBytes: 638582784);
+      diag.noteMoovScan(
+        const MoovScan(MoovPosition.afterMdat, start: 638500000, end: 638582783),
+      );
+
+      final panel = diag.panelLines().join('\n');
+      expect(panel, contains('moov=afterMdat'));
+      expect(panel, contains('moovAt=638500000..638582783'));
+      expect(diag.diagnosticLines().join('\n'),
+          contains('moov=afterMdat at=638500000..638582783'));
     });
   });
 }

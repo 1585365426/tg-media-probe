@@ -91,4 +91,64 @@ void main() {
       MoovPosition.unknown,
     );
   });
+
+  group('scan reports the offsets a tail fetch would need', () {
+    test('a sized mdat pins moov to the byte right after it', () {
+      // ftyp(32) + mdat(4096) + moov — a 638 MB Telegram film with the index at
+      // the end. `afterMdat` alone cannot tell anyone how far away it is.
+      final head = boxes(<(String, int)>[
+        ('ftyp', 24),
+        ('mdat', 4096),
+      ]);
+      final total = head.length + 8 + 100; // + moov box
+
+      final scan = Mp4Probe.scan(head, total: total);
+
+      expect(scan.position, MoovPosition.afterMdat);
+      expect(scan.start, head.length);
+      expect(scan.end, total - 1);
+      expect(scan.isTail, isTrue);
+      expect(scan.length, total - head.length);
+    });
+
+    test('a head moov reports its own span and is not a tail', () {
+      final bytes = boxes(<(String, int)>[
+        ('ftyp', 24),
+        ('moov', 100),
+        ('mdat', 4096),
+      ]);
+
+      final scan = Mp4Probe.scan(bytes, total: bytes.length);
+
+      expect(scan.position, MoovPosition.head);
+      expect(scan.start, 32);
+      expect(scan.end, 32 + 8 + 100 - 1);
+      expect(scan.isTail, isFalse);
+    });
+
+    test('an mdat that runs to EOF cannot locate anything after it', () {
+      final builder = BytesBuilder();
+      final header = ByteData(8)
+        ..setUint32(0, 0) // size 0: this box owns the rest of the file
+        ..setUint8(4, 'm'.codeUnitAt(0))
+        ..setUint8(5, 'd'.codeUnitAt(0))
+        ..setUint8(6, 'a'.codeUnitAt(0))
+        ..setUint8(7, 't'.codeUnitAt(0));
+      builder.add(header.buffer.asUint8List());
+      builder.add(List<int>.filled(64, 0));
+
+      final scan = Mp4Probe.scan(builder.toBytes(), total: 1 << 20);
+
+      expect(scan.position, MoovPosition.unknown);
+      expect(scan.start, -1);
+    });
+
+    test('locate still answers the old question', () {
+      final bytes = boxes(<(String, int)>[
+        ('ftyp', 24),
+        ('mdat', 4096),
+      ]);
+      expect(Mp4Probe.locate(bytes), MoovPosition.afterMdat);
+    });
+  });
 }

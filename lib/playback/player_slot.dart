@@ -63,6 +63,24 @@ class PlayerError implements Exception {
   String toString() => 'PlayerError($path): $cause';
 }
 
+/// `load()` did not finish inside [SinglePlayerController.loadTimeout].
+///
+/// Its own type because it is not a decoder error: AVPlayer is still spinning,
+/// waiting for bytes it has not been given. The distinction decides what the
+/// report says — "the file will not decode" and "the loader was still waiting
+/// at 0.1 %" are different failures with different fixes.
+class PlayerLoadTimeout implements Exception {
+  PlayerLoadTimeout(this.path, this.waited);
+
+  final String path;
+  final Duration waited;
+
+  @override
+  String toString() =>
+      '播放器在 ${waited.inSeconds}s 内没有就绪（文件仍未满足解码所需，'
+      '不是解码失败）: $path';
+}
+
 /// Keeps at most one live video player.
 ///
 /// Guarantees, all asserted by tests:
@@ -75,10 +93,25 @@ class PlayerError implements Exception {
 ///   cache cleaner cannot delete a file mid-playback;
 /// * `release()` / `releaseAll()` are safe to call repeatedly.
 class SinglePlayerController {
-  SinglePlayerController({required this.factory, this.activeFiles});
+  SinglePlayerController({
+    required this.factory,
+    this.activeFiles,
+    this.loadTimeout = const Duration(seconds: 25),
+  });
 
   final PlayerFactory factory;
   final ActiveFileRegistry? activeFiles;
+
+  /// How long `load()` may take before the play is called failed.
+  ///
+  /// `video_player`'s `initialize()` completes only when the item becomes
+  /// `readyToPlay`. A resource loader that is still waiting for bytes (moov at
+  /// the tail, or a transfer that stopped at 0.1 %) never gets there, so the
+  /// future never completes: no frame, no error, no fallback, and the
+  /// diagnostics report the user needs is never written. 25 s is past every
+  /// honest wait (the loader's own WAIT_TIMEOUT is 10 s) and short enough that
+  /// a stuck play produces a verdict instead of a spinner.
+  final Duration loadTimeout;
 
   PlayerHandle? _active;
   String? _activePath;
@@ -109,7 +142,10 @@ class SinglePlayerController {
     activeFiles?.markInUse(path, reason: 'player');
 
     try {
-      await handle.load();
+      await handle.load().timeout(
+        loadTimeout,
+        onTimeout: () => throw PlayerLoadTimeout(path, loadTimeout),
+      );
       if (generation != _generation) {
         await _releaseHandle(handle, path);
         return;

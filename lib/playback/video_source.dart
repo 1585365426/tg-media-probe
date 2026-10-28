@@ -1755,7 +1755,13 @@ class VideoSourceResolver {
       final handle = await file.open();
       try {
         final bytes = await handle.read(take);
-        _diagnostics.noteMoov(Mp4Probe.locate(bytes), generation: generation);
+        // The offsets matter as much as the verdict: `afterMdat` on a 638 MB
+        // file means the player is waiting for a box that starts 638 MB into a
+        // file at 0.1 %, and that distance is the diagnosis.
+        _diagnostics.noteMoovScan(
+          Mp4Probe.scan(bytes, total: watch.expectedBytes),
+          generation: generation,
+        );
       } finally {
         await handle.close();
       }

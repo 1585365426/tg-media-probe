@@ -200,6 +200,24 @@ class DownloadAudit {
 
   void noteArchitectureViolation(String detail) => _violations.add(detail);
 
+  /// Free-form transfer events, oldest first: a stall, a restart, a give-up.
+  ///
+  /// Deliberately not [violations]: a dead transfer is not an architecture
+  /// breach, and mixing the two would make "the rules held" unreadable in a
+  /// report that also has to say "the download stopped at 512 KB".
+  final List<String> _notes = <String>[];
+
+  static const int maxNotes = 20;
+
+  List<String> get notes => List<String>.unmodifiable(_notes);
+
+  void note(String detail) {
+    _notes.add(detail);
+    if (_notes.length > maxNotes) _notes.removeAt(0);
+  }
+
+  void clearNotes() => _notes.clear();
+
   int _seq = 0;
 
   /// Whether a whole-file `downloadFile` (`limit: 0`) may be sent at all.

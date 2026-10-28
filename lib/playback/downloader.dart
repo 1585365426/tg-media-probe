@@ -19,6 +19,7 @@ library;
 import 'dart:async';
 import 'dart:io' show File;
 
+import '../td/td_models.dart' show FileState;
 import 'download_audit.dart';
 import 'video_source.dart' show FileTransferApi, VideoSourceException;
 
@@ -93,6 +94,15 @@ class TelegramMediaDownloader {
     // before it is allowed to start. The task book's §14 rule:
     // requiredFreeSpace >= (expected - downloaded) × 1.5.
     this.safetyFactor = 1.5,
+    // Silence longer than this means the transfer is dead, not slow. TDLib
+    // pushes `updateFile` continuously while it writes, so a whole window with
+    // no new byte is the only honest "it stopped" signal available.
+    this.stallWindow = const Duration(seconds: 15),
+    // How many times one job may be cancelled and re-issued before the play is
+    // told the truth. Three covers a flapping radio without turning a dead
+    // file into an infinite retry loop.
+    this.maxStallRestarts = 3,
+    this.stallPoll = const Duration(seconds: 3),
   })  :
         // ignore: prefer_initializing_formals
         _api = api,
@@ -103,9 +113,28 @@ class TelegramMediaDownloader {
   final FreeBytesProbe _freeBytes;
   final double safetyFactor;
 
+  /// Silence budget for one running job — see the constructor.
+  final Duration stallWindow;
+  final int maxStallRestarts;
+  final Duration stallPoll;
+
   /// One job per file id. A second tap on the same video finds this entry
   /// and stops — the "same chatId+messageId, exactly one download" rule.
   final Map<int, FullDownloadJob> _jobs = <int, FullDownloadJob>{};
+
+  /// Furthest byte TDLib has reported per file, and when it last moved.
+  ///
+  /// The job's own `running` flag cannot answer "is it still producing": TDLib
+  /// has no failure event, so a transfer that died at 512 KB stays `running`
+  /// forever and every waiter above it waits with it. That is the device
+  /// report's "512 KB / 638 MB, 0.1 %, frozen" state.
+  final Map<int, int> _reach = <int, int>{};
+  final Map<int, DateTime> _lastAdvance = <int, DateTime>{};
+  final Map<int, int> _restarts = <int, int>{};
+
+  StreamSubscription<FileState>? _progress;
+  Timer? _stallTimer;
+  bool _disposed = false;
 
   /// Measured disk size of [path]; injectable for tests.
   Future<int> Function(String path) diskSizeOf = _defaultDiskSizeOf;
@@ -146,10 +175,147 @@ class TelegramMediaDownloader {
     if (job == null || job.state != FullDownloadState.running) return;
     if (completed) {
       job.state = FullDownloadState.completed;
+      _lastAdvance.remove(fileId);
     } else if (!canBeDownloaded) {
       job.state = FullDownloadState.failed;
       job.failureReason = 'TDLib 报告文件不可再下载';
+      _lastAdvance.remove(fileId);
     }
+  }
+
+  // ---- stall watchdog ---------------------------------------------------
+  //
+  // TDLib tells us when a transfer starts and when it finishes. It never tells
+  // us it stopped. A transfer that dies mid-file therefore reads as `running`
+  // forever: the job keeps `isRunning` true, every waiter above it keeps
+  // waiting, and the report has nothing to say. The only evidence available is
+  // the absence of new bytes, so that is what this measures.
+
+  /// Seconds since TDLib last wrote a byte for [fileId], or null when the job
+  /// has not been observed yet.
+  Duration? stallAge(int fileId) {
+    final last = _lastAdvance[fileId];
+    if (last == null) return null;
+    return DateTime.now().difference(last);
+  }
+
+  /// Furthest byte seen for [fileId] — `download_offset + downloaded_size`.
+  int reachOf(int fileId) => _reach[fileId] ?? 0;
+
+  /// Starts the one observer both the watchdog and the report read.
+  ///
+  /// Lazily: a Downloader that never started a job must not subscribe to the
+  /// update stream at all.
+  void _ensureObserver() {
+    if (_progress != null || _disposed) return;
+    _progress = _api.updates().listen(
+      (state) {
+        final job = _jobs[state.id];
+        if (job == null || !job.isRunning) return;
+        final reach = state.downloadOffset + state.downloadedSize;
+        final before = _reach[state.id];
+        // Monotonic on purpose: a window move reports a smaller
+        // `downloaded_size`, and that is not a byte going backwards.
+        if (before == null || reach > before) {
+          _reach[state.id] = reach;
+          _lastAdvance[state.id] = DateTime.now();
+        }
+      },
+      onError: (Object _) {
+        // A broken update stream is not a reason to lose the timer: the sweep
+        // falls back to `stat`, which is the same measurement one step later.
+      },
+    );
+    _stallTimer = Timer.periodic(stallPoll, (_) => _sweep());
+  }
+
+  Future<void> _sweep() async {
+    if (_disposed) return;
+    var running = 0;
+    for (final job in _jobs.values.toList()) {
+      if (!job.isRunning) continue;
+      running++;
+      final fileId = job.fileId;
+      final last = _lastAdvance[fileId];
+      if (last == null) {
+        // First sweep after the request: the baseline is the request time, not
+        // the epoch — otherwise every job would look stalled for 50 years.
+        _lastAdvance[fileId] = job.startedAt;
+        continue;
+      }
+      if (DateTime.now().difference(last) < stallWindow) continue;
+
+      // Before declaring it dead, ask TDLib directly. Updates can be missed (a
+      // broadcast event fired between two awaits), and cancelling a healthy
+      // transfer would restart a 638 MB download for nothing.
+      final state = await _api.stat(fileId);
+      if (state != null) {
+        final reach = state.downloadOffset + state.downloadedSize;
+        final before = _reach[fileId] ?? 0;
+        if (reach > before) {
+          _reach[fileId] = reach;
+          _lastAdvance[fileId] = DateTime.now();
+          continue;
+        }
+        if (state.isCompleted) {
+          job.state = FullDownloadState.completed;
+          audit.note('DOWNLOAD_DONE file=$fileId reached=$reach');
+          continue;
+        }
+      }
+      if (!job.isRunning) continue;
+
+      final age = DateTime.now().difference(last).inSeconds;
+      final tries = _restarts[fileId] ?? 0;
+      if (tries >= maxStallRestarts) {
+        job.state = FullDownloadState.failed;
+        job.failureReason = '下载停滞 ${age}s，已重试 $tries 次';
+        audit.note('DOWNLOAD_STALLED file=$fileId age=${age}s '
+            'retries=$tries reached=${_reach[fileId] ?? 0} '
+            'expected=${job.expectedSize} giving_up');
+        _lastAdvance.remove(fileId);
+        continue;
+      }
+      _restarts[fileId] = tries + 1;
+      audit.note('DOWNLOAD_STALL file=$fileId age=${age}s '
+          'retries=${tries + 1}/$maxStallRestarts '
+          'reached=${_reach[fileId] ?? 0} expected=${job.expectedSize}');
+      try {
+        // Same cancel+issue pair as `restart`, but driven by silence instead of
+        // by a claim: this is the only way to turn a dead transfer back into a
+        // growing file.
+        await _api.cancel(fileId);
+        await _api.start(
+          fileId,
+          caller: DownloadCaller.downloader,
+          cause: 'stall restart ${tries + 1}',
+        );
+        _lastAdvance[fileId] = DateTime.now();
+        _reach[fileId] = _reach[fileId] ?? 0;
+      } on Object catch (e) {
+        job.state = FullDownloadState.failed;
+        job.failureReason = '下载停滞且重启失败：$e';
+        audit.note('DOWNLOAD_RESTART_FAILED file=$fileId error="$e"');
+      }
+    }
+    if (running == 0) _stopObserver();
+  }
+
+  void _stopObserver() {
+    _stallTimer?.cancel();
+    _stallTimer = null;
+    _progress?.cancel();
+    _progress = null;
+  }
+
+  /// Stops the watchdog. Called when the app tears the playback layer down.
+  void dispose() {
+    _disposed = true;
+    _stopObserver();
+    _jobs.clear();
+    _reach.clear();
+    _lastAdvance.clear();
+    _restarts.clear();
   }
 
   /// Makes sure a full download exists for [fileId], starting one if needed.
@@ -240,6 +406,11 @@ class TelegramMediaDownloader {
     job.state = FullDownloadState.running;
     job.failureReason = null;
     job.shortcut = null;
+    // The watchdog's baseline is the moment the request is sent: bytes only
+    // exist after TDLib accepts it.
+    _reach.remove(fileId);
+    _lastAdvance[fileId] = DateTime.now();
+    _ensureObserver();
     audit.tag(
       chatId: chatId,
       messageId: messageId,
@@ -278,6 +449,11 @@ class TelegramMediaDownloader {
   }) async {
     await _api.cancel(fileId);
     _jobs.remove(fileId);
+    // An explicit restart is a new budget: the previous stall counter is about
+    // a transfer that no longer exists.
+    _restarts.remove(fileId);
+    _reach.remove(fileId);
+    _lastAdvance.remove(fileId);
     return ensureFullDownload(
       chatId: chatId,
       messageId: messageId,
