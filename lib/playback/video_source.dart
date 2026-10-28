@@ -933,7 +933,11 @@ class VideoSourceResolver {
           decision: 'LOCAL_FILE',
           reason: 'streaming_disabled_by_preference',
         );
-        return PlaySource.file(path, origin: 'FULL_DOWNLOAD');
+        // The user turned streaming off: what plays is a finished local file.
+        // `finalSource` is a closed set (RESOURCE_LOADER / LOCAL_FILE /
+        // FAILED), so this path reports LOCAL_FILE like every other disk play —
+        // the "why" is the decision line above, not a fourth source name.
+        return PlaySource.file(path);
       });
     }
     final future = _streamWithRepair(
