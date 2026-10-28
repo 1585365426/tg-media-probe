@@ -39,6 +39,15 @@ abstract class TdProgressSource {
 
   /// True while TDLib would keep downloading this file.
   bool get tdlibCanDownload;
+
+  /// True while a transfer for this file is actually running.
+  ///
+  /// Distinct from [tdlibCanDownload], which only says the file *may* be
+  /// downloaded. This one answers "will the bytes at that offset ever
+  /// arrive?". A WAIT with this false is a dead end; a WAIT with it true is
+  /// just a slow network, and the native side must keep waiting instead of
+  /// failing the request.
+  bool get tdlibDownloading => tdlibCanDownload;
 }
 
 /// What [GrowingFileReader.read] found at an offset.
@@ -167,6 +176,16 @@ class GrowingFileReader {
   /// Whole file on disk, measured. A claim without bytes is never complete.
   bool get isComplete =>
       !_invalidated && expectedSize > 0 && _diskSize >= expectedSize;
+
+  /// True while a transfer is still running for this file.
+  ///
+  /// The distinction matters at the WAIT: "not there yet, still coming" and
+  /// "not there yet, nothing is coming" look identical from a watermark, but
+  /// only the second one is a reason to fail the player's request. With no
+  /// observation source at all the reader assumes a transfer is live, because
+  /// a reader is only ever built for a file a Downloader was asked for.
+  bool get isDownloading =>
+      !_invalidated && !isComplete && (_progress?.tdlibDownloading ?? true);
 
   /// Fires when [isComplete] flips to true (at most once).
   void onComplete(void Function() listener) =>
@@ -307,6 +326,12 @@ class FileStateProgress implements TdProgressSource {
 
   @override
   bool get tdlibCanDownload => _canDownload;
+
+  /// `implements` does not inherit the interface's default, so this class
+  /// spells it out: a file that is unfinished and still downloadable is a
+  /// file whose bytes can still arrive.
+  @override
+  bool get tdlibDownloading => _canDownload && !_completed;
 
   @override
   Stream<void> get changes => _changes.stream;

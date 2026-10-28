@@ -1451,7 +1451,15 @@ class VideoSourceResolver {
         // progress is observation (the watch, via the bridge), the disk is
         // measured, and the watermark is the min of the two. It cannot
         // download anything.
-        final bridge = _LiveProgressBridge(watch);
+        final bridge = _LiveProgressBridge(
+          watch,
+          // A WAIT is only terminal when nothing is left that could write the
+          // bytes. The Downloader is the one object that knows: its job closes
+          // on failure and on refusal (STEP 2), so `isRunning == false` means
+          // no byte is coming — and `true` means the player should keep
+          // waiting instead of being handed an error.
+          isRunning: () => downloader.isRunning(fileId),
+        );
         final reader = GrowingFileReader(
           path: localPath,
           expectedSize: watch.expectedBytes,
@@ -2503,9 +2511,17 @@ class _LiveFileWatch implements FileProgressWatch, WindowContinuation {
 ///
 /// Purely a lens: no download call can be reached through it.
 class _LiveProgressBridge implements TdProgressSource {
-  _LiveProgressBridge(this._watch);
+  _LiveProgressBridge(this._watch, {bool Function()? isRunning})
+      // A named parameter cannot start with an underscore, so the assignment
+      // stays in the initialiser list.
+      // ignore: prefer_initializing_formals
+      : _isRunning = isRunning;
 
   final FileProgressWatch _watch;
+
+  /// Asks the Downloader, not the file record. `canBeDownloaded` stays true on
+  /// a transfer that already died; only the job knows the difference.
+  final bool Function()? _isRunning;
 
   @override
   int get tdlibReach => _watch.headBytes;
@@ -2515,6 +2531,9 @@ class _LiveProgressBridge implements TdProgressSource {
 
   @override
   bool get tdlibCanDownload => _watch.canDownload;
+
+  @override
+  bool get tdlibDownloading => _isRunning?.call() ?? _watch.canDownload;
 
   @override
   Stream<void> get changes => _watch.progress;

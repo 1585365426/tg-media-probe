@@ -27,6 +27,13 @@ class FakeProgress implements TdProgressSource {
   @override
   bool get tdlibCanDownload => !completed;
 
+  /// Whether a transfer is still running. Separate from "this file may be
+  /// downloaded": the WAIT is terminal only when nothing can write any more.
+  bool downloading = true;
+
+  @override
+  bool get tdlibDownloading => downloading && !completed;
+
   @override
   Stream<void> get changes => _changes.stream;
 
@@ -244,7 +251,32 @@ void main() {
       final second = await supply.read(500);
       expect(second.errorCode, 'WAIT_TIMEOUT');
       expect(second.completed, isFalse, reason: '超时也不是 EOF');
-      expect(second.downloading, isFalse);
+      // §8: the timeout is a report, not a verdict. The download is still
+      // running, so the bytes can still arrive and the native side must keep
+      // polling — failing the request here is what a moov-at-end file turns
+      // into a dead player.
+      expect(second.downloading, isTrue,
+          reason: '下载还在跑，超时只记诊断，不判死');
+    });
+
+    test('a WAIT on a dead transfer says so', () async {
+      // The other half of §8: once nothing is left that could write the
+      // bytes, the native loader has to stop waiting and fail the request.
+      final fx = Fixture(total: 1000, tdlibReach: 0, disk: 0);
+      var now = DateTime.now();
+      final supply = ResourceSupply(
+        fileId: 9,
+        reader: fx.reader,
+        clock: () => now,
+      );
+      await supply.read(500);
+      fx.progress.downloading = false;
+      now = now.add(const Duration(seconds: 11));
+      final second = await supply.read(500);
+      expect(second.errorCode, 'WAIT_TIMEOUT');
+      expect(second.downloading, isFalse,
+          reason: '没有下载在跑，等下去也不会有字节');
+      expect(second.errorMessage, contains('下载已停止'));
     });
 
     test('growth resets the wait clock', () async {

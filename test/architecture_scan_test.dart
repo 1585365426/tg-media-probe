@@ -172,6 +172,44 @@ void main() {
           reason: 'noteTransportStart 在 beginPlay 之前 —— 会被重置抹掉');
     });
 
+    test('the native loader waits out a WAIT_TIMEOUT instead of failing', () {
+      // §8 says a timeout is a report, not a verdict. The Swift pump used to
+      // treat any `errorCode` as terminal: a moov-at-end file legitimately
+      // waits for the whole sequential download, so at 10 s the request was
+      // finished with an error and the player went black. These three facts
+      // together are the fix, and none of them may be relaxed alone.
+      final swift = File(
+        '$root/ios/Runner/Streaming/TGMediaResourceLoader.swift',
+      ).readAsStringSync();
+      expect(swift.contains('waitTimeoutCode = "WAIT_TIMEOUT"'), isTrue,
+          reason: 'native 侧必须认识这个码，否则判断失效');
+
+      const guard =
+          'if code == TGMediaResourceLoader.waitTimeoutCode, reading.downloading {';
+      final at = swift.indexOf(guard);
+      expect(at, isNot(-1),
+          reason: 'WAIT_TIMEOUT 分支必须同时检查 downloading —— '
+              '「下载还在跑」不能当成「请求失败」');
+
+      final branchEnd = swift.indexOf('host?.emit(type: "supplyError"', at);
+      expect(branchEnd, isNot(-1));
+      final branch = swift.substring(at, branchEnd);
+      expect(branch.contains('continue'), isTrue,
+          reason: 'WAIT_TIMEOUT 且下载在跑时必须继续轮询');
+      expect(branch.contains('finishLoading'), isFalse,
+          reason: 'WAIT_TIMEOUT 分支里出现 finishLoading，等于把等待判死');
+
+      // And the Dart side has to tell the truth for that branch to work:
+      // `downloading` is the transfer state, not the wait outcome.
+      final loader = _code(
+        File('$root/lib/playback/resource_loader.dart').readAsStringSync(),
+      );
+      expect(loader.contains('downloading: !timedOut'), isFalse,
+          reason: 'downloading 被写成了「是否超时」，超时的活下载会被报成已死');
+      expect(loader.contains('reader.isDownloading'), isTrue,
+          reason: 'downloading 必须取自 reader 的下载状态');
+    });
+
     test('the player path holds no downloader reference at all', () {
       // Player-facing modules: the player itself, the proxy, sessions.
       for (final relative in <String>[

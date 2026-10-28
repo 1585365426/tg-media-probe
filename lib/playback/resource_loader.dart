@@ -74,7 +74,11 @@ class SupplyReading {
   /// The whole file is on disk.
   final bool completed;
 
-  /// The transfer is still advancing (false once it is stalled).
+  /// Whether a transfer can still bring the missing bytes.
+  ///
+  /// Deliberately not "was the wait short": a WAIT that timed out is still a
+  /// live wait while a download is running. The native side reads this to
+  /// decide between "keep polling" and "fail the request".
   final bool downloading;
 
   /// The local file the reader must open.
@@ -231,12 +235,19 @@ class ResourceSupply {
     final timedOut = waited >= reader.waitTimeout;
     if (timedOut) _timeouts++;
     _waits++;
+    // §8: a timeout is a *report*, not a verdict. Whether the bytes can still
+    // arrive is a different question, and [reader.isDownloading] is the only
+    // thing that answers it. The native side keeps waiting while this is true
+    // — a tail-moov file legitimately sits here for the whole download, and
+    // failing the request at 10 s is exactly the "卡死/黑屏" shape.
+    final live = reader.isDownloading;
     onTypedEvent?.call('waitingForGrowth', <String, Object?>{
       'offset': offset,
       'waitedMs': waited.inMilliseconds,
       'head': result.watermark,
       'total': total,
       'timedOut': timedOut,
+      'downloading': live,
     });
     return SupplyReading(
       path: path,
@@ -244,13 +255,17 @@ class ResourceSupply {
       to: -1,
       total: total,
       completed: false,
-      downloading: !timedOut,
+      downloading: live,
       waitingMillis: waited.inMilliseconds,
       errorCode: timedOut ? 'WAIT_TIMEOUT' : null,
       errorMessage: timedOut
-          ? '等待 ${reader.waitTimeout.inSeconds} 秒文件未增长'
-              '（offset=$offset，safeWatermark=${result.watermark}，'
-              'total=$total）——下载仍在后台继续，等待后重试'
+          ? (live
+              ? '等待 ${reader.waitTimeout.inSeconds} 秒文件未增长'
+                  '（offset=$offset，safeWatermark=${result.watermark}，'
+                  'total=$total）——下载仍在后台继续，等待后重试'
+              : '文件不再增长，且没有进行中的下载'
+                  '（offset=$offset，safeWatermark=${result.watermark}，'
+                  'total=$total）——下载已停止')
           : null,
     );
   }

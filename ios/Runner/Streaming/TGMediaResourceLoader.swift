@@ -25,6 +25,11 @@ final class TGMediaResourceLoader: NSObject, AVAssetResourceLoaderDelegate {
   /// immediately, slow enough not to spin a core.
   private static let pollSeconds: TimeInterval = 0.1
 
+  /// The supply's "nothing moved for the wait window" code.
+  ///
+  /// It is a report, not a verdict — see the handling in `pump`.
+  private static let waitTimeoutCode = "WAIT_TIMEOUT"
+
   private let session: TGMediaSession
   private weak var host: TGMediaStreamingHost?
   private let queue: DispatchQueue
@@ -185,6 +190,27 @@ final class TGMediaResourceLoader: NSObject, AVAssetResourceLoaderDelegate {
       let reading = session.supply(offset: offset, length: want, requestId: requestId)
 
       if let code = reading.errorCode {
+        // §8: WAIT_TIMEOUT says "the watermark did not move for the configured
+        // window", not "this request can never be answered". While the supply
+        // reports a live transfer the bytes are still coming — a moov-at-end
+        // file legitimately waits here for the whole download, and failing the
+        // request at 10 s is how a slow start turns into a dead player.
+        if code == TGMediaResourceLoader.waitTimeoutCode, reading.downloading {
+          idlePolls += 1
+          if idlePolls == 5 || (idlePolls % 100 == 0) {
+            waitingReported += 1
+            host?.emit(type: "waitTimeoutStillWaiting", session: session, extra: [
+              "requestId": requestId,
+              "offset": offset,
+              "served": servedBytes,
+              "poll": waitingReported,
+              "message": reading.errorMessage ?? "",
+            ])
+          }
+          Thread.sleep(forTimeInterval: TGMediaResourceLoader.pollSeconds)
+          continue
+        }
+
         host?.emit(type: "supplyError", session: session, extra: [
           "requestId": requestId,
           "code": code,
