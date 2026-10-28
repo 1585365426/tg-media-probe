@@ -30,6 +30,7 @@ import '../td/td_requests.dart';
 import 'download_audit.dart';
 import 'media_metadata.dart';
 import 'mp4_probe.dart';
+import 'playback_session.dart';
 import 'native_streaming.dart';
 import 'playback_trace.dart';
 import 'resource_loader.dart';
@@ -713,6 +714,106 @@ class VideoSourceResolver {
     FileProgressWatch watch,
     String localPath,
   )? proxyFactory;
+
+  /// The one entry point every play goes through: turn the tap's
+  /// `chatId` + `messageId` into the file TDLib currently owns, with the
+  /// disk measured.
+  ///
+  /// `hintFileId` is where the lookup starts, never where it ends. The device
+  /// log had a tile carrying `4999` while TDLib's live record sat at `2221`;
+  /// the message is the identity, the id is a runtime handle, and this method
+  /// is the only place allowed to marry them.
+  Future<PlayableFile> resolvePlayableFile(
+    int chatId,
+    int messageId, {
+    int? hintFileId,
+    int? generation,
+    PlaybackTrace? trace,
+  }) async {
+    var fileId = hintFileId ?? 0;
+    if (metadata != null) {
+      try {
+        final fresh = await metadata!.fetch(chatId, messageId);
+        if (fresh != null && fresh.fileId != 0) {
+          if (hintFileId != null && fresh.fileId != hintFileId) {
+            _diagnostics.noteFileIdRemap(
+              oldId: hintFileId,
+              newId: fresh.fileId,
+              reason: 'message re-read',
+            );
+          }
+          fileId = fresh.fileId;
+        }
+      } on Object {
+        // A metadata failure leaves the hint standing: `statStrict` below is
+        // the one that says whether the id is alive, and it reports honestly
+        // when it is not.
+      }
+    }
+    if (fileId == 0) {
+      throw VideoSourceException('消息里没有可播放的文件');
+    }
+    FileState? state;
+    try {
+      state = await _statStrict(fileId);
+    } on VideoSourceException catch (e) {
+      if (_looksMissing(e.message.toUpperCase())) throw _MissingFile(e.message);
+      rethrow;
+    }
+    final facts = await _factsFor(state, fileId);
+    _diagnostics.noteDiskMeasured(facts.diskSize, generation: generation);
+    return PlayableFile(
+      chatId: chatId,
+      messageId: messageId,
+      fileId: fileId,
+      expectedSize: facts.expectedBytes,
+      localPath: facts.path,
+      localSize: facts.diskSize,
+      // The record's word is not part of this: `isPlayableFromDisk` needs a
+      // real path, real bytes, and a byte count that reaches the end.
+      isComplete: facts.isPlayableFromDisk,
+      generation: generation ?? 0,
+    );
+  }
+
+  /// The explicit last rung: wait for the whole file, then hand it over.
+  ///
+  /// Reachable only from a session that still owns its one full-download
+  /// fallback — the caller (the feed) checks and spends that before coming
+  /// here. Every watchdog from [_resolveWithRepair] applies; the returned
+  /// [PlayableFile] is measured, so a "completed" transfer with no bytes
+  /// behind the path reads as `isComplete: false` and not as a play.
+  Future<PlayableFile> downloadWhole(
+    int chatId,
+    int messageId,
+    int fileId, {
+    void Function(VideoSourceUpdate update)? onProgress,
+    PlaybackTrace? trace,
+    int? generation,
+  }) async {
+    final path = await _resolveWithRepair(
+      fileId,
+      chatId: chatId,
+      messageId: messageId,
+      onProgress: onProgress,
+      trace: trace,
+      report: true,
+      generation: generation,
+    );
+    final state = await _statStrict(fileId);
+    final facts = await _factsFor(state, fileId);
+    _diagnostics.noteDiskMeasured(facts.diskSize, generation: generation);
+    return PlayableFile(
+      chatId: chatId,
+      messageId: messageId,
+      fileId: fileId,
+      expectedSize: facts.expectedBytes,
+      localPath: facts.path.isNotEmpty ? facts.path : path,
+      localSize: facts.diskSize,
+      isComplete: facts.isPlayableFromDisk,
+      generation: generation ?? 0,
+    );
+  }
 
   /// Resolves [fileId] for **playback**, choosing between three paths by data:
   ///

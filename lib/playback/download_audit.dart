@@ -42,7 +42,10 @@ enum DownloadCaller {
         DownloadCaller.resourceLoader => 'RESOURCE_LOADER',
         DownloadCaller.proxy => 'PROXY',
         DownloadCaller.preload => 'PRELOAD',
-        DownloadCaller.fullDownload => 'FULL_DOWNLOAD',
+        // Named "fallback" because that is the only shape this caller may
+        // take: the explicit last rung after streaming failed, never a
+        // background decision. The label is what the acceptance report greps.
+        DownloadCaller.fullDownload => 'FULL_DOWNLOAD_FALLBACK',
         DownloadCaller.unknown => 'UNKNOWN',
       };
 }

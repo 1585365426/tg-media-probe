@@ -28,6 +28,7 @@ import '../playback/media_metadata.dart';
 import '../playback/playback_trace.dart';
 import '../playback/native_streaming.dart';
 import '../playback/playback_failure.dart';
+import '../playback/playback_session.dart';
 import '../playback/player_slot.dart';
 import '../playback/source_decision.dart';
 import '../playback/video_source.dart';
@@ -159,6 +160,13 @@ class FeedController extends ChangeNotifier {
 
   /// Live streaming evidence for the current play (settings screen, overlay).
   StreamingDiagnostics get diagnostics => _diagnostics;
+
+  /// The state of exactly one play. Created per activation, replaced — never
+  /// reused — when the user opens another video. `fullDownloadFallbackUsed`
+  /// lives here, not in a global: one tap gets at most one whole-file
+  /// fallback, and the next tap starts with a fresh budget.
+  PlaybackSession? _session;
+  PlaybackSession? get session => _session;
 
   /// True when the current play gave up on streaming and used the full
   /// download instead. Kept here as well so the diagnostics screen can show it
@@ -610,6 +618,13 @@ class FeedController extends ChangeNotifier {
 
     _diagnostics.allowWholeFile();
     _fallbackOccurred = false;
+    // One tap, one session. The previous play's budget (its spent fallback,
+    // its resolved id, its flags) dies here; nothing from it survives into
+    // this one.
+    _session = PlaybackSession(
+      chatId: record.chatId,
+      messageId: record.messageId,
+    );
     _phase = FeedPhase.buffering;
     _notify();
     _diagnostics.noteStage(
@@ -778,6 +793,9 @@ class FeedController extends ChangeNotifier {
       // player exists used to leave `v2Attempted=false` in the report while
       // the device log showed a `tgmedia://` session being opened.
       _diagnostics.noteTransportStart('RESOURCE_LOADER');
+      final session = _session;
+      session?.streamingAttempted = true;
+      session?.resolvedFileId = record.fileId;
       try {
         return await sources.resolveStreamV2(
           record.fileId,
@@ -870,6 +888,10 @@ class FeedController extends ChangeNotifier {
       if (!_ownsRecord(generation, record)) return false;
       _diagnostics.noteFinalSource(source.origin);
       _diagnostics.notePlayerReady(generation: generation);
+      final session = _session;
+      session
+        ?..finalSource = source.origin
+        ..playerReady = true;
       trace.mark(PlaybackStage.playerInitialized);
       return true;
     } on Object catch (e) {
@@ -989,8 +1011,87 @@ class FeedController extends ChangeNotifier {
       if (!_ownsRecord(generation, record)) return null;
     }
 
-    // 3. Nothing left that does not involve downloading the film.
+    // 3. One whole-file fallback per session — and only for a file TDLib
+    //    actually has a record for. A missing record is an id problem: the
+    //    fresh stat above could not resolve the message's file, and a
+    //    whole-file request for that same unproven id is how the device log
+    //    burned a `downloadFile` on 4999 and downloaded 2221 instead. The
+    //    play stops; the budget survives for a tap whose id resolved.
+    if (facts.hasRecord) {
+      final session = _session;
+      if (session != null && session.spendFullDownloadFallback()) {
+        return _fullDownloadFallback(record, trace, generation);
+      }
+    }
+
+    // 4. Nothing left that does not involve downloading the film — and the
+    //    one download this session was allowed has been spent.
     return null;
+  }
+
+  /// The explicit last rung: download the whole file, on purpose, with the
+  /// user watching a progress bar instead of a spinner.
+  ///
+  /// Reachable exactly once per [PlaybackSession] — the caller spent the
+  /// budget to get here. The door in the audit (`wholeFileAllowed`) is
+  /// reopened for this one call: the stream that closed it has already
+  /// failed, and this is the play's documented way out, not a background
+  /// decision. What comes back is measured: a "completed" transfer with no
+  /// bytes behind the path is an error, never a [PlaySource.file].
+  Future<PlaySource?> _fullDownloadFallback(
+    MediaRecord record,
+    PlaybackTrace trace,
+    int generation,
+  ) async {
+    _fallbackOccurred = true;
+    _diagnostics.allowWholeFile();
+    _diagnostics.noteDecision(
+      proxyAvailable: false,
+      decision: 'FULL_DOWNLOAD',
+      reason: 'stream_failed_fallback_once',
+      generation: generation,
+    );
+    final session = _session;
+    try {
+      final playable = await sources.downloadWhole(
+        record.chatId,
+        record.messageId,
+        record.fileId,
+        trace: trace,
+        generation: generation,
+      );
+      if (!_ownsRecord(generation, record)) return null;
+      if (!playable.isComplete) {
+        if (phase != FeedPhase.error) {
+          _fail(
+            '下载完成但文件不完整'
+            '（${playable.localSize}/${playable.expectedSize} 字节）',
+            kind: PlaybackFailure.downloadStalled,
+          );
+        }
+        return null;
+      }
+      session?.finalSource = 'LOCAL_FILE';
+      session?.resolvedFileId = playable.fileId;
+      session?.playerReady = true;
+      _diagnostics.noteDecision(
+        proxyAvailable: false,
+        decision: 'LOCAL_FILE',
+        reason: 'full_download_completed_and_verified',
+        generation: generation,
+      );
+      // The file exists because a full download put it there — the origin is
+      // part of the report, not cosmetic: `finalSource=LOCAL_FILE` without
+      // it is how a 593 MB wait once read as a cache hit.
+      return PlaySource.file(playable.localPath, origin: 'FULL_DOWNLOAD');
+    } on Object catch (e) {
+      if (!_ownsRecord(generation, record)) return null;
+      _diagnostics.noteTransportAttempt('FULL_DOWNLOAD_FALLBACK', failed: true);
+      if (phase != FeedPhase.error) {
+        _fail('整文件下载失败：$e', kind: PlaybackFailure.downloadStalled);
+      }
+      return null;
+    }
   }
 
   /// One step down the transport chain: V2 → V1 → local file → error.

@@ -187,6 +187,14 @@ class FakeTransferApi implements FileTransferApi {
   /// Callers of every bounded window (i.e. everything except a preload).
   final List<DownloadCaller> windowCallers = <DownloadCaller>[];
 
+  /// Every `startRange` as (caller, limit). The CI assertion "PLAYER never
+  /// asks for the whole file" reads this: a player call with `limit <= 0`
+  /// here is the 152 MB bug come back.
+  final List<(DownloadCaller, int)> windowLimits = <(DownloadCaller, int)>[];
+
+  /// Every `start()` (the whole-file request) with the caller that sent it.
+  final List<DownloadCaller> wholeFileCallers = <DownloadCaller>[];
+
   @override
   Future<FileState?> stat(int fileId) async {
     statCalls++;
@@ -216,18 +224,29 @@ class FakeTransferApi implements FileTransferApi {
   @override
   Future<void> start(int fileId, {DownloadCaller caller = DownloadCaller.unknown, String cause = ''}) async {
     startCalls++;
+    wholeFileCallers.add(caller);
     startedIds.add(fileId);
     if (failOnStart) throw VideoSourceException('TDLib error 400: FILE_ID_INVALID');
     if (autoComplete) {
-      _updates.add(FileState(
-        id: fileId,
-        size: 4096,
-        expectedSize: 4096,
-        downloadedSize: 4096,
-        isCompleted: true,
-        path: '/tmp/pool/$fileId',
-        canBeDownloaded: true,
-      ));
+      // Deferred by a microtask: the whole-file resolver subscribes to
+      // `updates()` only after `start()` returns, and a broadcast event
+      // pushed synchronously here would land before any listener and be
+      // dropped — the play would then stall out instead of completing.
+      scheduleMicrotask(() {
+        // The completion reaches `stat` too: a whole-file download that ends
+        // must leave behind a record the re-stat can verify, the way TDLib
+        // does — otherwise the measured fallback can never turn into a play.
+        alreadyLocal.add(fileId);
+        _updates.add(FileState(
+          id: fileId,
+          size: 4096,
+          expectedSize: 4096,
+          downloadedSize: 4096,
+          isCompleted: true,
+          path: '/tmp/pool/$fileId',
+          canBeDownloaded: true,
+        ));
+      });
     }
   }
 
@@ -246,6 +265,7 @@ class FakeTransferApi implements FileTransferApi {
       return;
     }
     windowCallers.add(caller);
+    windowLimits.add((caller, limit));
     startedIds.add(fileId);
     if (failOnStart) throw VideoSourceException('TDLib error 400: FILE_ID_INVALID');
     if (autoComplete) {
@@ -560,34 +580,83 @@ void main() {
   group('V2-only', () {
     tearDown(() => StreamingV2.enabledOverride = null);
 
-    test('a V2 play that cannot open a session stops instead of trying V1',
+    test('a failed V2 play spends its one fallback, then plays from disk',
         () async {
       // V2-only is the production policy; the host platform has no bridge, so
       // the resolver fails exactly the way a broken session does on a device.
+      // The play then takes its ONE whole-file fallback — and because the
+      // fallback's file is measured before it is trusted, the play ends on a
+      // verified local file, not on a claim.
       StreamingV2.enabledOverride = true;
       final rig = Rig(pages: <List<MediaRecord>>[
         <MediaRecord>[video(1)],
       ]);
       await rig.controller.load();
 
-      expect(rig.controller.phase, FeedPhase.error);
+      expect(rig.controller.phase, FeedPhase.ready,
+          reason: '整文件下载完成并实测到顶后必须能播');
       // The two things the switch exists to remove: a second transport inside
       // the same tap, and a download that makes the failure look like a play.
       expect(rig.controller.diagnostics.v1Attempted, isFalse,
           reason: 'V2-only：V2 失败后不得调用 V1');
       expect(rig.controller.diagnostics.v2Attempted, isTrue);
-      expect(rig.api.startCalls, 0, reason: 'V2 失败不得触发整文件下载');
+      expect(rig.api.startCalls, 1, reason: '一次播放最多一次整文件 fallback');
+      expect(rig.api.wholeFileCallers, everyElement(DownloadCaller.fullDownload),
+          reason: 'WHOLE_FILE 只能由 FULL_DOWNLOAD_FALLBACK 发出');
       expect(
         rig.api.windowCallers.where((c) => c == DownloadCaller.proxy),
         isEmpty,
         reason: 'proxy 窗口意味着 V1 被启动过',
       );
+      expect(rig.controller.session?.fullDownloadFallbackUsed, isTrue);
+    });
+
+    test('a failed fallback stops the play instead of looping', () async {
+      // The whole-file request itself is refused. One play, one fallback:
+      // a second attempt must not exist, or "stream → download → fail →
+      // download" loops forever on a file TDLib will never deliver.
+      StreamingV2.enabledOverride = true;
+      final rig = Rig(pages: <List<MediaRecord>>[
+        <MediaRecord>[video(1)],
+      ]);
+      rig.api.failOnStart = true;
+      await rig.controller.load();
+
+      expect(rig.controller.phase, FeedPhase.error);
+      expect(rig.api.startCalls, 1,
+          reason: 'fallback 失败后不得再次整文件下载');
+      expect(rig.controller.session?.fullDownloadFallbackUsed, isTrue);
+    });
+
+    test('PLAYER never sends a whole-file request', () async {
+      // Every TDLib request the play path makes must be a bounded window.
+      // The rig's default transport is the loopback proxy; the first window
+      // caller is PLAYER on both transports — the device log that started
+      // this (`#1 caller=PLAYER limit=WHOLE_FILE`) is what this forbids.
+      final rig = Rig(pages: <List<MediaRecord>>[
+        <MediaRecord>[video(1)],
+      ]);
+      await rig.controller.load();
+
+      final playerCalls = rig.api.windowLimits
+          .where((c) => c.$1 == DownloadCaller.player)
+          .toList();
+      expect(playerCalls, isNotEmpty, reason: '播放路径必须发出过窗口请求');
+      for (final (caller, limit) in playerCalls) {
+        expect(limit, greaterThan(0),
+            reason: '$caller 发出了 limit=$limit 的请求（152MB 回归形态）');
+      }
+      expect(
+        rig.api.wholeFileCallers.where((c) => c == DownloadCaller.player),
+        isEmpty,
+        reason: 'PLAYER 不得出现在 WHOLE_FILE 调用里',
+      );
+      expect(rig.controller.phase, FeedPhase.ready);
     });
   });
 
   group('a failed stream never downloads the video', () {
-    test('a refused stream ends the play and sends no whole-file request',
-        () async {
+    test('a refused stream takes its one fallback, and no more', () async {
       final rig = Rig(pages: <List<MediaRecord>>[
         <MediaRecord>[video(1)],
       ]);
@@ -596,16 +665,17 @@ void main() {
       await rig.controller.load();
 
       expect(rig.controller.phase, FeedPhase.error);
-      // The device defect in one assertion: a failed stream used to end in
-      // `start()` → `downloadFile(limit: 0)`, and a 622 MB video downloaded to
-      // 593 MB before the user saw an error or a frame.
-      expect(rig.api.startCalls, 0,
-          reason: '流式失败后不得请求整文件');
+      // The new floor: streaming failed, the play spends its ONE whole-file
+      // fallback — which the same refusal also kills. The play stops with
+      // the real reason; nothing loops, nothing retries the download.
+      expect(rig.api.startCalls, 1,
+          reason: '流式失败后允许一次整文件 fallback');
+      expect(rig.api.wholeFileCallers, everyElement(DownloadCaller.fullDownload),
+          reason: 'WHOLE_FILE 只能由 FULL_DOWNLOAD_FALLBACK 发出');
       expect(rig.controller.phase, isNot(FeedPhase.ready));
     });
 
-    test('a stalled stream ends the play instead of waiting out the file',
-        () async {
+    test('a stalled stream takes its one fallback, then stops', () async {
       final rig = Rig(
         pages: <List<MediaRecord>>[
           <MediaRecord>[video(1)],
@@ -616,8 +686,9 @@ void main() {
       await rig.controller.load();
 
       expect(rig.controller.phase, FeedPhase.error);
-      expect(rig.api.startCalls, 0,
-          reason: 'stall 之后不得退化成整文件下载');
+      expect(rig.api.startCalls, 1,
+          reason: 'stall 之后只有一次整文件尝试，不得反复下载');
+      expect(rig.controller.session?.fullDownloadFallbackUsed, isTrue);
     });
   });
 
