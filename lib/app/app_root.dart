@@ -1,4 +1,4 @@
-/// Application root: services, routing gate, and the three-tab shell.
+/// Application root: services, routing gate, and the two-tab shell.
 ///
 /// The gate order is the product decision, not an implementation detail:
 ///
@@ -16,37 +16,30 @@ import 'dart:async';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 
+import '../download/cache_validator.dart';
+import '../download/download_manager.dart';
+import '../download/media_cache.dart';
 import '../lock/lock_screens.dart';
-import '../platform/orientation_coordinator.dart';
-import '../playback/native_streaming.dart';
-import '../playback/resource_loader.dart';
 import '../lock/unlock_controller.dart';
+import '../platform/orientation_coordinator.dart';
 import '../security/biometric.dart';
 import '../security/lock_policy.dart';
 import '../security/tdlib_key.dart';
-import '../playback/streaming_diagnostics.dart';
-import '../storage/active_files.dart';
 import '../storage/app_paths.dart';
-import '../storage/file_ops.dart';
-import '../storage/temp_zone_report.dart';
 import '../ui/app_theme.dart';
-import '../ui/channel_pages.dart';
-import '../ui/feed_page.dart';
+import '../ui/channel_page.dart';
 import '../ui/login_page.dart';
 import '../ui/settings_page.dart';
 import '../ui/status_view.dart';
 import '../util/redact.dart';
 import 'app_preferences.dart';
-import '../storage/cache_budget.dart';
-import 'history_backfill.dart';
 import 'app_session.dart';
+import 'history_backfill.dart';
 
-/// Holds portrait for every route that is not the feed.
+/// Holds portrait for every route that is not the player.
 ///
-/// The feed pushes its own landscape scope on top and restores portrait when it
-/// leaves, so this host only has to guarantee the default. Login, unlock,
-/// settings and the channel pages live under it and therefore cannot inherit a
-/// sideways window from however the phone is being held.
+/// The player pushes its own landscape scope on top and restores portrait when
+/// it leaves, so this host only has to guarantee the default.
 class _PortraitHost extends StatefulWidget {
   const _PortraitHost({required this.child});
 
@@ -62,7 +55,6 @@ class _PortraitHostState extends State<_PortraitHost> {
   @override
   void initState() {
     super.initState();
-    // Bottom of the stack: portrait for everything that is not the player.
     _coordinator.set(
       OrientationCoordinator.appOwner,
       OrientationIntent.nonPlaybackPortrait,
@@ -77,6 +69,34 @@ class _PortraitHostState extends State<_PortraitHost> {
 
   @override
   Widget build(BuildContext context) => widget.child;
+}
+
+/// Resolves the single TdClient at call time: the manager is constructed before
+/// TDLib finishes booting, and a transport holding a captured null would never
+/// recover from that.
+class _SessionTransport implements TdTransport {
+  _SessionTransport(this._session);
+
+  final AppSession _session;
+
+  @override
+  Future<Map<String, Object?>> request(
+    Map<String, Object?> request, {
+    Duration? timeout,
+  }) {
+    final client = _session.client;
+    if (client == null) {
+      throw StateError('TDLib 尚未就绪');
+    }
+    return client.request(
+      request,
+      timeout: timeout ?? const Duration(seconds: 30),
+    );
+  }
+
+  @override
+  Stream<Map<String, Object?>> get updates =>
+      _session.client?.updates ?? const Stream<Map<String, Object?>>.empty();
 }
 
 class TgMediaApp extends StatefulWidget {
@@ -101,13 +121,10 @@ class _TgMediaAppState extends State<TgMediaApp> with WidgetsBindingObserver {
   late final AppLockStore _lockStore;
   late final UnlockController _lock;
 
-  final ActiveFileRegistry _activeFiles = ActiveFileRegistry();
-
   AppSession? _session;
-  TempZoneReport? _storage;
-  AutoCacheCleaner? _cleaner;
+  MediaCache? _cache;
+  DownloadManager? _downloads;
   HistoryBackfill? _backfill;
-  DateTime? _lastMaintenance;
   bool _ready = false;
   String? _bootError;
 
@@ -120,50 +137,29 @@ class _TgMediaAppState extends State<TgMediaApp> with WidgetsBindingObserver {
     _preferences = PreferencesController(store: PreferencesStore(store: _secure));
     _lockStore = AppLockStore(store: _secure);
     _lock = UnlockController(lockStore: _lockStore, gate: _gate);
-    // Streaming V2 answers AVAssetResourceLoader from Dart, so the byte channel
-    // has to exist before the first player is created. Harmless elsewhere: the
-    // transport only exists on iOS.
-    if (StreamingV2.supported) {
-      ResourceLoaderHost.instance.install();
-    }
     unawaited(_bootstrap());
   }
 
   Future<void> _bootstrap() async {
     try {
       await _preferences.load();
-      // Diagnostics mode is a persisted choice, so it has to be applied to
-      // the shared diagnostics object before any play can record into it.
-      StreamingDiagnostics.instance.setEnabled(
-        _preferences.value.streamingDiagnostics,
-      );
-      // FORCE_STREAMING_TEST is persisted for exactly one reason: an
-      // acceptance run must not die silently when the app restarts between
-      // arming and playing — that was the "STREAMING TEST: OFF" hole.
-      StreamingDiagnostics.instance
-          .setForceStreamingTest(_preferences.value.forceStreamingTest);
-      // The preference layer of the streaming decision, recorded next to the
-      // forced flag so the panel can show both without guessing.
-      StreamingDiagnostics.instance
-          .setStreamingPreference(_preferences.value.streamingPlayback);
-      // The lock is decided before anything else is drawn.
       await _lock.start();
 
       final layout = await AppPaths.resolveLayout();
       await layout.ensureCreated();
       final session = AppSession(layout: layout, secureStore: _secure);
-      _storage = TempZoneReport(
-        layout: layout,
-        ops: const IoFileOps(),
-        activeFiles: _activeFiles,
+      final cache = MediaCache(layout: layout);
+      await cache.ensureCreated();
+      _cache = cache;
+      _downloads = DownloadManager(
+        transport: _SessionTransport(session),
+        validator: const CacheValidator(),
+        cache: cache,
       );
       _session = session;
-      if (mounted) {
-        setState(() => _ready = true);
-      }
-      // Opening TDLib takes a moment; the unlock screen is already up.
+      if (mounted) setState(() => _ready = true);
       unawaited(session.boot());
-      _runMaintenance();
+      _runBackfill();
     } on Object catch (e) {
       if (!mounted) return;
       setState(() {
@@ -178,7 +174,7 @@ class _TgMediaAppState extends State<TgMediaApp> with WidgetsBindingObserver {
     switch (state) {
       case AppLifecycleState.resumed:
         unawaited(_lock.onResumed());
-        _runMaintenance();
+        _runBackfill();
       case AppLifecycleState.inactive:
         // iOS reports inactive for the Face ID sheet, the app switcher and the
         // notification shade. Treating those as "left the app" made every
@@ -187,52 +183,27 @@ class _TgMediaAppState extends State<TgMediaApp> with WidgetsBindingObserver {
       case AppLifecycleState.paused:
       case AppLifecycleState.hidden:
       case AppLifecycleState.detached:
-        // A history slice in flight is wasted work once the process is about to
-        // be suspended; the cursor is already persisted, so stopping loses
-        // nothing.
         _backfill?.stop();
         _lock.onPaused();
     }
   }
 
-  /// Startup / foreground housekeeping: one cache check and the history walk.
-  ///
-  /// The cache check is throttled: entering the app ten times in a minute must
-  /// not start ten cleaners, and it returns immediately when one is running.
-  ///
-  /// The history walk is a *loop*, not a one-shot kick. A single kick was the
-  /// reason a 4000-message channel froze at 725 videos: the slice budget ran
-  /// out, and nothing ever asked again. `start()` is idempotent, so calling it
-  /// on every resume is safe.
-  void _runMaintenance() {
+  /// The history walk is a loop, not a one-shot kick: a single kick is why a
+  /// 4000-message channel froze part way. `start()` is idempotent.
+  void _runBackfill() {
     final session = _session;
-    final storage = _storage;
-    if (session == null || storage == null) return;
-
+    if (session == null) return;
     final backfill = _backfill ??= HistoryBackfill(
       fetch: (pages) => session.syncHistorySlice(pagesPerChannel: pages),
     );
     backfill.start();
-
-    final now = DateTime.now();
-    if (_lastMaintenance != null &&
-        now.difference(_lastMaintenance!) < const Duration(seconds: 30)) {
-      return;
-    }
-    _lastMaintenance = now;
-
-    final cleaner = _cleaner ??= AutoCacheCleaner(
-      layout: storage.layout,
-      ops: const IoFileOps(),
-      activeFiles: _activeFiles,
-    );
-    unawaited(cleaner.check(limitBytes: _preferences.value.cacheLimitBytes));
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _backfill?.stop();
+    _downloads?.dispose();
     _session?.dispose();
     _lock.dispose();
     _preferences.dispose();
@@ -276,7 +247,9 @@ class _TgMediaAppState extends State<TgMediaApp> with WidgetsBindingObserver {
     }
 
     final session = _session;
-    if (session == null || _storage == null) {
+    final cache = _cache;
+    final downloads = _downloads;
+    if (session == null || cache == null || downloads == null) {
       return const _SplashScreen(label: '正在准备存储');
     }
 
@@ -302,16 +275,16 @@ class _TgMediaAppState extends State<TgMediaApp> with WidgetsBindingObserver {
               preferences: _preferences,
               lock: _lock,
               lockStore: _lockStore,
-              storageReport: _storage!,
-              activeFiles: _activeFiles,
+              cache: cache,
+              downloads: downloads,
             );
         }
       },
     );
   }
 
-  /// §8.6: the only way out of a forgotten passcode. It re-authenticates through
-  /// Telegram by clearing the local session, then drops the app lock.
+  /// The only way out of a forgotten passcode: re-authenticate through Telegram
+  /// by clearing the local session, then drop the app lock.
   Future<void> _recoverPasscode(AppSession session) async {
     final confirmed = await confirmRecoveryReset(context);
     if (!confirmed || !mounted) return;
@@ -350,7 +323,7 @@ class _SplashScreen extends StatelessWidget {
   }
 }
 
-/// Three tabs, fixed order, no fourth entry and no nested tab bars (§2).
+/// Two tabs, fixed order, no third entry and no nested tab bars.
 class AppShell extends StatefulWidget {
   const AppShell({
     super.key,
@@ -358,16 +331,16 @@ class AppShell extends StatefulWidget {
     required this.preferences,
     required this.lock,
     required this.lockStore,
-    required this.storageReport,
-    required this.activeFiles,
+    required this.cache,
+    required this.downloads,
   });
 
   final AppSession session;
   final PreferencesController preferences;
   final UnlockController lock;
   final AppLockStore lockStore;
-  final TempZoneReport storageReport;
-  final ActiveFileRegistry activeFiles;
+  final MediaCache cache;
+  final DownloadManager downloads;
 
   @override
   State<AppShell> createState() => _AppShellState();
@@ -376,41 +349,9 @@ class AppShell extends StatefulWidget {
 class _AppShellState extends State<AppShell> {
   int _index = 0;
 
-  /// Published by the feed while a video is on screen. While true the shell
-  /// hides its bottom tab bar: immersive playback, the three tabs are chrome.
-  /// The feed clears it when it stops playing or when the user leaves the tab.
-  final ValueNotifier<bool> _feedImmersive = ValueNotifier<bool>(false);
-
-  /// The shell does not own orientation any more.
-  ///
-  /// `_PortraitHost` holds portrait for every non-player route, and the feed
-  /// raises its own intent on the shared [OrientationCoordinator] while it is
-  /// open. Two independent holders were exactly how the app ended up sideways
-  /// after leaving the player: the shell had set portrait once, in initState,
-  /// and nothing re-applied it after the feed's own reset.
-
-  /// The feed is built on first visit only: constructing it opens a player and
-  /// starts a transfer, which must not happen while the user is reading the
-  /// channel list.
-  bool _feedBuilt = false;
-
   void _select(int index) {
     if (index == _index) return;
-    setState(() {
-      _index = index;
-      if (index == 1) _feedBuilt = true;
-    });
-  }
-
-  /// "Back" out of the immersive feed: with the tab bar hidden there is no
-  /// other way out of the feed tab, so the revealed top bar's back button
-  /// lands the user on the channel list.
-  void _exitFeed() => _select(0);
-
-  @override
-  void dispose() {
-    _feedImmersive.dispose();
-    super.dispose();
+    setState(() => _index = index);
   }
 
   @override
@@ -420,63 +361,40 @@ class _AppShellState extends State<AppShell> {
       body: IndexedStack(
         index: _index,
         children: <Widget>[
-          ChannelListPage(
+          ChannelPage(
             session: widget.session,
-            preferences: widget.preferences.value,
-            activeFiles: widget.activeFiles,
+            preferences: widget.preferences,
+            downloads: widget.downloads,
+            cache: widget.cache,
           ),
-          _feedBuilt
-              ? FeedPage(
-                  session: widget.session,
-                  preferences: widget.preferences.value,
-                  activeFiles: widget.activeFiles,
-                  isActive: _index == 1,
-                  playbackImmersive: _feedImmersive,
-                  onExitPlayback: _exitFeed,
-                )
-              : const SizedBox.shrink(),
           SettingsPage(
             session: widget.session,
             preferences: widget.preferences,
             lock: widget.lock,
             lockStore: widget.lockStore,
-            storageReport: widget.storageReport,
+            cache: widget.cache,
+            downloads: widget.downloads,
           ),
         ],
       ),
-      bottomNavigationBar: ValueListenableBuilder<bool>(
-        valueListenable: _feedImmersive,
-        // The tab bar widget is built once and reused: only its visibility
-        // depends on the immersive flag, so the shell body (and the feed's
-        // state inside it) is never rebuilt for a visibility flip.
-        child: CupertinoTabBar(
-          currentIndex: _index,
-          onTap: _select,
-          backgroundColor: Theme.of(context).scaffoldBackgroundColor,
-          activeColor: scheme.primary,
-          inactiveColor: scheme.onSurfaceVariant,
-          items: const <BottomNavigationBarItem>[
-            BottomNavigationBarItem(
-              icon: Icon(CupertinoIcons.list_bullet),
-              activeIcon: Icon(CupertinoIcons.list_bullet),
-              label: '频道',
-            ),
-            BottomNavigationBarItem(
-              icon: Icon(CupertinoIcons.play_rectangle),
-              activeIcon: Icon(CupertinoIcons.play_rectangle),
-              label: '抖音',
-            ),
-            BottomNavigationBarItem(
-              icon: Icon(CupertinoIcons.gear),
-              activeIcon: Icon(CupertinoIcons.gear),
-              label: '设置',
-            ),
-          ],
-        ),
-        builder: (context, immersive, tabBar) {
-          final hidden = _index == 1 && immersive;
-          return hidden ? const SizedBox.shrink() : tabBar!;
-        },
+      bottomNavigationBar: CupertinoTabBar(
+        currentIndex: _index,
+        onTap: _select,
+        backgroundColor: Theme.of(context).scaffoldBackgroundColor,
+        activeColor: scheme.primary,
+        inactiveColor: scheme.onSurfaceVariant,
+        items: const <BottomNavigationBarItem>[
+          BottomNavigationBarItem(
+            icon: Icon(CupertinoIcons.list_bullet),
+            activeIcon: Icon(CupertinoIcons.list_bullet),
+            label: '频道',
+          ),
+          BottomNavigationBarItem(
+            icon: Icon(CupertinoIcons.gear),
+            activeIcon: Icon(CupertinoIcons.gear),
+            label: '设置',
+          ),
+        ],
       ),
     );
   }

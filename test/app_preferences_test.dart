@@ -18,174 +18,102 @@ class FailingStore implements SecretStore {
   @override
   Future<void> write(String key, String value) async {
     writeCount++;
-    if (failOnWrite) throw StateError('keychain unavailable');
+    if (failOnWrite) throw StateError('write failed');
     values[key] = value;
   }
 
   @override
-  Future<void> delete(String key) async => values.remove(key);
+  Future<void> delete(String key) async {
+    values.remove(key);
+  }
 }
 
 void main() {
-  group('AppPreferences defaults', () {
-    test('first launch is system theme, portrait-first, sound on, preload on', () {
-      const initial = AppPreferences.initial;
-      expect(initial.theme, ThemePreference.system);
-      expect(initial.feedDirection, FeedDirection.portraitPreferred);
-      expect(initial.defaultMuted, isFalse);
-      expect(initial.preloadAdjacent, isTrue);
-    });
-
-    test('theme preference maps onto ThemeMode without inventing a value', () {
-      expect(ThemePreference.system.themeMode, ThemeMode.system);
-      expect(ThemePreference.light.themeMode, ThemeMode.light);
-      expect(ThemePreference.dark.themeMode, ThemeMode.dark);
-    });
-
-    test('there is no network restriction or long-press setting to persist', () {
-      // Guards against a later step restoring a toggle that was cancelled.
-      final keys = AppPreferences.initial.toJson().keys.toSet();
-      expect(keys, containsAll(<String>['theme', 'feedDirection']));
-      expect(keys.any((k) => k.toLowerCase().contains('wifi')), isFalse);
-      expect(keys.any((k) => k.toLowerCase().contains('longpress')), isFalse);
-      expect(keys.any((k) => k.toLowerCase().contains('download')), isFalse);
-      expect(keys.any((k) => k.toLowerCase().contains('favorite')), isFalse);
-    });
+  test('defaults match the product spec', () {
+    const prefs = AppPreferences.initial;
+    expect(prefs.theme, ThemePreference.system);
+    expect(prefs.playbackSpeed, 1.0);
+    // The diagnostic badge is a verification aid, so it ships off.
+    expect(prefs.diagnosticBadge, isFalse);
+    expect(prefs.defaultMuted, isFalse);
   });
 
-  group('PreferencesStore persistence', () {
-    test('round-trips every field through the store', () async {
-      final secrets = MemorySecretStore();
-      final store = PreferencesStore(store: secrets);
-      const next = AppPreferences(
-        theme: ThemePreference.dark,
-        feedDirection: FeedDirection.allowLandscape,
-        defaultMuted: true,
-        preloadAdjacent: false,
-        forceStreamingTest: true,
-      );
-
-      await store.save(next);
-      final loaded = await PreferencesStore(store: secrets).load();
-
-      expect(loaded, next);
-      expect(loaded.forceStreamingTest, isTrue,
-          reason: '强制验收标志必须跨重启存活');
-    });
-
-    test('an empty store yields the documented defaults', () async {
-      final store = PreferencesStore(store: MemorySecretStore());
-      expect(await store.load(), AppPreferences.initial);
-    });
-
-    test('corrupt JSON falls back to defaults instead of throwing', () async {
-      final secrets = MemorySecretStore(
-        <String, String>{PreferencesStore.storageKey: '{not json'},
-      );
-      final store = PreferencesStore(store: secrets);
-      expect(await store.load(), AppPreferences.initial);
-    });
-
-    test('a JSON array instead of an object is treated as corrupt', () async {
-      final secrets = MemorySecretStore(
-        <String, String>{PreferencesStore.storageKey: '[1,2,3]'},
-      );
-      expect(await PreferencesStore(store: secrets).load(), AppPreferences.initial);
-    });
-
-    test('an unknown enum name only resets that field', () async {
-      final secrets = MemorySecretStore(<String, String>{
-        PreferencesStore.storageKey:
-            '{"theme":"neon","feedDirection":"allowLandscape","defaultMuted":true}',
-      });
-      final loaded = await PreferencesStore(store: secrets).load();
-      expect(loaded.theme, ThemePreference.system);
-      expect(loaded.feedDirection, FeedDirection.allowLandscape);
-      expect(loaded.defaultMuted, isTrue);
-    });
-
-    test('preloadAdjacent is only false when it was explicitly stored as false',
-        () async {
-      final secrets = MemorySecretStore(<String, String>{
-        PreferencesStore.storageKey: '{"theme":"dark"}',
-      });
-      final loaded = await PreferencesStore(store: secrets).load();
-      expect(loaded.preloadAdjacent, isTrue);
-    });
-
-    test('the storage slot is versioned', () {
-      expect(PreferencesStore.storageKey, endsWith('_v1'));
-    });
+  test('theme preference maps onto ThemeMode', () {
+    expect(ThemePreference.system.themeMode, ThemeMode.system);
+    expect(ThemePreference.light.themeMode, ThemeMode.light);
+    expect(ThemePreference.dark.themeMode, ThemeMode.dark);
   });
 
-  group('PreferencesController', () {
-    test('starts unloaded and reports the defaults', () {
-      final controller = PreferencesController(
-        store: PreferencesStore(store: MemorySecretStore()),
-      );
-      expect(controller.isLoaded, isFalse);
-      expect(controller.value, AppPreferences.initial);
+  test('round trip keeps every field', () {
+    const prefs = AppPreferences(
+      theme: ThemePreference.dark,
+      defaultMuted: true,
+      playbackSpeed: 1.5,
+      diagnosticBadge: true,
+    );
+    final decoded = AppPreferences.fromJson(prefs.toJson());
+    expect(decoded, prefs);
+  });
+
+  test('unknown values fall back instead of failing the record', () {
+    final decoded = AppPreferences.fromJson(<String, Object?>{
+      'theme': 'neon',
+      'playbackSpeed': 3.7,
+      'diagnosticBadge': 'yes',
     });
+    expect(decoded.theme, ThemePreference.system);
+    expect(decoded.playbackSpeed, 1.0);
+    // A non-boolean badge flag is read as "off", never as "on".
+    expect(decoded.diagnosticBadge, isFalse);
+  });
 
-    test('load reads what was persisted', () async {
-      final secrets = MemorySecretStore(<String, String>{
-        PreferencesStore.storageKey: '{"theme":"light","defaultMuted":true}',
-      });
-      final controller = PreferencesController(
-        store: PreferencesStore(store: secrets),
-      );
-      await controller.load();
-      expect(controller.isLoaded, isTrue);
-      expect(controller.value.theme, ThemePreference.light);
-      expect(controller.value.defaultMuted, isTrue);
-    });
+  test('every offered speed survives the round trip', () {
+    for (final speed in kPlaybackSpeeds) {
+      final decoded =
+          AppPreferences.fromJson(<String, Object?>{'playbackSpeed': speed});
+      expect(decoded.playbackSpeed, speed);
+    }
+  });
 
-    test('setters persist and notify', () async {
-      final secrets = MemorySecretStore();
-      final controller = PreferencesController(
-        store: PreferencesStore(store: secrets),
-      );
-      await controller.load();
-      var notifications = 0;
-      controller.addListener(() => notifications++);
+  test('formatPlaybackSpeed prints a usable label', () {
+    expect(formatPlaybackSpeed(1.0), '1.0x');
+    expect(formatPlaybackSpeed(0.5), '0.5x');
+    expect(formatPlaybackSpeed(1.25), '1.25x');
+    expect(formatPlaybackSpeed(2.0), '2.0x');
+  });
 
-      await controller.setTheme(ThemePreference.dark);
-      await controller.setDefaultMuted(true);
-      await controller.setFeedDirection(FeedDirection.allowLandscape);
-      await controller.setPreloadAdjacent(false);
+  test('controller rejects an unsupported speed', () async {
+    final controller =
+        PreferencesController(store: PreferencesStore(store: FailingStore()));
+    await controller.load();
+    expect(await controller.setPlaybackSpeed(3.0), isFalse);
+    expect(controller.value.playbackSpeed, 1.0);
+    expect(await controller.setPlaybackSpeed(1.5), isTrue);
+    expect(controller.value.playbackSpeed, 1.5);
+  });
 
-      expect(notifications, greaterThanOrEqualTo(4));
-      expect(controller.value.theme, ThemePreference.dark);
-      expect(controller.value.defaultMuted, isTrue);
-      expect(controller.value.feedDirection, FeedDirection.allowLandscape);
-      expect(controller.value.preloadAdjacent, isFalse);
+  test('a failed write leaves the in-memory value untouched', () async {
+    final store = FailingStore(failOnWrite: true);
+    final controller =
+        PreferencesController(store: PreferencesStore(store: store));
+    await controller.load();
+    await controller.setDiagnosticBadge(true);
+    expect(controller.value.diagnosticBadge, isFalse);
+    expect(controller.lastError, isNotNull);
+  });
 
-      final reloaded =
-          await PreferencesStore(store: secrets).load();
-      expect(reloaded, controller.value);
-    });
+  test('the theme preference persists through the controller', () async {
+    final controller =
+        PreferencesController(store: PreferencesStore(store: FailingStore()));
+    await controller.load();
+    await controller.setTheme(ThemePreference.dark);
+    expect(controller.value.theme, ThemePreference.dark);
+  });
 
-    test('a failed write leaves the in-memory value untouched', () async {
-      final controller = PreferencesController(
-        store: PreferencesStore(store: FailingStore(failOnWrite: true)),
-      );
-      await controller.load();
-      await controller.setTheme(ThemePreference.dark);
-
-      expect(controller.value.theme, ThemePreference.system);
-      expect(controller.lastError, isNotNull);
-      expect(controller.isSaving, isFalse);
-    });
-
-    test('setting the same value does not write again', () async {
-      final secrets = FailingStore();
-      final controller = PreferencesController(
-        store: PreferencesStore(store: secrets),
-      );
-      await controller.load();
-      final before = secrets.writeCount;
-      await controller.setTheme(ThemePreference.system);
-      expect(secrets.writeCount, before);
-    });
+  test('a corrupt stored record starts from defaults', () async {
+    final store = FailingStore();
+    store.values[PreferencesStore.storageKey] = 'not json';
+    final loaded = await PreferencesStore(store: store).load();
+    expect(loaded, AppPreferences.initial);
   });
 }

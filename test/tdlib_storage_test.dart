@@ -1,21 +1,19 @@
-
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
-import 'package:tg_media_probe/storage/active_files.dart';
-import 'package:tg_media_probe/storage/cache_manager.dart';
+import 'package:tg_media_probe/download/media_cache.dart';
 import 'package:tg_media_probe/storage/storage_layout.dart';
 
 import 'support/sandbox.dart';
 
-/// Ties the TDLib on-disk layout to the four storage zones.
+/// Ties the TDLib on-disk layout to the storage zones.
 ///
-/// Two directories matter and they are deliberately in different zones:
+/// Two directories matter and they are deliberately kept apart:
 /// * the database (`authRoot/tdlib/db`) is the local session — losing it means
-///   signing in again, so cache clearing must never reach it;
-/// * the file pool (`tempRoot/tdlib_files`) is rebuildable — clearing it costs
-///   bandwidth, not data.
-/// Nothing wrote this down in a test until now; the two paths were only kept
-/// apart by convention inside `storage_layout.dart`.
+///   signing in again, so no cache operation may reach it;
+/// * the file pool (`mediaRoot/tdlib`) is the player's source of bytes. It sits
+///   beside the index under Application Support, **not** in `Library/Caches`,
+///   because iOS may purge Caches at any time and "downloaded once, plays
+///   offline" is the product promise.
 void main() {
   late TestSandbox sandbox;
 
@@ -39,16 +37,14 @@ void main() {
       );
     });
 
-    test('the file pool sits in the rebuildable temp zone', () async {
+    test('the file pool lives beside the index, outside the purgeable cache',
+        () async {
       final layout = sandbox.layout;
-      expect(await layout.zoneOf(layout.tdlibFilesDir), StorageZone.tempCache);
-      expect(p.isWithin(layout.tempRoot, layout.tdlibFilesDir), isTrue);
-      await expectLater(
-        layout.assertDeletableByCacheClear(
-            p.join(layout.tdlibFilesDir, 'abc123.MP4')),
-        completes,
-        reason: 'the pool only costs bandwidth to rebuild',
-      );
+      expect(p.isWithin(layout.mediaRoot, layout.tdlibFilesDir), isTrue);
+      expect(p.isWithin(layout.tempRoot, layout.tdlibFilesDir), isFalse,
+          reason: 'Library/Caches is purgeable; the pool must survive it');
+      // Outside every managed zone means no cache path can reach it by zone.
+      expect(await layout.zoneOf(layout.tdlibFilesDir), isNull);
     });
 
     test('the two directories are not inside each other', () {
@@ -59,7 +55,7 @@ void main() {
     });
   });
 
-  group('clearing the cache with a real TDLib layout', () {
+  group('clearing local media with a real TDLib layout', () {
     late String binlog;
     late String dbFile;
     late String poolFile;
@@ -72,85 +68,47 @@ void main() {
       await sandbox.write(binlog, 'binlog-bytes');
       await sandbox.write(dbFile, 'sqlite-bytes');
       await sandbox.writeBytes(poolFile, 4096);
-      await sandbox.writeBytes(sandbox.tempFile('thumb.jpg'), 512);
+      await sandbox.writeBytes(p.join(layout.mediaRoot, 'tdlib', 'x.mp4'), 512);
     });
 
-    test('clearing the cache never touches the TDLib pool', () async {
-      final manager = CacheManager(
-        layout: sandbox.layout,
-        ops: sandbox.ops,
-        activeFiles: ActiveFileRegistry(),
-      );
+    MediaCache cache() =>
+        MediaCache(layout: sandbox.layout, ops: sandbox.ops);
 
-      final report = await manager.clear(userConfirmed: true);
+    test('clearing local media never touches the TDLib database', () async {
+      final wipe = await cache().clearLocal();
 
-      // Database and session metadata untouched, byte for byte.
+      // Session metadata untouched, byte for byte.
       expect(await sandbox.ops.exists(binlog), isTrue);
       expect(await sandbox.ops.exists(dbFile), isTrue);
       expect(await sandbox.ops.readAsString(binlog), 'binlog-bytes');
       expect(await sandbox.ops.readAsString(dbFile), 'sqlite-bytes');
+      expect(wipe.errors, isEmpty);
+    });
 
-      // The pool file survives too — on purpose. This layer may not call
-      // TDLib's deleteFile (a source-scan test forbids the storage layer from
-      // reaching TDLib at all), and deleting behind TDLib's back leaves its
-      // file database claiming a file that is no longer there. Reclaiming the
-      // pool needs a TDLib-aware step; tracked in STEP4-ACCEPTANCE-GAP-REPORT.
+    test('the pool is the local media cache, so it is cleared', () async {
+      final used = await cache().usedBytes();
+      expect(used, 4096 + 512);
+
+      final wipe = await cache().clearLocal();
+
+      expect(await sandbox.ops.exists(poolFile), isFalse);
+      expect(wipe.deletedFiles, 2);
+      expect(wipe.freedBytes, 4096 + 512);
+      expect(await cache().usedBytes(), 0);
+    });
+
+    test('the file the player has open survives its own cache clear', () async {
+      final wipe = await cache().clearLocal(keep: <String>{poolFile});
+
       expect(await sandbox.ops.exists(poolFile), isTrue);
-
-      // Only the thumbnail was actually removed: 512 bytes, nothing else.
-      expect(await sandbox.ops.exists(sandbox.tempFile('thumb.jpg')), isFalse);
-      expect(report.freedBytes, 512);
-      expect(report.protectedZonesIntact, isTrue);
-      expect(report.succeeded, isTrue);
-    });
-
-    test('the pool is outside the scan, so its size is never advertised '
-        'as reclaimable', () async {
-      final manager = CacheManager(
-        layout: sandbox.layout,
-        ops: sandbox.ops,
-        activeFiles: ActiveFileRegistry(),
-      );
-
-      final scan = await manager.scan();
-
-      expect(
-        scan.entries.any((e) => e.path.contains('tdlib_files')),
-        isFalse,
-        reason: 'scanning the pool would promise a reclaim the clear step '
-            'does not perform',
-      );
-      expect(scan.entries, isNotEmpty);
-    });
-
-    test('an in-use thumbnail is skipped and its bytes not counted', () async {
-      final thumb = sandbox.tempFile('thumb.jpg');
-      final active = ActiveFileRegistry();
-      active.markInUse(thumb, reason: 'player');
-      final manager = CacheManager(
-        layout: sandbox.layout,
-        ops: sandbox.ops,
-        activeFiles: active,
-      );
-
-      final report = await manager.clear(userConfirmed: true);
-
-      expect(await sandbox.ops.exists(thumb), isTrue);
-      expect(report.skippedInUse, isNotEmpty);
-      expect(report.freedBytes, 0);
-
-      active.release(thumb);
+      expect(wipe.skipped, <String>[poolFile]);
+      expect(wipe.deletedFiles, 1);
+      expect(wipe.freedBytes, 512);
     });
 
     test('clearing twice does not double-count bytes', () async {
-      final manager = CacheManager(
-        layout: sandbox.layout,
-        ops: sandbox.ops,
-        activeFiles: ActiveFileRegistry(),
-      );
-
-      final first = await manager.clear(userConfirmed: true);
-      final second = await manager.clear(userConfirmed: true);
+      final first = await cache().clearLocal();
+      final second = await cache().clearLocal();
 
       expect(first.freedBytes, greaterThan(0));
       expect(second.freedBytes, 0);

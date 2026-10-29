@@ -5,11 +5,11 @@
 /// are cosmetic and are read after the lock opens. Mixing them would make a
 /// corrupted theme value able to break the unlock decision.
 ///
-/// Scope notes, so later steps do not "restore" them by accident:
-/// * No `onlyWifi` field. The product decision is "do not restrict by network
-///   type", so there is nothing to persist and no toggle to render.
-/// * No long-press action field. Long press does nothing on the feed; the
-///   gesture is simply not bound.
+/// Scope notes, so nothing creeps back in:
+/// * no preload field — the product decision is "only the video the user opened
+///   is downloaded", so there is nothing to configure;
+/// * no streaming field — there is one playback source, a complete local file;
+/// * no long-press action field — long press is not bound to anything.
 library;
 
 import 'dart:convert';
@@ -18,7 +18,6 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart' show ThemeMode;
 
 import '../security/tdlib_key.dart';
-import '../storage/cache_budget.dart';
 
 /// Light / dark / follow-system. Maps 1:1 onto [ThemeMode].
 enum ThemePreference { system, light, dark }
@@ -44,192 +43,95 @@ extension ThemePreferenceWire on ThemePreference {
   }
 }
 
-/// How the video page treats device rotation.
-///
-/// `portraitPreferred` is the default from the spec: the feed stays portrait and
-/// landscape is entered deliberately, one video at a time.
-enum FeedDirection { portraitPreferred, allowLandscape }
+/// Playback rates offered in settings. 1.0 is the default.
+const List<double> kPlaybackSpeeds = <double>[0.5, 0.75, 1.0, 1.25, 1.5, 2.0];
 
-extension FeedDirectionLabel on FeedDirection {
-  String get label => switch (this) {
-        FeedDirection.portraitPreferred => '竖屏优先',
-        FeedDirection.allowLandscape => '允许横屏',
-      };
+String formatPlaybackSpeed(double speed) {
+  if (speed == speed.roundToDouble()) return '${speed.toStringAsFixed(1)}x';
+  return '${speed.toStringAsFixed(2).replaceFirst(RegExp(r'0$'), '')}x';
+}
 
-  /// True when the page may rotate itself with the device. `portraitPreferred`
-  /// still allows the explicit landscape button — it only stops *automatic*
-  /// rotation from reflowing the feed while the user is scrolling.
-  bool get followsDevice => this == FeedDirection.allowLandscape;
-
-  static FeedDirection fromName(Object? name) {
-    for (final value in FeedDirection.values) {
-      if (value.name == name) return value;
-    }
-    return FeedDirection.portraitPreferred;
+double _speedFromJson(Object? raw) {
+  final value = raw is num ? raw.toDouble() : null;
+  if (value == null) return 1.0;
+  for (final allowed in kPlaybackSpeeds) {
+    if ((allowed - value).abs() < 0.001) return allowed;
   }
+  return 1.0;
 }
 
 @immutable
 class AppPreferences {
   const AppPreferences({
     this.theme = ThemePreference.system,
-    this.feedDirection = FeedDirection.portraitPreferred,
     this.defaultMuted = false,
-    this.preloadAdjacent = true,
-    this.preloadCount = defaultPreloadCount,
-    this.cacheLimitBytes = CacheBudget.defaultLimit,
-    this.streamingDiagnostics = false,
-    this.forceStreamingTest = false,
-    this.streamingPlayback = true,
+    this.playbackSpeed = 1.0,
+    this.diagnosticBadge = false,
   });
 
-  /// How many videos **after** the current one may be prepared in advance.
-  ///
-  /// The old switch only had on/off and always meant "the next one", so 1 is
-  /// the compatible default. The ceiling is small on purpose: every extra item
-  /// is a TDLib transfer competing with the one being watched, and a player
-  /// slot that has to be thrown away when the user swipes past it.
-  static const int defaultPreloadCount = 1;
-  static const int maxPreloadCount = 3;
-
-  /// First launch. Nothing here turns anything on that the spec wants off:
-  /// muting is off, theme follows the system, rotation is portrait-first.
   static const AppPreferences initial = AppPreferences();
 
   final ThemePreference theme;
-  final FeedDirection feedDirection;
 
-  /// Sound is on by default; a muted-by-default feed is a support ticket.
+  /// Sound is on by default; a muted-by-default player is a support ticket.
   final bool defaultMuted;
 
-  /// Legacy on/off view of [preloadCount]. Kept so an older store still loads;
-  /// `preloadCount` is the value the player uses.
-  final bool preloadAdjacent;
+  /// Remembered playback rate, one of [kPlaybackSpeeds].
+  final double playbackSpeed;
 
-  /// Videos after the current one that may be prepared ahead. 0 disables it.
-  final int preloadCount;
-
-  /// Ceiling for the cleanable cache. Bytes on disk, formatted for the UI.
-  final int cacheLimitBytes;
-
-  /// Shows the on-device streaming badge and the playback diagnostics section.
-  ///
-  /// Off by default: it is a verification aid, not a feature. Nothing about
-  /// playback, sync, caching or the UI changes when it is on — it only makes
-  /// the already-collected numbers visible.
-  final bool streamingDiagnostics;
-
-  /// FORCE_STREAMING_TEST, persisted so an acceptance run survives an app
-  /// restart or reinstall of the same build: the mode that silently vanished
-  /// between arming and playing was the "STREAMING TEST: OFF" hole.
-  final bool forceStreamingTest;
-
-  /// The preference layer of the streaming decision: play-while-downloading
-  /// is on by default. Kept separate from [forceStreamingTest] so the two
-  /// layers can be told apart in the decision trace — the acceptance needs
-  /// "preference off, force on" to still stream.
-  final bool streamingPlayback;
+  /// Top-right diagnostic badge on the player. Off by default: it is a
+  /// verification aid, not a feature.
+  final bool diagnosticBadge;
 
   AppPreferences copyWith({
     ThemePreference? theme,
-    FeedDirection? feedDirection,
     bool? defaultMuted,
-    bool? preloadAdjacent,
-    int? preloadCount,
-    int? cacheLimitBytes,
-    bool? streamingDiagnostics,
-    bool? forceStreamingTest,
-    bool? streamingPlayback,
-  }) {
-    final count = preloadCount ?? this.preloadCount;
-    return AppPreferences(
-      theme: theme ?? this.theme,
-      feedDirection: feedDirection ?? this.feedDirection,
-      defaultMuted: defaultMuted ?? this.defaultMuted,
-      preloadAdjacent: preloadAdjacent ?? (count > 0),
-      preloadCount: count,
-      cacheLimitBytes: cacheLimitBytes ?? this.cacheLimitBytes,
-      streamingDiagnostics:
-          streamingDiagnostics ?? this.streamingDiagnostics,
-      forceStreamingTest: forceStreamingTest ?? this.forceStreamingTest,
-      streamingPlayback: streamingPlayback ?? this.streamingPlayback,
-    );
-  }
+    double? playbackSpeed,
+    bool? diagnosticBadge,
+  }) =>
+      AppPreferences(
+        theme: theme ?? this.theme,
+        defaultMuted: defaultMuted ?? this.defaultMuted,
+        playbackSpeed: playbackSpeed ?? this.playbackSpeed,
+        diagnosticBadge: diagnosticBadge ?? this.diagnosticBadge,
+      );
 
   Map<String, Object?> toJson() => <String, Object?>{
         'theme': theme.name,
-        'feedDirection': feedDirection.name,
         'defaultMuted': defaultMuted,
-        'preloadAdjacent': preloadAdjacent,
-      'preloadCount': preloadCount,
-      'cacheLimitBytes': cacheLimitBytes,
-      'streamingDiagnostics': streamingDiagnostics,
-      'forceStreamingTest': forceStreamingTest,
-      'streamingPlayback': streamingPlayback,
+        'playbackSpeed': playbackSpeed,
+        'diagnosticBadge': diagnosticBadge,
       };
 
   /// Tolerant decode: an unknown enum name falls back to the default for that
   /// field instead of failing the whole record. A theme value should never be
   /// able to stop the app from starting.
-  static AppPreferences fromJson(Map<String, Object?> json) {
-    return AppPreferences(
-      theme: ThemePreferenceWire.fromName(json['theme']),
-      feedDirection: FeedDirectionLabel.fromName(json['feedDirection']),
-      defaultMuted: json['defaultMuted'] == true,
-      preloadAdjacent: json['preloadAdjacent'] != false,
-      preloadCount: _countFromJson(json),
-      cacheLimitBytes: _limitFromJson(json),
-      streamingDiagnostics: json['streamingDiagnostics'] == true,
-      forceStreamingTest: json['forceStreamingTest'] == true,
-      // Missing key = the documented default (on), not "off".
-      streamingPlayback: json['streamingPlayback'] != false,
-    );
-  }
-
-  /// Reads `preloadCount`, falling back to the old boolean, then to the default.
-  /// Out-of-range values are clamped instead of rejecting the whole record: a
-  /// hand-edited file must not brick the settings page.
-  static int _countFromJson(Map<String, Object?> json) {
-    final raw = json['preloadCount'];
-    if (raw is int) return raw.clamp(0, maxPreloadCount);
-    if (raw is num) return raw.toInt().clamp(0, maxPreloadCount);
-    if (json['preloadAdjacent'] == false) return 0;
-    return defaultPreloadCount;
-  }
-
-  /// Reads the cache ceiling; a missing or nonsensical value falls back to
-  /// 1 GB rather than disabling the cleaner.
-  static int _limitFromJson(Map<String, Object?> json) {
-    final raw = json['cacheLimitBytes'];
-    if (raw is int && CacheBudget.isAllowed(raw)) return raw;
-    if (raw is num && CacheBudget.isAllowed(raw.toInt())) return raw.toInt();
-    return CacheBudget.defaultLimit;
-  }
+  static AppPreferences fromJson(Map<String, Object?> json) => AppPreferences(
+        theme: ThemePreferenceWire.fromName(json['theme']),
+        defaultMuted: json['defaultMuted'] == true,
+        playbackSpeed: _speedFromJson(json['playbackSpeed']),
+        diagnosticBadge: json['diagnosticBadge'] == true,
+      );
 
   @override
   bool operator ==(Object other) =>
       other is AppPreferences &&
       other.theme == theme &&
-      other.feedDirection == feedDirection &&
       other.defaultMuted == defaultMuted &&
-      other.preloadAdjacent == preloadAdjacent &&
-      other.preloadCount == preloadCount &&
-      other.cacheLimitBytes == cacheLimitBytes &&
-      other.streamingDiagnostics == streamingDiagnostics &&
-      other.forceStreamingTest == forceStreamingTest &&
-      other.streamingPlayback == streamingPlayback;
+      other.playbackSpeed == playbackSpeed &&
+      other.diagnosticBadge == diagnosticBadge;
 
   @override
-  int get hashCode =>
-      Object.hash(theme, feedDirection, defaultMuted, preloadAdjacent,
-          preloadCount, cacheLimitBytes, streamingDiagnostics,
-          forceStreamingTest, streamingPlayback);
+  int get hashCode => Object.hash(
+        theme,
+        defaultMuted,
+        playbackSpeed,
+        diagnosticBadge,
+      );
 
   @override
-  String toString() =>
-      'AppPreferences(theme=${theme.name}, dir=${feedDirection.name}, '
-      'muted=$defaultMuted, preload=$preloadCount, '
-      'diag=$streamingDiagnostics)';
+  String toString() => 'AppPreferences(theme=${theme.name}, '
+      'speed=$playbackSpeed, badge=$diagnosticBadge)';
 }
 
 /// Persistence for [AppPreferences].
@@ -309,37 +211,19 @@ class PreferencesController extends ChangeNotifier {
   Future<void> setTheme(ThemePreference theme) =>
       update(_value.copyWith(theme: theme));
 
-  Future<void> setFeedDirection(FeedDirection direction) =>
-      update(_value.copyWith(feedDirection: direction));
-
   Future<void> setDefaultMuted(bool muted) =>
       update(_value.copyWith(defaultMuted: muted));
 
-  Future<void> setStreamingDiagnostics(bool enabled) =>
-      update(_value.copyWith(streamingDiagnostics: enabled));
+  Future<void> setDiagnosticBadge(bool enabled) =>
+      update(_value.copyWith(diagnosticBadge: enabled));
 
-  Future<void> setForceStreamingTest(bool enabled) =>
-      update(_value.copyWith(forceStreamingTest: enabled));
-
-  Future<void> setStreamingPlayback(bool enabled) =>
-      update(_value.copyWith(streamingPlayback: enabled));
-
-  Future<void> setPreloadAdjacent(bool enabled) =>
-      update(_value.copyWith(preloadCount: enabled ? 1 : 0));
-
-  /// Sets the preload window. Returns false when [count] is out of range, so
-  /// the settings row can show an error instead of silently writing a clamp.
-  /// Sets the cache ceiling. Returns false when the value is outside
-  /// [CacheBudget.minLimit]..[CacheBudget.maxLimit]; the caller shows why.
-  Future<bool> setCacheLimit(int bytes) async {
-    if (!CacheBudget.isAllowed(bytes)) return false;
-    await update(_value.copyWith(cacheLimitBytes: bytes));
-    return true;
-  }
-
-  Future<bool> setPreloadCount(int count) async {
-    if (count < 0 || count > AppPreferences.maxPreloadCount) return false;
-    await update(_value.copyWith(preloadCount: count));
+  /// Rejects a rate that is not in [kPlaybackSpeeds] instead of silently
+  /// storing a clamp the player would not honour.
+  Future<bool> setPlaybackSpeed(double speed) async {
+    if (!kPlaybackSpeeds.any((value) => (value - speed).abs() < 0.001)) {
+      return false;
+    }
+    await update(_value.copyWith(playbackSpeed: speed));
     return true;
   }
 }

@@ -1,8 +1,9 @@
-/// The B+ architecture as a hard gate.
+/// The LOCAL_FILE architecture as a hard gate.
 ///
 /// These are not behaviour tests. They read the source and fail when a module
-/// that must not download grows a path to TDLib's download API. A green suite
-/// here is what makes "the player never downloads" a checked fact instead of a
+/// that must not exist comes back: a resource loader, a range proxy, a growing
+/// file reader, a second player chain, a deleted tab. A green suite here is what
+/// makes "only a complete local file is ever played" a checked fact instead of a
 /// review comment.
 library;
 
@@ -10,9 +11,9 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 
-/// Strips `//` line comments so prose about `downloadFile` cannot fail a scan
+/// Strips `//` line comments so prose about a banned symbol cannot fail a scan
 /// that is only about code.
-String _code(String source) {
+String code(String source) {
   final buffer = StringBuffer();
   for (final line in source.split('\n')) {
     final index = line.indexOf('//');
@@ -21,324 +22,182 @@ String _code(String source) {
   return buffer.toString();
 }
 
-/// The body of one top-level class member, from its signature to the closing
-/// brace that starts at the same indentation.
-String _memberBody(String source, String signature) {
-  final start = source.indexOf(signature);
-  expect(start, isNot(-1), reason: '找不到 $signature —— 架构改了就要改这条断言');
-  final rest = source.substring(start);
-  final lines = rest.split('\n');
-  final indent = lines.first.length - lines.first.trimLeft().length;
-  final buffer = StringBuffer()..writeln(lines.first);
-  for (var i = 1; i < lines.length; i++) {
-    final line = lines[i];
-    final isClosing = line.trim() == '}' &&
-        (line.length - line.trimLeft().length) == indent;
-    if (isClosing) {
-      buffer.writeln(line);
-      break;
-    }
-    buffer.writeln(line);
+Iterable<File> dartFiles(String root) sync* {
+  final dir = Directory(root);
+  if (!dir.existsSync()) return;
+  for (final entity in dir.listSync(recursive: true)) {
+    if (entity is File && entity.path.endsWith('.dart')) yield entity;
   }
-  return buffer.toString();
 }
 
-Iterable<File> _sources(String root) => Directory('$root/lib')
-    .listSync(recursive: true)
-    .whereType<File>()
-    .where((f) => f.path.endsWith('.dart'));
-
 void main() {
-  final root = Directory.current.path;
+  final lib = dartFiles('lib').toList();
+  final ios = Directory('ios/Runner')
+      .listSync(recursive: true)
+      .whereType<File>()
+      .where((f) => f.path.endsWith('.swift') || f.path.endsWith('.m'))
+      .toList();
 
-  group('only the Downloader may ask for the whole file', () {
-    test('downloadFile() has exactly three legal homes', () {
-      // The request builder, the transport that sends it, and the message
-      // probe (which resolves a file id, not a play). Anything else is a new
-      // door into the download API.
-      //
-      // `chunk_probe.dart` is the fourth and it is not part of playback: it is
-      // the E1 measurement harness, reachable only from the probe page. The
-      // test below keeps it from becoming a second data source.
-      const allowed = <String>{
-        'lib/td/td_requests.dart',
-        'lib/playback/video_source.dart',
-        'lib/td/media_probe.dart',
-        'lib/td/chunk_probe.dart',
-      };
-      final offenders = <String>[];
-      for (final file in _sources(root)) {
-        final relative = file.path
-            .replaceAll('\\', '/')
-            .split('/lib/')
-            .last;
-        final code = _code(file.readAsStringSync());
-        if (!code.contains('downloadFile(')) continue;
-        if (!allowed.contains('lib/$relative')) {
-          offenders.add('lib/$relative');
-        }
-      }
-      expect(offenders, isEmpty,
-          reason: '这些文件直接调用了 downloadFile()，B+ 只允许 Downloader 经 '
-              'FileTransferApi 请求整文件：$offenders');
-    });
-
-    test('the chunk probe is never on a playback path', () {
-      // E1 has to ask TDLib for offset/limit windows, which the old playback
-      // stack is forbidden from doing. Keeping the probe out of `lib/playback`
-      // is what makes that exception safe: the player cannot import it, and the
-      // only caller is the probe page.
-      for (final file in _sources(root)) {
-        final normalised = file.path.replaceAll('\\', '/');
-        if (!normalised.contains('/lib/playback/')) continue;
-        final code = _code(file.readAsStringSync());
-        expect(code.contains('chunk_probe'), isFalse,
-            reason: '${file.path} 引用了 chunk_probe：实验代码不能进入播放链路');
-      }
-      // Mounted in Settings because that page borrows `AppSession.client` —
-      // the only TdClient a process may hold. `ProbePage` opens its own, which
-      // TDLib rejects with "Can't lock file" while the session is live.
-      final page = File('$root/lib/ui/settings_page.dart').readAsStringSync();
-      expect(page.contains('ChunkProbePanel'), isTrue,
-          reason: '设置页必须挂上 E1 面板，否则真机上没有任何入口');
-    });
-
-    test('the Downloader itself never sends a ranged window', () {      final code = _code(
-        File('$root/lib/playback/downloader.dart').readAsStringSync(),
-      );
-      expect(code.contains('startRange('), isFalse,
-          reason: 'Downloader 只发 limit=0 的整文件请求，窗口属于已删除的 V2 链路');
-      expect(code.contains('DownloadCaller.player'), isFalse);
-      expect(code.contains('DownloadCaller.resourceLoader'), isFalse);
-    });
-
-    test('the file reader cannot reach any download API', () {
-      final code = _code(
-        File('$root/lib/playback/growing_file_reader.dart').readAsStringSync(),
-      );
-      for (final forbidden in <String>[
-        'downloadFile',
-        'startRange',
-        'FileTransferApi',
-        'Downloader',
-      ]) {
-        expect(code.contains(forbidden), isFalse,
-            reason: 'GrowingFileReader 必须只观察，出现「$forbidden」即架构违规');
-      }
-    });
-
-    test('the resource loader cannot reach any download API', () {
-      final code = _code(
-        File('$root/lib/playback/resource_loader.dart').readAsStringSync(),
-      );
-      for (final forbidden in <String>[
-        'downloadFile',
-        'startRange',
-        'FileTransferApi',
-        'continueWindow',
-        'WindowContinuation',
-      ]) {
-        expect(code.contains(forbidden), isFalse,
-            reason: 'ResourceLoader 必须只回读本地文件，出现「$forbidden」即架构违规');
-      }
-    });
+  test('the old streaming modules are gone', () {
+    for (final name in <String>[
+      'resource_loader.dart',
+      'stream_proxy.dart',
+      'growing_file_reader.dart',
+      'native_streaming.dart',
+      'streaming_diagnostics.dart',
+      'source_decision.dart',
+      'stream_window.dart',
+      'video_source.dart',
+      'downloader.dart',
+      'player_slot.dart',
+      'video_player_handle.dart',
+    ]) {
+      expect(File('lib/playback/$name').existsSync(), isFalse,
+          reason: '$name must not come back');
+    }
   });
 
-  group('the AUTO chain', () {
-    test('_streamOnce never sends a request of its own', () {
-      final source = File('$root/lib/playback/video_source.dart')
-          .readAsStringSync();
-      final body = _code(_memberBody(source, 'Future<PlaySource> _streamOnce('));
-      for (final forbidden in <String>[
-        'startRange(',
-        '_api.start(',
-        'downloadFile(',
-      ]) {
-        expect(body.contains(forbidden), isFalse,
-            reason: 'AUTO 链出现在「$forbidden」：播放路径不得自己发起下载');
-      }
-      // The one call it is allowed to make: ask the Downloader to ensure the
-      // transfer exists.
-      expect(body.contains('ensureFullDownload'), isTrue);
-    });
-
-    test('the controller has no second streaming transport', () {
-      // V1 (loopback HTTP) is not "switched off" in the feed controller — it
-      // is gone. No `_tryV1`, no `allowProxy: true`, and no call to the
-      // resolver's proxy entry point. A flag can be flipped back by someone in
-      // a hurry; a missing call site cannot.
-      final code = _code(
-        File('$root/lib/ui/feed_controller.dart').readAsStringSync(),
-      );
-      for (final gone in <String>[
-        '_tryV1',
-        'allowProxy: true',
-        'sources.resolveStream(',
-        "noteTransportStart('HTTP_PROXY')",
-      ]) {
-        expect(code.contains(gone), isFalse,
-            reason: 'AUTO 链只剩一条流式通路，控制器里出现了「$gone」');
-      }
-      expect(code.contains('allowProxy: false'), isTrue,
-          reason: 'decideAfterTransportFailure 必须显式关掉 proxy 选项');
-    });
-
-    test('the transport entry is recorded after beginPlay', () {
-      // `beginPlay` opens a fresh evidence block and clears the attempt flags.
-      // A transport named before it is a transport the report forgets.
-      final source = File('$root/lib/playback/video_source.dart')
-          .readAsStringSync();
-      final begin = source.indexOf('final generation = _diagnostics.beginPlay(');
-      final attempt = source.indexOf('_diagnostics.noteTransportStart(');
-      expect(begin, isNot(-1));
-      expect(attempt, isNot(-1), reason: '没有任何地方记录 transport 进入');
-      expect(attempt, greaterThan(begin),
-          reason: 'noteTransportStart 在 beginPlay 之前 —— 会被重置抹掉');
-    });
-
-    test('the native loader waits out a WAIT_TIMEOUT instead of failing', () {
-      // §8 says a timeout is a report, not a verdict. The Swift pump used to
-      // treat any `errorCode` as terminal: a moov-at-end file legitimately
-      // waits for the whole sequential download, so at 10 s the request was
-      // finished with an error and the player went black. These three facts
-      // together are the fix, and none of them may be relaxed alone.
-      final swift = File(
-        '$root/ios/Runner/Streaming/TGMediaResourceLoader.swift',
-      ).readAsStringSync();
-      expect(swift.contains('waitTimeoutCode = "WAIT_TIMEOUT"'), isTrue,
-          reason: 'native 侧必须认识这个码，否则判断失效');
-
-      const guard =
-          'if code == TGMediaResourceLoader.waitTimeoutCode, reading.downloading {';
-      final at = swift.indexOf(guard);
-      expect(at, isNot(-1),
-          reason: 'WAIT_TIMEOUT 分支必须同时检查 downloading —— '
-              '「下载还在跑」不能当成「请求失败」');
-
-      final branchEnd = swift.indexOf('host?.emit(type: "supplyError"', at);
-      expect(branchEnd, isNot(-1));
-      final branch = swift.substring(at, branchEnd);
-      expect(branch.contains('continue'), isTrue,
-          reason: 'WAIT_TIMEOUT 且下载在跑时必须继续轮询');
-      expect(branch.contains('finishLoading'), isFalse,
-          reason: 'WAIT_TIMEOUT 分支里出现 finishLoading，等于把等待判死');
-
-      // And the Dart side has to tell the truth for that branch to work:
-      // `downloading` is the transfer state, not the wait outcome.
-      final loader = _code(
-        File('$root/lib/playback/resource_loader.dart').readAsStringSync(),
-      );
-      expect(loader.contains('downloading: !timedOut'), isFalse,
-          reason: 'downloading 被写成了「是否超时」，超时的活下载会被报成已死');
-      expect(loader.contains('reader.isDownloading'), isTrue,
-          reason: 'downloading 必须取自 reader 的下载状态');
-    });
-
-    test('the player path holds no downloader reference at all', () {
-      // Player-facing modules: the player itself, the proxy, sessions.
-      for (final relative in <String>[
-        'lib/playback/player_slot.dart',
-        'lib/playback/playback_session.dart',
-        'lib/playback/stream_proxy.dart',
-      ]) {
-        final file = File('$root/$relative');
-        if (!file.existsSync()) continue;
-        final code = _code(file.readAsStringSync());
-        expect(code.contains('downloadFile('), isFalse,
-            reason: '$relative 直接调用了 downloadFile()');
-        expect(code.contains('DownloadCaller.player'), isFalse,
-            reason: '$relative 还在以 PLAYER 名义发请求');
-      }
-    });
+  test('lib/playback contains only the local player and its controller', () {
+    final names = Directory('lib/playback')
+        .listSync()
+        .whereType<File>()
+        .map((f) => f.uri.pathSegments.last)
+        .toList()
+      ..sort();
+    expect(names, <String>['local_media_player.dart', 'playback_controller.dart']);
   });
 
-  group('the verdict is computed from evidence something actually writes', () {
-    // The device report printed `req=0 resp=0 bytes=0` and
-    // STREAMING_NOT_STARTED over a video that had just played 43 s, because the
-    // V2 counters were incremented by two methods no production path called.
-    // A counter the panel reads must be written from the event stream; a
-    // second writer is how the first one silently dies.
-    final diag = File('$root/lib/playback/streaming_diagnostics.dart');
-    final body = _code(diag.readAsStringSync());
-
-    test('V2 counters are written in exactly one place', () {
-      int count(String needle) =>
-          needle.allMatches(body).length;
-      expect(count('_rlRequests++'), 1,
-          reason: '_rlRequests 只能在一个地方自增，否则会有一路永远为 0');
-      expect(count('_rlResponds++'), 1,
-          reason: '_rlResponds 只能在一个地方自增');
-      expect(count('_rlBytes +=') <= 1, isTrue,
-          reason: '_rlBytes 只能在一个地方累加');
-      // …and that place is the event handler both producers write to.
-      expect(body.contains('_countV2Event(name, fields)'), isTrue,
-          reason: 'V2 计数必须由 noteResourceLoaderEvent 统一驱动');
-    });
-
-    test('the resource-loader evidence counts as "attempted"', () {
-      // V2 has no port to bind, so `proxyStartedMillis` is never set on a
-      // resource-loader play. Reading only that marker made every V2 run look
-      // unstarted.
-      final verdict = _memberBody(
-        File('$root/lib/playback/streaming_diagnostics.dart')
-            .readAsStringSync(),
-        '  StreamingVerdict get verdict {',
-      );
-      expect(verdict.contains('_v2StartedMillis'), isTrue,
-          reason: 'verdict 的 attempted 必须含 V2 的启动证据');
-      expect(verdict.contains('_rlResponds'), isTrue,
-          reason: 'verdict 必须认 responds —— 那是真正交给播放器的字节');
-    });
-
-    test('the panel never prints disk FULL next to completed=false', () {
-      // The three-way `completed` (TDLIB / DISK / NONE) is what keeps
-      // `disk=162308586 B FULL` and `completed=false` from appearing together.
-      expect(body.contains('evidence=\$completionEvidence'), isTrue,
-          reason: 'completed 必须带证据来源，不能只回一个布尔');
-      expect(body.contains('completed=\${_isDownloadingCompleted ?'), isFalse,
-          reason: 'completed 只看 TDLib 的 claim，会把已完整的文件报成未完成');
-    });
+  test('nothing references a resource loader, proxy or growing file', () {
+    const banned = <String>[
+      'AVAssetResourceLoader',
+      'TGMediaResourceLoader',
+      'ResourceLoaderHost',
+      'StreamProxy',
+      'stream_proxy',
+      'GrowingFileReader',
+      'ChunkMediaPlayer',
+      'tgmedia://',
+      'VideoPlayerController.networkUrl',
+    ];
+    for (final file in lib) {
+      final source = code(file.readAsStringSync());
+      for (final token in banned) {
+        expect(source.contains(token), isFalse,
+            reason: '${file.path} still mentions $token');
+      }
+    }
   });
 
-  group('a stuck play must still produce a verdict', () {
-    // Two device runs ended with a frozen screen and no report. Both were the
-    // same shape: some await that never completes, and no deadline anywhere
-    // above it. These gates keep the deadlines in place.
-    test('the player load has a deadline', () {
-      final code = _code(
-        File('$root/lib/playback/player_slot.dart').readAsStringSync(),
-      );
-      expect(code.contains('await handle.load().timeout('), isTrue,
-          reason: 'handle.load() 没有超时：AVPlayer 等不到字节就永远不返回，'
-              '整场播放既无首帧也无错误');
-      expect(code.contains('loadTimeout'), isTrue,
-          reason: '超时值必须可配置，测试才能不等 25 秒');
-    });
+  test('the iOS side has no streaming bridge left', () {
+    expect(Directory('ios/Runner/Streaming').existsSync(), isFalse);
+    for (final file in ios) {
+      final source = file.readAsStringSync();
+      expect(source.contains('AVAssetResourceLoaderDelegate'), isFalse,
+          reason: '${file.path} still implements a resource loader');
+      expect(source.contains('TGMediaStreamingPlugin'), isFalse,
+          reason: '${file.path} still registers the streaming plugin');
+    }
+  });
 
-    test('waiting for the whole file stops when the download is dead', () {
-      final body = _code(
-        _memberBody(
-          File('$root/lib/ui/feed_controller.dart').readAsStringSync(),
-          '  Future<PlaySource?> _waitForFullDownload(',
-        ),
-      );
-      expect(body.contains('FullDownloadState.failed'), isTrue,
-          reason: '_waitForFullDownload 必须读取 Downloader 的失败裁决，'
-              '否则一个死掉的传输会让它空等 30 分钟');
-    });
+  test('downloadFile is only issued by the download manager', () {
+    final callers = <String>[];
+    for (final file in lib) {
+      final source = code(file.readAsStringSync());
+      if (source.contains('downloadFile(') &&
+          !file.path.endsWith('td_requests.dart') &&
+          !file.path.endsWith('download_manager.dart')) {
+        callers.add(file.path);
+      }
+    }
+    expect(callers, isEmpty);
+  });
 
-    test('the downloader watches for silence', () {
-      final code = _code(
-        File('$root/lib/playback/downloader.dart').readAsStringSync(),
-      );
-      expect(code.contains('DOWNLOAD_STALL'), isTrue,
-          reason: '没有停滞检测，TDLib 停下之后没有任何层知道');
-      expect(code.contains('_api.stat('), isTrue,
-          reason: '判定停滞前必须向 TDLib 复核一次，否则会重启一条健康的传输');
-      // And it still may not send a ranged window — that stays the player's
-      // deletion, not the download authority's new toy.
-      expect(code.contains('startRange('), isFalse,
-          reason: 'Downloader 仍然只发整文件请求');
-    });
+  test('the player opens a file, never a network URL', () {
+    final source = code(File('lib/playback/local_media_player.dart').readAsStringSync());
+    expect(source.contains('VideoPlayerController.file'), isTrue);
+    expect(source.contains('http'), isFalse);
+  });
+
+  test('the shell has exactly two tabs and no 抖音', () {
+    final source = File('lib/app/app_root.dart').readAsStringSync();
+    expect(
+      RegExp(r'BottomNavigationBarItem\(').allMatches(source).length,
+      2,
+      reason: 'the shell must define exactly two tabs',
+    );
+    expect(source.contains('抖音'), isFalse);
+    expect(source.contains("label: '频道'"), isTrue);
+    expect(source.contains("label: '设置'"), isTrue);
+  });
+
+  test('no long-press handler exists on the player', () {
+    final source = code(File('lib/ui/video_player_page.dart').readAsStringSync());
+    expect(source.contains('onLongPress'), isFalse);
+  });
+
+  test('the badge is off unless the preference says otherwise', () {
+    final prefs = File('lib/app/app_preferences.dart').readAsStringSync();
+    expect(prefs.contains('this.diagnosticBadge = false'), isTrue);
+  });
+
+  test('the media cache lives outside Library/Caches', () {
+    final layout = File('lib/storage/storage_layout.dart').readAsStringSync();
+    // Derived from the index root (Application Support), never from the
+    // purgeable Caches root.
+    expect(
+      layout.contains("p.join(p.dirname(p.absolute(indexRoot)), 'media')"),
+      isTrue,
+      reason: 'mediaRoot must sit beside the index, not in Library/Caches',
+    );
+    expect(layout.contains("p.join(tempRoot, 'tdlib_files')"), isFalse);
+  });
+
+  test('the retired cache-policy layer is gone', () {
+    for (final path in <String>[
+      'lib/storage/cache_manager.dart',
+      'lib/storage/cache_budget.dart',
+      'lib/storage/active_files.dart',
+      'lib/storage/temp_zone_report.dart',
+      'lib/storage/cache_ownership.dart',
+      'lib/ui/storage_panel.dart',
+    ]) {
+      expect(File(path).existsSync(), isFalse,
+          reason: '$path belongs to the streaming-era cache cleaner');
+    }
+  });
+
+  test('local media bytes are deleted by one module only', () {
+    // Allowed: the file operations themselves, the download manager's
+    // `deleteFile` TDLib call, the media cache's clear pass, and the session
+    // reset, which removes its own index journal (never media).
+    const allowed = <String>[
+      'file_ops.dart',
+      'media_cache.dart',
+      'download_manager.dart',
+      'td_requests.dart',
+      'app_session.dart',
+    ];
+    final callers = <String>[];
+    for (final file in lib) {
+      final source = code(file.readAsStringSync());
+      if (source.contains('deleteFile(') &&
+          !allowed.any((name) => file.path.endsWith(name))) {
+        callers.add(file.path);
+      }
+    }
+    expect(callers, isEmpty,
+        reason: 'a second deleter of local bytes is how "clear cache" starts '
+            'eating things it does not own');
+  });
+
+  test('favourites, history and duration filters left no code behind', () {
+    const banned = <String>['favorite', '收藏', '时长筛选', '下载历史', '下载任务'];
+    for (final file in lib) {
+      final source = file.readAsStringSync();
+      for (final token in banned) {
+        expect(source.contains(token), isFalse,
+            reason: '${file.path} still mentions $token');
+      }
+    }
   });
 }

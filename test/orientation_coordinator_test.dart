@@ -281,9 +281,10 @@ void main() {
 
   group('the player page only rotates through the toggle', () {
     test('_toggleLandscape never touches the feed controller', () {
-      final source = File(p.normalize('lib/ui/feed_page.dart')).readAsStringSync();
+      final source =
+          File(p.normalize('lib/ui/video_player_page.dart')).readAsStringSync();
       final start = source.indexOf('Future<void> _toggleLandscape()');
-      final end = source.indexOf('Future<void> _openNumberBox()', start);
+      final end = source.indexOf('void _message(', start);
       final body = source.substring(start, end);
 
       expect(body.contains('controller.'), isFalse,

@@ -113,7 +113,6 @@ class IndexStore {
   String get snapshotPath => p.join(directory, 'media_snapshot.json');
 
   int get count => _records.length;
-  int get favoriteCount => _records.values.where((r) => r.favorite).length;
   int get channelCount => _watermarks.length;
   bool get isOpen => _opened;
 
@@ -185,19 +184,9 @@ class IndexStore {
         if (raw is Map) {
           final record = MediaRecord.fromJson(raw.cast<String, Object?>());
           if (record != null) {
-            final existing = _records[record.key];
-            _records[record.key] = existing != null && existing.favorite
-                ? record.copyWith(favorite: true)
-                : record;
+            _records[record.key] = record;
             _sortDirty = true;
           }
-        }
-      case 'f':
-        final key = op['k'];
-        final value = op['v'];
-        if (key is String && value is bool) {
-          final existing = _records[key];
-          if (existing != null) _records[key] = existing.copyWith(favorite: value);
         }
       case 'w':
         final watermark = ChannelWatermark.fromJson(op);
@@ -225,8 +214,9 @@ class IndexStore {
 
   /// Inserts or refreshes records. Returns how many keys were new.
   ///
-  /// Existing local favourite flags are preserved: a resync must never silently
-  /// un-favourite something the user starred.
+  /// Re-syncing an unchanged message rewrites the same row: the local mirror is
+  /// a projection of Telegram, and the number of rows never changes because of
+  /// a refresh.
   Future<int> upsertAll(Iterable<MediaRecord> records) async {
     final buffer = StringBuffer();
     var inserted = 0;
@@ -235,9 +225,7 @@ class IndexStore {
       if (existing == null) {
         inserted++;
       }
-      final toStore = existing != null && existing.favorite
-          ? record.copyWith(favorite: true)
-          : record;
+      final toStore = record;
       _records[record.key] = toStore;
       buffer.writeln(jsonEncode(<String, Object?>{
         'op': 'm',
@@ -250,24 +238,6 @@ class IndexStore {
     await ops.appendAsString(journalPath, buffer.toString());
     await _maybeCompact();
     return inserted;
-  }
-
-  Future<bool> setFavorite({
-    required int chatId,
-    required int messageId,
-    required bool value,
-  }) async {
-    final key = '$chatId:$messageId';
-    final existing = _records[key];
-    if (existing == null) return false;
-    _records[key] = existing.copyWith(favorite: value);
-    await ops.appendAsString(
-      journalPath,
-      '${jsonEncode(<String, Object?>{'op': 'f', 'k': key, 'v': value})}\n',
-    );
-    _journalOps++;
-    await _maybeCompact();
-    return true;
   }
 
   Future<void> setWatermark({
@@ -330,7 +300,6 @@ class IndexStore {
   Future<IndexPage> page({
     int limit = 50,
     String? cursor,
-    bool favoritesOnly = false,
     bool videosOnly = false,
     int? chatId,
   }) async {
@@ -349,7 +318,6 @@ class IndexStore {
       final record = _sorted[i];
       i++;
       if (chatId != null && record.chatId != chatId) continue;
-      if (favoritesOnly && !record.favorite) continue;
       // The library is video-only. Rows of other kinds can still sit in an
       // older mirror file; filtering here keeps every pager honest without a
       // destructive migration.
@@ -387,10 +355,28 @@ class IndexStore {
     return counts;
   }
 
+  /// Every playable video of one channel, **oldest first**.
+  ///
+  /// This is the list the numbering is computed from, so the order here is the
+  /// product order: #001 is the oldest message the mirror holds. A new upload
+  /// appends, therefore every existing number stays valid.
+  List<MediaRecord> recordsForChannel(int chatId, {bool videosOnly = true}) {
+    final rows = _records.values.where((record) {
+      if (record.chatId != chatId) return false;
+      if (videosOnly && record.kind != MediaKind.video) return false;
+      return true;
+    }).toList(growable: false)
+      ..sort((a, b) {
+        final byDate = a.messageDateUnix.compareTo(b.messageDateUnix);
+        if (byDate != 0) return byDate;
+        return a.messageId.compareTo(b.messageId);
+      });
+    return rows;
+  }
+
   /// Counters that must be identical before and after a cache clear.
   Future<Map<String, int>> integritySnapshot() async => <String, int>{
         'index': count,
-        'favorites': favoriteCount,
         'channels': channelCount,
       };
 

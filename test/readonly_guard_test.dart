@@ -68,10 +68,12 @@ void main() {
               '${offenders.join('\n')}');
     });
 
-    test('the cache manager has no network dependency', () {
-      final source = File('lib/storage/cache_manager.dart').readAsStringSync();
+    test('the local media cache has no network dependency', () {
+      final source = File('lib/download/media_cache.dart').readAsStringSync();
       expect(source.contains('HttpClient'), isFalse);
       expect(source.contains('Socket'), isFalse);
+      expect(source.contains('TdClient'), isFalse,
+          reason: 'clearing local bytes must not talk to Telegram at all');
     });
   });
 

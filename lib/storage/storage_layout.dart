@@ -58,11 +58,15 @@ class StorageLayout {
     required String downloadsRoot,
     required String indexRoot,
     required String authRoot,
+    String? mediaRoot,
     FileOps? ops,
   })  : tempRoot = p.normalize(p.absolute(tempRoot)),
         downloadsRoot = p.normalize(p.absolute(downloadsRoot)),
         indexRoot = p.normalize(p.absolute(indexRoot)),
         authRoot = p.normalize(p.absolute(authRoot)),
+        mediaRoot = p.normalize(p.absolute(
+          mediaRoot ?? p.join(p.dirname(p.absolute(indexRoot)), 'media'),
+        )),
         ops = ops ?? const IoFileOps() {
     _assertDisjoint();
   }
@@ -84,6 +88,13 @@ class StorageLayout {
   final String downloadsRoot;
   final String indexRoot;
   final String authRoot;
+
+  /// Downloaded media bytes. Under `Application Support` on purpose: iOS may
+  /// purge `Library/Caches` at any time, and "downloaded once, then plays with
+  /// the network off" is the whole product promise. The index DB lives beside
+  /// it, so a file the index calls complete cannot vanish underneath it.
+  final String mediaRoot;
+
   final FileOps ops;
 
   String rootOf(StorageZone zone) => switch (zone) {
@@ -106,15 +117,14 @@ class StorageLayout {
   /// for any path under here, so [assertDeletableByCacheClear] refuses it.
   String get tdlibDatabaseDir => p.join(authRoot, 'tdlib', 'db');
 
-  /// TDLib's blob pool: bytes it downloaded before we copy them into the
-  /// user's download folder.
+  /// TDLib's file pool: the bytes the player opens.
   ///
-  /// Inside [StorageZone.tempCache] because every byte here can be re-fetched
-  /// from Telegram. It is a sub-directory of the temp root but *not* one of
-  /// the three kinds [CacheManager] walks, so "clear cache" does not touch it
-  /// yet — the pool is sized and reclaimed by its own cleaner in the settings
-  /// screen, never by a blanket delete of the temp root.
-  String get tdlibFilesDir => p.join(tempRoot, 'tdlib_files');
+  /// Lives inside [mediaRoot] (Application Support) rather than the temp zone,
+  /// for the same reason the mirror does. Files are named by TDLib; the
+  /// human-facing `#001` numbering is maintained in the index, never in a file
+  /// name — which is also why no rename/copy step exists between download and
+  /// playback.
+  String get tdlibFilesDir => p.join(mediaRoot, 'tdlib');
 
   /// Roots of the protected zones, exposed with explicit names so call sites
   /// read as "user downloads" rather than "zone 2".
@@ -153,6 +163,7 @@ class StorageLayout {
     await ops.createDirectory(thumbnailDir);
     await ops.createDirectory(playbackTempDir);
     await ops.createDirectory(partialDownloadDir);
+    await ops.createDirectory(mediaRoot);
     await ops.createDirectory(tdlibFilesDir);
     await ops.createDirectory(tdlibDatabaseDir);
   }

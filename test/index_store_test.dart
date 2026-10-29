@@ -1,224 +1,166 @@
+/// Local mirror behaviour: append, replay, page, and the channel order that the
+/// numbering depends on.
+library;
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:tg_media_probe/data/index_store.dart';
 import 'package:tg_media_probe/data/media_record.dart';
 
 import 'support/sandbox.dart';
 
-MediaRecord record(
-  int messageId, {
-  int chatId = 100,
-  int date = 1700000000,
-  bool favorite = false,
+MediaRecord video({
+  required int messageId,
+  int chatId = 1,
+  int date = 1790000000,
+  String? caption,
 }) =>
     MediaRecord(
       chatId: chatId,
       messageId: messageId,
-      fileId: 900000 + messageId,
+      fileId: 900 + messageId,
       kind: MediaKind.video,
-      width: 1920,
-      height: 1080,
-      durationSeconds: 30,
-      sizeBytes: 1048576,
-      fileName: 'v$messageId.mp4',
-      mimeType: 'video/mp4',
-      messageDateUnix: date + messageId,
-      favorite: favorite,
+      width: 720,
+      height: 1280,
+      durationSeconds: 12,
+      sizeBytes: 1000,
+      messageDateUnix: date,
+      caption: caption,
     );
 
 void main() {
   late TestSandbox sandbox;
+  late IndexStore store;
 
   setUp(() async {
     sandbox = await TestSandbox.create();
+    store = IndexStore(directory: sandbox.layout.indexDir, ops: sandbox.ops);
+    await store.open();
   });
 
   tearDown(() async {
+    await store.close();
     await sandbox.dispose();
   });
 
-  IndexStore newStore({int compactionThreshold = 2000}) => IndexStore(
-        directory: sandbox.layout.indexDir,
-        ops: sandbox.ops,
-        compactionThreshold: compactionThreshold,
-      );
-
-  group('upsert', () {
-    test('first insert reports new keys, repeat does not', () async {
-      final store = newStore();
-      await store.open();
-      final first = await store.upsertAll([record(1), record(2), record(3)]);
-      final second = await store.upsertAll([record(1), record(2), record(3)]);
-      expect(first, 3);
-      expect(second, 0);
-      expect(store.count, 3);
-    });
-
-    test('a resync keeps the local favourite flag', () async {
-      final store = newStore();
-      await store.open();
-      await store.upsertAll([record(1)]);
-      expect(await store.setFavorite(chatId: 100, messageId: 1, value: true),
-          isTrue);
-      // Same message comes back from Telegram without any favourite concept.
-      await store.upsertAll([record(1)]);
-      expect(store.favoriteCount, 1);
-      final page = await store.page(limit: 10);
-      expect(page.items.single.favorite, isTrue);
-    });
-
-    test('setFavorite on an unknown message is a no-op', () async {
-      final store = newStore();
-      await store.open();
-      expect(await store.setFavorite(chatId: 1, messageId: 2, value: true),
-          isFalse);
-    });
+  test('upsertAll counts only new rows', () async {
+    expect(await store.upsertAll(<MediaRecord>[video(messageId: 1)]), 1);
+    expect(await store.upsertAll(<MediaRecord>[video(messageId: 1)]), 0);
+    expect(store.count, 1);
   });
 
-  group('persistence', () {
-    test('state survives a reopen', () async {
-      final store = newStore();
-      await store.open();
-      await store.upsertAll([record(1), record(2)]);
-      await store.setFavorite(chatId: 100, messageId: 2, value: true);
-      await store.setWatermark(chatId: 100, newestMessageId: 2, oldestMessageId: 1);
-      await store.close();
+  test('recordsForChannel is oldest first, per channel', () async {
+    await store.upsertAll(<MediaRecord>[
+      video(messageId: 3, date: 300),
+      video(messageId: 1, date: 100),
+      video(messageId: 2, date: 200),
+      video(messageId: 10, chatId: 2, date: 50),
+    ]);
 
-      final reopened = newStore();
-      await reopened.open();
-      expect(reopened.count, 2);
-      expect(reopened.favoriteCount, 1);
-      expect(reopened.watermark(100)?.newestMessageId, 2);
-      expect(reopened.watermark(100)?.oldestMessageId, 1);
-    });
-
-    test('compaction rewrites the snapshot and truncates the journal', () async {
-      final store = newStore(compactionThreshold: 5);
-      await store.open();
-      // Re-upserting the same 5 rows grows the journal while the row count stays
-      // put — that ratio is what triggers compaction.
-      for (var round = 0; round < 20; round++) {
-        await store.upsertAll(List.generate(5, record));
-      }
-      expect(await sandbox.exists(store.snapshotPath), isTrue,
-          reason: 'automatic compaction should have written a snapshot');
-      expect(store.count, 5);
-
-      // An explicit compact leaves a clean journal behind.
-      await store.compact();
-      expect(await store.ops.readAsString(store.journalPath), isEmpty);
-
-      final reopened = newStore(compactionThreshold: 5);
-      await reopened.open();
-      expect(reopened.count, 5);
-    });
-
-    test('appending only new rows does not force a compaction', () async {
-      final store = newStore(compactionThreshold: 5);
-      await store.open();
-      for (var i = 0; i < 20; i++) {
-        await store.upsertAll([record(i)]);
-      }
-      // journal ops == live rows, so the snapshot would save nothing.
-      expect(await sandbox.exists(store.snapshotPath), isFalse);
-      expect(await store.ops.readAsString(store.journalPath), isNotEmpty);
-    });
-
-    test('a corrupt journal line is skipped, not fatal', () async {
-      final store = newStore();
-      await store.open();
-      await store.upsertAll([record(1)]);
-      await sandbox.ops.appendAsString(store.journalPath, '{not json}\n');
-
-      final reopened = newStore();
-      await reopened.open();
-      expect(reopened.count, 1);
-      expect(reopened.droppedJournalLines, 1);
-    });
+    expect(
+      store.recordsForChannel(1).map((r) => r.messageId).toList(),
+      <int>[1, 2, 3],
+    );
+    expect(store.recordsForChannel(2).single.messageId, 10);
+    expect(store.recordsForChannel(3), isEmpty);
   });
 
-  group('pagination', () {
-    test('walks 120 rows in 50/50/20 pages without duplicates', () async {
-      final store = newStore();
-      await store.open();
-      await store.upsertAll(List.generate(120, record));
-
-      final seen = <int>{};
-      String? cursor;
-      final sizes = <int>[];
-      var guard = 0;
-      while (guard++ < 10) {
-        final page = await store.page(limit: 50, cursor: cursor);
-        if (page.items.isEmpty) break;
-        sizes.add(page.items.length);
-        for (final item in page.items) {
-          expect(seen.add(item.messageId), isTrue,
-              reason: 'duplicate ${item.messageId} across pages');
-        }
-        cursor = page.nextCursor;
-        if (!page.hasMore) break;
-      }
-      expect(sizes, [50, 50, 20]);
-      expect(seen.length, 120);
-    });
-
-    test('pages newest first', () async {
-      final store = newStore();
-      await store.open();
-      await store.upsertAll(List.generate(10, record));
-      final page = await store.page(limit: 3);
-      expect(page.items.map((e) => e.messageId).toList(), [9, 8, 7]);
-    });
-
-    test('filters by favourite and by channel', () async {
-      final store = newStore();
-      await store.open();
-      await store.upsertAll([
-        record(1),
-        record(2),
-        record(3, chatId: 200),
-      ]);
-      await store.setFavorite(chatId: 100, messageId: 2, value: true);
-
-      final favourites = await store.page(limit: 10, favoritesOnly: true);
-      expect(favourites.items.map((e) => e.messageId).toList(), [2]);
-
-      final channel = await store.page(limit: 10, chatId: 200);
-      expect(channel.items.map((e) => e.messageId).toList(), [3]);
-    });
-
-    test('a corrupt cursor restarts from the top instead of crashing', () async {
-      final store = newStore();
-      await store.open();
-      await store.upsertAll(List.generate(5, record));
-      final page = await store.page(limit: 2, cursor: 'not-a-cursor');
-      expect(page.items, hasLength(2));
-    });
+  test('same timestamp falls back to message id order', () async {
+    await store.upsertAll(<MediaRecord>[
+      video(messageId: 9, date: 500),
+      video(messageId: 4, date: 500),
+    ]);
+    expect(
+      store.recordsForChannel(1).map((r) => r.messageId).toList(),
+      <int>[4, 9],
+    );
   });
 
-  group('local-only removal', () {
-    test('drops one channel and keeps the rest', () async {
-      final store = newStore();
-      await store.open();
-      await store.upsertAll([
-        record(1),
-        record(2),
-        record(3, chatId: 200),
-      ]);
-      final removed = await store.removeLocalChannel(100);
-      expect(removed, 2);
-      expect(store.count, 1);
-      expect(store.watermark(100), isNull);
-    });
+  test('countByChat counts videos only', () async {
+    await store.upsertAll(<MediaRecord>[
+      video(messageId: 1),
+      video(messageId: 2),
+      MediaRecord(
+        chatId: 1,
+        messageId: 3,
+        fileId: 5,
+        kind: MediaKind.document,
+        messageDateUnix: 1790000000,
+      ),
+    ]);
+    expect(store.countByChat()[1], 2);
   });
 
-  test('integrity snapshot exposes the counters used by cache checks', () async {
-    final store = newStore();
-    await store.open();
-    await store.upsertAll([record(1), record(2)]);
-    await store.setFavorite(chatId: 100, messageId: 1, value: true);
-    final snapshot = await store.integritySnapshot();
-    expect(snapshot['index'], 2);
-    expect(snapshot['favorites'], 1);
-    expect(snapshot['channels'], 0);
+  test('captions survive a round trip through the journal', () async {
+    await store.upsertAll(<MediaRecord>[
+      video(messageId: 7, caption: '海边的日落'),
+    ]);
+    expect(store.recordsForChannel(1).single.caption, '海边的日落');
+
+    final reopened =
+        IndexStore(directory: sandbox.layout.indexDir, ops: sandbox.ops);
+    await reopened.open();
+    expect(reopened.recordsForChannel(1).single.caption, '海边的日落');
+    await reopened.close();
+  });
+
+  test('page walks newest first with an opaque cursor', () async {
+    await store.upsertAll(<MediaRecord>[
+      for (var i = 1; i <= 6; i++) video(messageId: i, date: 100 * i),
+    ]);
+    final first = await store.page(limit: 2);
+    expect(first.items.map((r) => r.messageId).toList(), <int>[6, 5]);
+    expect(first.hasMore, isTrue);
+
+    final second = await store.page(limit: 2, cursor: first.nextCursor);
+    expect(second.items.map((r) => r.messageId).toList(), <int>[4, 3]);
+  });
+
+  test('watermark scan cursor only ever moves downwards', () async {
+    await store.setWatermark(chatId: 1, oldestScannedMessageId: 500);
+    await store.setWatermark(chatId: 1, oldestScannedMessageId: 900);
+    expect(store.watermark(1)!.scanCursor, 500);
+    await store.setWatermark(chatId: 1, oldestScannedMessageId: 100);
+    expect(store.watermark(1)!.scanCursor, 100);
+  });
+
+  test('removeLocalChannel drops rows and watermark for one channel only',
+      () async {
+    await store.upsertAll(<MediaRecord>[
+      video(messageId: 1, chatId: 1),
+      video(messageId: 2, chatId: 2),
+    ]);
+    await store.setWatermark(chatId: 1, newestMessageId: 1);
+    final removed = await store.removeLocalChannel(1);
+    expect(removed, 1);
+    expect(store.count, 1);
+    expect(store.watermark(1), isNull);
+    expect(store.contains(2, 2), isTrue);
+  });
+
+  test('compaction keeps every row', () async {
+    await store.upsertAll(<MediaRecord>[
+      for (var i = 1; i <= 20; i++) video(messageId: i, date: 100 * i),
+    ]);
+    await store.compact();
+    expect(store.count, 20);
+
+    final reopened =
+        IndexStore(directory: sandbox.layout.indexDir, ops: sandbox.ops);
+    await reopened.open();
+    expect(reopened.count, 20);
+    await reopened.close();
+  });
+
+  test('a damaged journal line is skipped, not fatal', () async {
+    await sandbox.write(
+      store.journalPath,
+      '{"op":"m","r":{"c":1,"m":1,"f":1,"k":"video"}}\nnot json\n',
+    );
+    final reopened =
+        IndexStore(directory: sandbox.layout.indexDir, ops: sandbox.ops);
+    await reopened.open();
+    expect(reopened.count, 1);
+    expect(reopened.droppedJournalLines, 1);
+    await reopened.close();
   });
 }

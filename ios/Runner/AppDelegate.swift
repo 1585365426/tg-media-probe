@@ -22,10 +22,7 @@ import UIKit
     OrientationChannel.register(messenger: messenger)
     VideoMetaChannel.register(messenger: messenger)
     BiometricChannel.register(messenger: messenger)
-    // Streaming V2: AVAssetResourceLoader + AVPlayer bridge. Registered on the
-    // application registrar so it exists before the first frame — the resource
-    // loader can be asked for bytes the moment a player is created.
-    TGMediaStreamingPlugin.register(with: engineBridge.applicationRegistrar)
+    StorageChannel.register(messenger: messenger)
   }
 
   /// UIKit consults the app delegate before any view controller. Flutter's
@@ -349,6 +346,50 @@ enum BiometricChannel {
       return "error"
     @unknown default:
       return "error"
+    }
+  }
+}
+
+// MARK: - Free disk space
+
+/// Reports the volume's available capacity so the download path can refuse a
+/// transfer that cannot finish, before it starts.
+///
+/// `volumeAvailableCapacityForImportantUsage` is the figure iOS itself uses when
+/// it decides whether an app may write; `volumeAvailableCapacity` excludes space
+/// the system would reclaim for us and under-reports on a nearly-full device.
+/// A negative answer means "could not be measured" and the Dart side treats it
+/// as unknown rather than as zero.
+enum StorageChannel {
+  static let channelName = "com.tgmedia/storage"
+
+  static func register(messenger: FlutterBinaryMessenger) {
+    let channel = FlutterMethodChannel(name: channelName, binaryMessenger: messenger)
+    channel.setMethodCallHandler { call, result in
+      guard call.method == "availableBytes" else {
+        result(FlutterMethodNotImplemented)
+        return
+      }
+      result(availableBytes())
+    }
+  }
+
+  private static func availableBytes() -> Int64 {
+    let url = URL(fileURLWithPath: NSHomeDirectory())
+    do {
+      let values = try url.resourceValues(forKeys: [
+        .volumeAvailableCapacityForImportantUsageKey,
+        .volumeAvailableCapacityKey,
+      ])
+      if let important = values.volumeAvailableCapacityForImportantUsage {
+        return Int64(important)
+      }
+      if let plain = values.volumeAvailableCapacity {
+        return Int64(plain)
+      }
+      return -1
+    } catch {
+      return -1
     }
   }
 }

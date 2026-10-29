@@ -46,8 +46,8 @@ class MediaRecord {
     this.fileName,
     this.mimeType,
     this.messageDateUnix = 0,
-    this.favorite = false,
     this.hasProtectedContent = false,
+    this.caption,
   });
 
   final int chatId;
@@ -63,18 +63,24 @@ class MediaRecord {
 
   /// Seconds since epoch, as reported by TDLib `message.date`.
   final int messageDateUnix;
-  final bool favorite;
 
   /// Telegram-side content protection flag. Kept so the UI can explain why a
   /// media item is not downloadable instead of failing silently.
   final bool hasProtectedContent;
+
+  /// Message caption text, exactly as Telegram returned it.
+  ///
+  /// Indexed so the video list can be searched by the text the channel owner
+  /// wrote. Never synthesised: a message without a caption stays null and the
+  /// row shows the file name instead.
+  final String? caption;
 
   /// `chatId:messageId` — the dedupe key for incremental sync.
   String get key => '$chatId:$messageId';
 
   bool get isVideo => kind == MediaKind.video;
 
-  MediaRecord copyWith({bool? favorite}) => MediaRecord(
+  MediaRecord copyWith({String? caption}) => MediaRecord(
         chatId: chatId,
         messageId: messageId,
         fileId: fileId,
@@ -86,8 +92,8 @@ class MediaRecord {
         fileName: fileName,
         mimeType: mimeType,
         messageDateUnix: messageDateUnix,
-        favorite: favorite ?? this.favorite,
         hasProtectedContent: hasProtectedContent,
+        caption: caption ?? this.caption,
       );
 
   Map<String, Object?> toJson() => <String, Object?>{
@@ -103,6 +109,7 @@ class MediaRecord {
         if (mimeType != null) 't': mimeType,
         if (messageDateUnix != 0) 'date': messageDateUnix,
         if (hasProtectedContent) 'p': true,
+        if (caption != null && caption!.isNotEmpty) 'cap': caption,
       };
 
   static MediaRecord? fromJson(Map<String, Object?>? json) {
@@ -123,6 +130,7 @@ class MediaRecord {
       mimeType: _asString(json['t']),
       messageDateUnix: _asInt(json['date']) ?? 0,
       hasProtectedContent: _asBool(json['p']),
+      caption: _asString(json['cap']),
     );
   }
 
@@ -142,6 +150,9 @@ class MediaRecord {
       'messageId': messageId,
       'date': _asInt(message['date']) ?? 0,
       'protected': _asBool(message['has_protected_content']),
+      // `caption` lives on the media object for videos/documents/animations.
+      // Read once here so every branch below gets it without repeating itself.
+      'caption': _captionText(content),
     };
 
     switch (contentType) {
@@ -214,7 +225,19 @@ class MediaRecord {
       mimeType: _asString(media['mime_type']),
       messageDateUnix: base['date']! as int,
       hasProtectedContent: base['protected']! as bool,
+      caption: _asString(base['caption']),
     );
+  }
+
+  /// `content.caption.text`, or null when the message has no caption. TDLib
+  /// nests it under a `formattedText` object; only the plain `text` is kept.
+  static String? _captionText(Map<String, Object?> content) {
+    for (final key in const <String>['caption', 'message']) {
+      final holder = _asMap(content[key]);
+      final text = _asString(holder['text']);
+      if (text != null && text.trim().isNotEmpty) return text.trim();
+    }
+    return null;
   }
 
   @override

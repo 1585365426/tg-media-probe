@@ -224,38 +224,40 @@ void main() {
       expect(root, contains('OrientationCoordinator.appOwner'));
     });
 
-    test('the feed enters portrait and only user action asks for landscape',
+    test('the player enters portrait and only user action asks for landscape',
         () {
-      final feed = source('lib/ui/feed_page.dart');
-      final init = feed.indexOf('void initState()');
-      final toggle = feed.indexOf('Future<void> _toggleLandscape()');
+      final page = source('lib/ui/video_player_page.dart');
+      final init = page.indexOf('void initState()');
+      final toggle = page.indexOf('Future<void> _toggleLandscape()');
       expect(init, greaterThan(0));
       expect(toggle, greaterThan(init));
 
       // initState registers playbackPortrait and never landscape.
-      final initBody = feed.substring(init, toggle);
+      final initBody = page.substring(init, toggle);
       expect(initBody.contains('OrientationIntent.playbackPortrait'), isTrue);
       expect(initBody.contains('playbackLandscape'), isFalse,
           reason: 'entering the player must stay portrait');
 
       // The toggle is the only place that may ask for landscape.
-      final toggleBody = feed.substring(
+      final toggleBody = page.substring(
         toggle,
-        feed.indexOf('Future<void> _openNumberBox()', toggle),
+        page.indexOf('void _message(', toggle),
       );
       expect(toggleBody.contains('OrientationIntent.playbackLandscape'), isTrue);
       expect(
-        'OrientationIntent.playbackLandscape'.allMatches(feed).length,
+        'OrientationIntent.playbackLandscape'.allMatches(page).length,
         1,
         reason: 'exactly one landscape request in the whole page',
       );
     });
 
     test('switching videos never requests a rotation', () {
-      final controller = source('lib/ui/feed_controller.dart');
+      final controller = source('lib/playback/playback_controller.dart');
       expect(controller.contains('setMode'), isFalse);
       expect(controller.contains('OrientationBridge'), isFalse);
       expect(controller.contains('SystemChrome'), isFalse);
+      expect(controller.contains('OrientationIntent'), isFalse,
+          reason: 'playback moves the file, not the screen orientation');
     });
 
     test('the shell does not own a second orientation holder', () {
