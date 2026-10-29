@@ -1,0 +1,37 @@
+[✓] Flutter (Channel stable, 3.47.8, on macOS 26.6.2 25G83 darwin-arm64, locale en-US) [8.4s]
+    • Flutter version 3.47.8 on channel stable at /Users/runner/hostedtoolcache/flutter/stable-3.47.8-arm64/flutter
+    • Upstream repository https://github.com/flutter/flutter.git
+    • Framework revision 737ba8f885 (6 days ago), 2026-10-22 21:37:31 -0700
+    • Engine revision cf636b1dfb
+    • Dart version 3.13.7
+    • DevTools version 2.60.0
+    • Feature flags: enable-web, enable-linux-desktop, enable-macos-desktop, enable-windows-desktop, enable-android, enable-ios, cli-animations, enable-native-assets, enable-record-use, enable-swift-package-manager, omit-legacy-version-file, enable-lldb-debugging, enable-uiscene-migration
+
+[!] Android toolchain - develop for Android devices (Android SDK version 37.0.0) [16.0s]
+    • Android SDK at /Users/runner/Library/Android/sdk
+    • Emulator version 37.2.12.0 (build_id 16428233) (CL:N/A)
+    • Platform android-37.2-beta2, build-tools 37.0.0
+    • ANDROID_HOME = /Users/runner/Library/Android/sdk
+    • ANDROID_SDK_ROOT = /Users/runner/Library/Android/sdk
+    • Java binary at: /Users/runner/hostedtoolcache/Java_Temurin-Hotspot_jdk/21.0.12-101.0/arm64/Contents/Home/bin/java
+      This JDK is specified by the JAVA_HOME environment variable.
+      To manually set the JDK path, use: `flutter config --jdk-dir="path/to/jdk"`.
+    • Java version OpenJDK Runtime Environment Temurin-21.0.12.1+1 (build 21.0.12.1+1-LTS)
+    ! Some Android licenses not accepted. To resolve this, run: flutter doctor --android-licenses
+
+[✓] Xcode - develop for iOS and macOS (Xcode 26.6) [15.1s]
+    • Xcode at /Applications/Xcode_26.6.app/Contents/Developer
+    • Build 17F113
+    • CocoaPods version 1.17.0
+
+[✓] Chrome - develop for the web [18ms]
+    • Chrome at /Applications/Google Chrome.app/Contents/MacOS/Google Chrome
+
+[✓] Connected device (2 available) [13.6s]
+    • macOS (desktop) • macos  • darwin-arm64   • macOS 26.6.2 25G83 darwin-arm64
+    • Chrome (web)    • chrome • web-javascript • Google Chrome 156.0.8078.48
+
+[✓] Network resources [1,069ms]
+    • All expected network resources are available.
+
+! Doctor found issues in 1 category.

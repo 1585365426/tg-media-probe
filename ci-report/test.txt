@@ -1,0 +1,636 @@
+Resolving dependencies...
+Downloading packages...
+  code_assets 1.2.1 (2.1.0 available)
+  crypto 3.0.7 (3.0.8 available)
+  cupertino_icons 1.0.9 (2.0.0 available)
+  flutter_secure_storage 9.2.4 (11.2.0 available)
+  flutter_secure_storage_linux 1.2.3 (3.0.3 available)
+  flutter_secure_storage_macos 3.1.3 (4.0.0 available)
+  flutter_secure_storage_platform_interface 1.1.2 (2.1.1 available)
+  flutter_secure_storage_web 1.2.1 (2.1.1 available)
+  flutter_secure_storage_windows 3.1.2 (4.2.2 available)
+  hooks 2.0.2 (2.2.0 available)
+  jni 1.1.0 (1.1.1 available)
+  js 0.6.7 (0.7.2 available)
+  material_color_utilities 0.13.0 (0.13.1 available)
+  meta 1.18.3 (1.19.0 available)
+  objective_c 9.5.0 (9.6.2 available)
+  record_use 0.6.0 (1.1.1 available)
+  test_api 0.7.12 (0.7.15 available)
+  vector_math 2.4.0 (2.4.4 available)
+  win32 5.15.0 (6.4.0 available)
+Got dependencies!
+19 packages have newer versions incompatible with dependency constraints.
+Try `flutter pub outdated` for more information.
+00:00 +0: loading /Users/runner/work/tg-media-probe/tg-media-probe/test/app_shell_test.dart
+00:00 +0: /Users/runner/work/tg-media-probe/tg-media-probe/test/app_shell_test.dart: bottom bar has exactly 频道 and 设置
+00:01 +1: /Users/runner/work/tg-media-probe/tg-media-probe/test/app_shell_test.dart: settings tab shows the final groups
+00:01 +2: /Users/runner/work/tg-media-probe/tg-media-probe/test/app_shell_test.dart: the diagnostic badge switch exists and is off by default
+00:01 +3: loading /Users/runner/work/tg-media-probe/tg-media-probe/test/download_manager_test.dart
+00:03 +3: /Users/runner/work/tg-media-probe/tg-media-probe/test/download_manager_test.dart: a verified local file needs no transfer at all
+00:03 +4: /Users/runner/work/tg-media-probe/tg-media-probe/test/download_manager_test.dart: a completed download is verified before it is announced
+00:03 +5: /Users/runner/work/tg-media-probe/tg-media-probe/test/download_manager_test.dart: progress and measured speed are published while bytes move
+00:03 +6: /Users/runner/work/tg-media-probe/tg-media-probe/test/download_manager_test.dart: a completed transfer with the wrong file size fails and is deleted
+00:03 +7: /Users/runner/work/tg-media-probe/tg-media-probe/test/download_manager_test.dart: not enough disk space refuses before any transfer
+00:03 +8: /Users/runner/work/tg-media-probe/tg-media-probe/test/download_manager_test.dart: a cancelled transfer never ends up ready
+00:03 +9: /Users/runner/work/tg-media-probe/tg-media-probe/test/download_manager_test.dart: a stalled transfer is reported, not awaited forever
+00:03 +10: /Users/runner/work/tg-media-probe/tg-media-probe/test/download_manager_test.dart: one stall is retried once, then the transfer restarts
+00:03 +11: /Users/runner/work/tg-media-probe/tg-media-probe/test/download_manager_test.dart: a second video cancels the first: one transfer at a time
+00:03 +12: /Users/runner/work/tg-media-probe/tg-media-probe/test/download_manager_test.dart: a TDLib error on downloadFile is surfaced as a failure
+00:03 +13: /Users/runner/work/tg-media-probe/tg-media-probe/test/download_manager_test.dart: a record without a file id cannot be downloaded
+00:03 +14: loading /Users/runner/work/tg-media-probe/tg-media-probe/test/security_negative_test.dart
+00:04 +14: /Users/runner/work/tg-media-probe/tg-media-probe/test/security_negative_test.dart: 1. 越界删除 a clear never deletes outside the media root
+00:04 +15: /Users/runner/work/tg-media-probe/tg-media-probe/test/security_negative_test.dart: 1. 越界删除 a file in the downloads zone is refused by the layout guard
+00:04 +16: /Users/runner/work/tg-media-probe/tg-media-probe/test/security_negative_test.dart: 1. 越界删除 the media pool is outside the temp zone on purpose
+00:04 +17: /Users/runner/work/tg-media-probe/tg-media-probe/test/security_negative_test.dart: 1. 越界删除 a .. traversal out of the media root is refused
+00:04 +18: /Users/runner/work/tg-media-probe/tg-media-probe/test/security_negative_test.dart: 1. 越界删除 the temp zone root itself is refused
+00:04 +19: /Users/runner/work/tg-media-probe/tg-media-probe/test/security_negative_test.dart: 2. 符号链接逃逸 a link inside the media root never lets its target be deleted
+00:04 +20: /Users/runner/work/tg-media-probe/tg-media-probe/test/security_negative_test.dart: 3. 只清自己的目录 a clear walks the media root and nothing else
+00:04 +21: /Users/runner/work/tg-media-probe/tg-media-probe/test/security_negative_test.dart: 4. 占用中文件 the file the player has open is kept and not counted as freed
+00:04 +22: /Users/runner/work/tg-media-probe/tg-media-probe/test/security_negative_test.dart: 5. 假成功 a delete that silently does nothing is reported as failure
+00:04 +23: /Users/runner/work/tg-media-probe/tg-media-probe/test/security_negative_test.dart: 6. Keychain 缺 key an empty keychain reports no lock instead of a broken one
+00:04 +24: /Users/runner/work/tg-media-probe/tg-media-probe/test/security_negative_test.dart: 6. Keychain 缺 key verifying against a missing verifier returns false, never true
+00:04 +25: /Users/runner/work/tg-media-probe/tg-media-probe/test/security_negative_test.dart: 6. Keychain 缺 key a biometric flag without a passcode cannot stand as the only factor
+00:04 +26: /Users/runner/work/tg-media-probe/tg-media-probe/test/security_negative_test.dart: 6. Keychain 缺 key an unrelated keychain slot does not unlock anything
+00:04 +27: /Users/runner/work/tg-media-probe/tg-media-probe/test/security_negative_test.dart: 7. 密码记录被改 one flipped hex character in the hash is rejected
+00:04 +28: /Users/runner/work/tg-media-probe/tg-media-probe/test/security_negative_test.dart: 7. 密码记录被改 a truncated record fails closed instead of throwing
+00:05 +29: /Users/runner/work/tg-media-probe/tg-media-probe/test/security_negative_test.dart: 7. 密码记录被改 a record claiming a different scheme is ignored
+00:05 +30: /Users/runner/work/tg-media-probe/tg-media-probe/test/security_negative_test.dart: 7. 密码记录被改 a wrong passcode is rejected and the right one still works
+00:05 +31: /Users/runner/work/tg-media-probe/tg-media-probe/test/security_negative_test.dart: 8. 诊断未脱敏 the raw payload trips the pre-flight check
+00:05 +32: /Users/runner/work/tg-media-probe/tg-media-probe/test/security_negative_test.dart: 8. 诊断未脱敏 after redaction nothing secret survives
+00:05 +33: /Users/runner/work/tg-media-probe/tg-media-probe/test/security_negative_test.dart: 8. 诊断未脱敏 a redacted payload keeps non-secret diagnostics readable
+00:05 +34: /Users/runner/work/tg-media-probe/tg-media-probe/test/security_negative_test.dart: 9. 只读守卫 cloud-mutating methods are rejected
+00:05 +35: /Users/runner/work/tg-media-probe/tg-media-probe/test/security_negative_test.dart: 9. 只读守卫 an unclassified method name is rejected, not assumed safe
+00:05 +36: /Users/runner/work/tg-media-probe/tg-media-probe/test/security_negative_test.dart: 9. 只读守卫 no method is both allowed and cloud-mutating
+00:05 +37: /Users/runner/work/tg-media-probe/tg-media-probe/test/security_negative_test.dart: 9. 只读守卫 every method td_requests.dart can build is on the allowlist
+00:05 +38: /Users/runner/work/tg-media-probe/tg-media-probe/test/security_negative_test.dart: 9. 只读守卫 reads and local-only maintenance passes
+00:05 +39: loading /Users/runner/work/tg-media-probe/tg-media-probe/test/chat_sync_test.dart
+00:05 +39: /Users/runner/work/tg-media-probe/tg-media-probe/test/chat_sync_test.dart: page size clamps an oversized request to the TDLib ceiling
+00:06 +40: /Users/runner/work/tg-media-probe/tg-media-probe/test/chat_sync_test.dart: page size never issues a second call for one page
+00:06 +41: /Users/runner/work/tg-media-probe/tg-media-probe/test/chat_sync_test.dart: incremental walk a 1200-message channel is pulled in bounded pages
+00:06 +42: /Users/runner/work/tg-media-probe/tg-media-probe/test/chat_sync_test.dart: incremental walk cursors move backwards and never repeat a page
+00:06 +43: /Users/runner/work/tg-media-probe/tg-media-probe/test/chat_sync_test.dart: incremental walk three syncs of the same channel add no duplicate rows
+00:06 +44: /Users/runner/work/tg-media-probe/tg-media-probe/test/chat_sync_test.dart: incremental walk watermark tracks the newest and oldest indexed id
+00:06 +45: /Users/runner/work/tg-media-probe/tg-media-probe/test/chat_sync_test.dart: failure handling a TDLib error is reported, not turned into an empty success
+00:06 +46: /Users/runner/work/tg-media-probe/tg-media-probe/test/chat_sync_test.dart: failure handling cancel stops the walk and keeps what was already indexed
+00:06 +47: /Users/runner/work/tg-media-probe/tg-media-probe/test/chat_sync_test.dart: sync cycle a launch cycle touches at most N pages per channel
+00:06 +48: /Users/runner/work/tg-media-probe/tg-media-probe/test/chat_sync_test.dart: sync cycle one bad channel does not abort the others
+00:06 +49: /Users/runner/work/tg-media-probe/tg-media-probe/test/chat_sync_test.dart: MediaPager loads the index in fixed pages and stops at the end
+00:06 +50: /Users/runner/work/tg-media-probe/tg-media-probe/test/chat_sync_test.dart: MediaPager a concurrent next() call does not double-load a page
+00:06 +51: loading /Users/runner/work/tg-media-probe/tg-media-probe/test/readonly_guard_test.dart
+00:07 +51: /Users/runner/work/tg-media-probe/tg-media-probe/test/readonly_guard_test.dart: static guard no source file names a cloud-mutating TDLib method
+00:07 +52: /Users/runner/work/tg-media-probe/tg-media-probe/test/readonly_guard_test.dart: static guard TdClient enforces the guard at its single request choke point
+00:07 +53: /Users/runner/work/tg-media-probe/tg-media-probe/test/readonly_guard_test.dart: static guard the storage layer cannot reach Telegram at all
+00:07 +54: /Users/runner/work/tg-media-probe/tg-media-probe/test/readonly_guard_test.dart: static guard the local media cache has no network dependency
+00:07 +55: /Users/runner/work/tg-media-probe/tg-media-probe/test/readonly_guard_test.dart: runtime guard rejects every cloud-mutating method
+00:07 +56: /Users/runner/work/tg-media-probe/tg-media-probe/test/readonly_guard_test.dart: runtime guard the core deletions from the task book are covered
+00:07 +57: /Users/runner/work/tg-media-probe/tg-media-probe/test/readonly_guard_test.dart: runtime guard allows every request the app actually builds
+00:07 +58: /Users/runner/work/tg-media-probe/tg-media-probe/test/readonly_guard_test.dart: runtime guard deleteFile is documented as local-only and allowed
+00:07 +59: /Users/runner/work/tg-media-probe/tg-media-probe/test/readonly_guard_test.dart: runtime guard rejects a missing or non-string @type
+00:07 +60: loading /Users/runner/work/tg-media-probe/tg-media-probe/test/redact_test.dart
+00:08 +60: /Users/runner/work/tg-media-probe/tg-media-probe/test/redact_test.dart: redactJson masks credentials nested anywhere in a TDLib request
+00:08 +61: /Users/runner/work/tg-media-probe/tg-media-probe/test/redact_test.dart: redactJson leaves harmless fields intact
+00:08 +62: /Users/runner/work/tg-media-probe/tg-media-probe/test/redact_test.dart: redactText masks 32 hex characters (api hash / bot token fragment)
+00:08 +63: /Users/runner/work/tg-media-probe/tg-media-probe/test/redact_test.dart: redactText masks E.164 phone numbers
+00:08 +64: /Users/runner/work/tg-media-probe/tg-media-probe/test/redact_test.dart: redactText masks quoted secret pairs echoed by TDLib errors
+00:08 +65: loading /Users/runner/work/tg-media-probe/tg-media-probe/test/readonly_boundary_test.dart
+00:08 +65: /Users/runner/work/tg-media-probe/tg-media-probe/test/readonly_boundary_test.dart: native surface is reachable from exactly two files no other lib/ file mentions a tdjson symbol
+00:08 +66: /Users/runner/work/tg-media-probe/tg-media-probe/test/readonly_boundary_test.dart: native surface is reachable from exactly two files only td_client.dart imports the FFI layer
+00:08 +67: /Users/runner/work/tg-media-probe/tg-media-probe/test/readonly_boundary_test.dart: native surface is reachable from exactly two files td_client.dart sends through exactly one statement
+00:08 +68: /Users/runner/work/tg-media-probe/tg-media-probe/test/readonly_boundary_test.dart: native surface is reachable from exactly two files the guard runs inside the function that calls sendJson
+00:08 +69: /Users/runner/work/tg-media-probe/tg-media-probe/test/readonly_boundary_test.dart: native surface is reachable from exactly two files executeJson is not called anywhere in lib/
+00:08 +70: /Users/runner/work/tg-media-probe/tg-media-probe/test/readonly_boundary_test.dart: the guarded door refuses before sending a cloud-mutating method throws and never reaches tdjson
+00:08 +71: /Users/runner/work/tg-media-probe/tg-media-probe/test/readonly_boundary_test.dart: the guarded door refuses before sending an unclassified method throws instead of being assumed safe
+00:08 +72: /Users/runner/work/tg-media-probe/tg-media-probe/test/readonly_boundary_test.dart: the guarded door refuses before sending a payload without @type throws and sends nothing
+00:08 +73: /Users/runner/work/tg-media-probe/tg-media-probe/test/readonly_boundary_test.dart: the guarded door refuses before sending an allowed read does reach tdjson, with an @extra tag
+00:08 +74: /Users/runner/work/tg-media-probe/tg-media-probe/test/readonly_boundary_test.dart: the guarded door refuses before sending dispose sends close and it passes the guard
+00:08 +75: /Users/runner/work/tg-media-probe/tg-media-probe/test/readonly_boundary_test.dart: session and login calls stay allowed every session method passes the guard
+00:08 +76: /Users/runner/work/tg-media-probe/tg-media-probe/test/readonly_boundary_test.dart: session and login calls stay allowed a write method that differs by one word is still refused
+00:08 +77: loading /Users/runner/work/tg-media-probe/tg-media-probe/test/diagnostic_badge_test.dart
+00:09 +77: /Users/runner/work/tg-media-probe/tg-media-probe/test/diagnostic_badge_test.dart: downloading shows the number, the rate and the byte counts
+00:10 +78: /Users/runner/work/tg-media-probe/tg-media-probe/test/diagnostic_badge_test.dart: ready shows LOCAL_FILE and the size, never a speed
+00:10 +79: /Users/runner/work/tg-media-probe/tg-media-probe/test/diagnostic_badge_test.dart: a failure says so and prints no invented numbers
+00:10 +80: /Users/runner/work/tg-media-probe/tg-media-probe/test/diagnostic_badge_test.dart: the badge never eats a tap meant for the player
+00:10 +81: loading /Users/runner/work/tg-media-probe/tg-media-probe/test/byte_format_test.dart
+00:11 +81: /Users/runner/work/tg-media-probe/tg-media-probe/test/byte_format_test.dart: formatBytes keeps single bytes as bytes
+00:11 +82: /Users/runner/work/tg-media-probe/tg-media-probe/test/byte_format_test.dart: formatBytes steps up units at 1024
+00:11 +83: /Users/runner/work/tg-media-probe/tg-media-probe/test/byte_format_test.dart: formatBytes keeps three significant digits
+00:11 +84: /Users/runner/work/tg-media-probe/tg-media-probe/test/byte_format_test.dart: formatBytes negative means "not measured", not "-1 B"
+00:11 +85: /Users/runner/work/tg-media-probe/tg-media-probe/test/byte_format_test.dart: formatRate null and zero both render as an em dash
+00:11 +86: /Users/runner/work/tg-media-probe/tg-media-probe/test/byte_format_test.dart: formatRate appends a per-second suffix
+00:11 +87: /Users/runner/work/tg-media-probe/tg-media-probe/test/byte_format_test.dart: formatMillis below one second stays in milliseconds
+00:11 +88: /Users/runner/work/tg-media-probe/tg-media-probe/test/byte_format_test.dart: formatMillis seconds carry two decimals under ten, one above
+00:11 +89: /Users/runner/work/tg-media-probe/tg-media-probe/test/byte_format_test.dart: formatMillis above a minute switches to m/s
+00:11 +90: loading /Users/runner/work/tg-media-probe/tg-media-probe/test/lock_policy_test.dart
+00:11 +90: /Users/runner/work/tg-media-probe/tg-media-probe/test/lock_policy_test.dart: AppLockSettings defaults first launch has Face ID off and no passcode
+00:11 +91: /Users/runner/work/tg-media-probe/tg-media-probe/test/lock_policy_test.dart: AppLockSettings defaults auto-lock defaults to immediately and cold start locks
+00:11 +92: /Users/runner/work/tg-media-probe/tg-media-probe/test/lock_policy_test.dart: AppLockSettings defaults a passcode alone enables the lock
+00:11 +93: /Users/runner/work/tg-media-probe/tg-media-probe/test/lock_policy_test.dart: AppLockSettings defaults biometrics cannot be enabled without a passcode
+00:11 +94: /Users/runner/work/tg-media-probe/tg-media-probe/test/lock_policy_test.dart: AppLockSettings defaults biometrics can be enabled once a passcode exists
+00:11 +95: /Users/runner/work/tg-media-probe/tg-media-probe/test/lock_policy_test.dart: AppLockSettings defaults disabling biometrics keeps the passcode
+00:11 +96: /Users/runner/work/tg-media-probe/tg-media-probe/test/lock_policy_test.dart: AppLockSettings defaults copyWith can clear the passcode without touching other fields
+00:11 +97: /Users/runner/work/tg-media-probe/tg-media-probe/test/lock_policy_test.dart: LockEvaluator.decide nothing configured means no prompt
+00:11 +98: /Users/runner/work/tg-media-probe/tg-media-probe/test/lock_policy_test.dart: LockEvaluator.decide cold start with lockOnColdStart asks for the passcode
+00:11 +99: /Users/runner/work/tg-media-probe/tg-media-probe/test/lock_policy_test.dart: LockEvaluator.decide cold start with lockOnColdStart disabled does not ask
+00:11 +100: /Users/runner/work/tg-media-probe/tg-media-probe/test/lock_policy_test.dart: LockEvaluator.decide foreground without backgrounding does not ask again
+00:11 +101: /Users/runner/work/tg-media-probe/tg-media-probe/test/lock_policy_test.dart: LockEvaluator.decide immediately locks after any background time
+00:11 +102: /Users/runner/work/tg-media-probe/tg-media-probe/test/lock_policy_test.dart: LockEvaluator.decide a 30 second delay tolerates 29 seconds
+00:11 +103: /Users/runner/work/tg-media-probe/tg-media-probe/test/lock_policy_test.dart: LockEvaluator.decide a 30 second delay locks at exactly 30 seconds
+00:11 +104: /Users/runner/work/tg-media-probe/tg-media-probe/test/lock_policy_test.dart: LockEvaluator.decide a usable sensor is offered before the passcode
+00:11 +105: /Users/runner/work/tg-media-probe/tg-media-probe/test/lock_policy_test.dart: LockEvaluator.decide a locked-out sensor falls back to the passcode
+00:11 +106: /Users/runner/work/tg-media-probe/tg-media-probe/test/lock_policy_test.dart: LockEvaluator.decide biometrics on but the sensor removed in Settings falls back
+00:11 +107: /Users/runner/work/tg-media-probe/tg-media-probe/test/lock_policy_test.dart: LockEvaluator.decide a hand-edited store with biometrics but no passcode does not lock out
+00:11 +108: /Users/runner/work/tg-media-probe/tg-media-probe/test/lock_policy_test.dart: LockEvaluator.afterOutcome success clears the requirement
+00:11 +109: /Users/runner/work/tg-media-probe/tg-media-probe/test/lock_policy_test.dart: LockEvaluator.afterOutcome a lockout hides the sensor
+00:11 +110: /Users/runner/work/tg-media-probe/tg-media-probe/test/lock_policy_test.dart: LockEvaluator.afterOutcome a user cancel lands on the passcode instead of re-asking
+00:11 +111: /Users/runner/work/tg-media-probe/tg-media-probe/test/lock_policy_test.dart: LockEvaluator.afterOutcome a failed scan also lands on the passcode
+00:11 +112: /Users/runner/work/tg-media-probe/tg-media-probe/test/lock_policy_test.dart: LockEvaluator.afterOutcome a user cancel without biometrics stays on the passcode
+00:11 +113: /Users/runner/work/tg-media-probe/tg-media-probe/test/lock_policy_test.dart: LockEvaluator.afterOutcome every non-success outcome still leaves a way in
+00:11 +114: /Users/runner/work/tg-media-probe/tg-media-probe/test/lock_policy_test.dart: AppLockStore persistence an empty store loads the first-launch defaults
+00:11 +115: /Users/runner/work/tg-media-probe/tg-media-probe/test/lock_policy_test.dart: AppLockStore persistence round-trips every field
+00:11 +116: /Users/runner/work/tg-media-probe/tg-media-probe/test/lock_policy_test.dart: AppLockStore persistence survives a hint containing quotes, backslashes and newlines
+00:11 +117: /Users/runner/work/tg-media-probe/tg-media-probe/test/lock_policy_test.dart: AppLockStore persistence a corrupted blob falls back to no lock instead of throwing
+00:11 +118: /Users/runner/work/tg-media-probe/tg-media-probe/test/lock_policy_test.dart: AppLockStore persistence an unknown auto-lock name falls back to immediately
+00:11 +119: /Users/runner/work/tg-media-probe/tg-media-probe/test/lock_policy_test.dart: AppLockStore persistence setPasscode rejects a short passcode and stores nothing
+00:11 +120: /Users/runner/work/tg-media-probe/tg-media-probe/test/lock_policy_test.dart: AppLockStore persistence setPasscode stores a verifier, not the passcode
+00:11 +121: /Users/runner/work/tg-media-probe/tg-media-probe/test/lock_policy_test.dart: AppLockStore persistence verifyPasscode accepts the right one and rejects the rest
+00:12 +122: /Users/runner/work/tg-media-probe/tg-media-probe/test/lock_policy_test.dart: AppLockStore persistence verifyPasscode on a store without a passcode is false
+00:12 +123: /Users/runner/work/tg-media-probe/tg-media-probe/test/lock_policy_test.dart: AppLockStore persistence verifyPasscode is false for a hand-corrupted record
+00:12 +124: /Users/runner/work/tg-media-probe/tg-media-probe/test/lock_policy_test.dart: AppLockStore persistence clearPasscode removes the verifier and switches biometrics off
+00:12 +125: /Users/runner/work/tg-media-probe/tg-media-probe/test/lock_policy_test.dart: AppLockStore persistence replacing the passcode keeps the user locked in, not out
+00:12 +126: /Users/runner/work/tg-media-probe/tg-media-probe/test/lock_policy_test.dart: recovery plan the plan clears the lock, not the Telegram session
+00:12 +127: /Users/runner/work/tg-media-probe/tg-media-probe/test/lock_policy_test.dart: recovery plan applyRecoveryReset leaves no lock behind
+00:12 +128: /Users/runner/work/tg-media-probe/tg-media-probe/test/lock_policy_test.dart: recovery plan afterRecoveryReset coincides with the first-launch defaults
+00:12 +129: /Users/runner/work/tg-media-probe/tg-media-probe/test/lock_policy_test.dart: AutoLockDelay labels and durations are consistent
+00:12 +130: loading /Users/runner/work/tg-media-probe/tg-media-probe/test/redact_extended_test.dart
+00:12 +130: /Users/runner/work/tg-media-probe/tg-media-probe/test/redact_extended_test.dart: redactText: credential shapes a 64-character TDLib database key is masked whole
+00:12 +131: /Users/runner/work/tg-media-probe/tg-media-probe/test/redact_extended_test.dart: redactText: credential shapes a JWT is masked, not just its header
+00:12 +132: /Users/runner/work/tg-media-probe/tg-media-probe/test/redact_extended_test.dart: redactText: credential shapes a Telegram bot token is masked
+00:12 +133: /Users/runner/work/tg-media-probe/tg-media-probe/test/redact_extended_test.dart: redactText: credential shapes a Bearer header is masked regardless of case
+00:12 +134: /Users/runner/work/tg-media-probe/tg-media-probe/test/redact_extended_test.dart: redactText: credential shapes a token in a query string is masked
+00:12 +135: /Users/runner/work/tg-media-probe/tg-media-probe/test/redact_extended_test.dart: redactText: credential shapes a stored passcode record is masked
+00:12 +136: /Users/runner/work/tg-media-probe/tg-media-probe/test/redact_extended_test.dart: redactText: personal data a mainland mobile number without a country code is masked
+00:12 +137: /Users/runner/work/tg-media-probe/tg-media-probe/test/redact_extended_test.dart: redactText: personal data a mainland number with +86 is masked by the E.164 rule first
+00:12 +138: /Users/runner/work/tg-media-probe/tg-media-probe/test/redact_extended_test.dart: redactText: personal data an e-mail address is masked
+00:12 +139: /Users/runner/work/tg-media-probe/tg-media-probe/test/redact_extended_test.dart: redactText: does not eat harmless numbers a message id that happens to be 11 digits survives
+00:12 +140: /Users/runner/work/tg-media-probe/tg-media-probe/test/redact_extended_test.dart: redactText: does not eat harmless numbers a file size survives
+00:12 +141: /Users/runner/work/tg-media-probe/tg-media-probe/test/redact_extended_test.dart: redactText: does not eat harmless numbers a chat id survives
+00:12 +142: /Users/runner/work/tg-media-probe/tg-media-probe/test/redact_extended_test.dart: redactText: does not eat harmless numbers an ordinary sentence is untouched
+00:12 +143: /Users/runner/work/tg-media-probe/tg-media-probe/test/redact_extended_test.dart: redactText is idempotent running it twice changes nothing further
+00:12 +144: /Users/runner/work/tg-media-probe/tg-media-probe/test/redact_extended_test.dart: redactDiagnostics masks by key, then scrubs the remaining strings
+00:12 +145: /Users/runner/work/tg-media-probe/tg-media-probe/test/redact_extended_test.dart: redactDiagnostics a bare secret inside a harmless key is still caught
+00:12 +146: /Users/runner/work/tg-media-probe/tg-media-probe/test/redact_extended_test.dart: redactDiagnostics non-string values are preserved as-is
+00:12 +147: /Users/runner/work/tg-media-probe/tg-media-probe/test/redact_extended_test.dart: mayContainSecret flags each shape the scrubber knows about
+00:12 +148: /Users/runner/work/tg-media-probe/tg-media-probe/test/redact_extended_test.dart: mayContainSecret does not flag ordinary text
+00:12 +149: /Users/runner/work/tg-media-probe/tg-media-probe/test/redact_extended_test.dart: mayContainSecret redacted output no longer trips the check
+00:12 +150: loading /Users/runner/work/tg-media-probe/tg-media-probe/test/biometric_test.dart
+00:13 +150: /Users/runner/work/tg-media-probe/tg-media-probe/test/biometric_test.dart: BiometricCapability canAuthenticate needs hardware, enrolment and no lockout
+00:13 +151: /Users/runner/work/tg-media-probe/tg-media-probe/test/biometric_test.dart: BiometricCapability label follows the sensor instead of assuming Face ID
+00:13 +152: /Users/runner/work/tg-media-probe/tg-media-probe/test/biometric_test.dart: BiometricCapability unavailable default reports no hardware
+00:13 +153: /Users/runner/work/tg-media-probe/tg-media-probe/test/biometric_test.dart: BiometricCapability json round-trip keeps every field
+00:13 +154: /Users/runner/work/tg-media-probe/tg-media-probe/test/biometric_test.dart: BiometricCapability an unknown sensor name degrades to unknown, not to face
+00:13 +155: /Users/runner/work/tg-media-probe/tg-media-probe/test/biometric_test.dart: BiometricOutcome classification only success is success
+00:13 +156: /Users/runner/work/tg-media-probe/tg-media-probe/test/biometric_test.dart: BiometricOutcome classification hard failures require the passcode fallback
+00:13 +157: /Users/runner/work/tg-media-probe/tg-media-probe/test/biometric_test.dart: BiometricOutcome classification cancellations do not count as failures
+00:13 +158: /Users/runner/work/tg-media-probe/tg-media-probe/test/biometric_test.dart: BiometricOutcome classification success needs neither fallback nor retry
+00:13 +159: /Users/runner/work/tg-media-probe/tg-media-probe/test/biometric_test.dart: BiometricOutcome classification every outcome has a non-empty Chinese message
+00:13 +160: /Users/runner/work/tg-media-probe/tg-media-probe/test/biometric_test.dart: BiometricOutcome classification the failure message does not leak whether the passcode matched
+00:13 +161: /Users/runner/work/tg-media-probe/tg-media-probe/test/biometric_test.dart: ScriptedBiometricGate returns the scripted sequence and then repeats the last value
+00:13 +162: /Users/runner/work/tg-media-probe/tg-media-probe/test/biometric_test.dart: ScriptedBiometricGate probe reports the configured capability
+00:13 +163: /Users/runner/work/tg-media-probe/tg-media-probe/test/biometric_test.dart: ScriptedBiometricGate capability can change mid-session (user edits Settings)
+00:13 +164: /Users/runner/work/tg-media-probe/tg-media-probe/test/biometric_test.dart: MethodChannelBiometricGate probe maps the native payload
+00:13 +165: /Users/runner/work/tg-media-probe/tg-media-probe/test/biometric_test.dart: MethodChannelBiometricGate probe without a channel reports unavailable instead of throwing
+00:13 +166: /Users/runner/work/tg-media-probe/tg-media-probe/test/biometric_test.dart: MethodChannelBiometricGate authenticate passes the reason through
+00:13 +167: /Users/runner/work/tg-media-probe/tg-media-probe/test/biometric_test.dart: MethodChannelBiometricGate each native outcome name maps to its enum value
+00:13 +168: /Users/runner/work/tg-media-probe/tg-media-probe/test/biometric_test.dart: MethodChannelBiometricGate a PlatformException code is mapped, not swallowed
+00:13 +169: /Users/runner/work/tg-media-probe/tg-media-probe/test/biometric_test.dart: MethodChannelBiometricGate an unknown exception becomes error, never success
+00:13 +170: /Users/runner/work/tg-media-probe/tg-media-probe/test/biometric_test.dart: MethodChannelBiometricGate a missing plugin becomes notAvailable
+00:13 +171: loading /Users/runner/work/tg-media-probe/tg-media-probe/test/media_cache_test.dart
+00:14 +171: /Users/runner/work/tg-media-probe/tg-media-probe/test/media_cache_test.dart: usedBytes sums the media root only
+00:14 +172: /Users/runner/work/tg-media-probe/tg-media-probe/test/media_cache_test.dart: hasRoomFor keeps a safety margin
+00:14 +173: /Users/runner/work/tg-media-probe/tg-media-probe/test/media_cache_test.dart: an unmeasurable free space does not block a download
+00:14 +174: /Users/runner/work/tg-media-probe/tg-media-probe/test/media_cache_test.dart: clearLocal deletes media files and reports the freed bytes
+00:14 +175: /Users/runner/work/tg-media-probe/tg-media-probe/test/media_cache_test.dart: clearLocal keeps the file the player has open
+00:14 +176: /Users/runner/work/tg-media-probe/tg-media-probe/test/media_cache_test.dart: clearLocal never reaches outside the media root
+00:14 +177: loading /Users/runner/work/tg-media-probe/tg-media-probe/test/app_preferences_test.dart
+00:14 +177: /Users/runner/work/tg-media-probe/tg-media-probe/test/app_preferences_test.dart: defaults match the product spec
+00:14 +178: /Users/runner/work/tg-media-probe/tg-media-probe/test/app_preferences_test.dart: theme preference maps onto ThemeMode
+00:14 +179: /Users/runner/work/tg-media-probe/tg-media-probe/test/app_preferences_test.dart: round trip keeps every field
+00:14 +180: /Users/runner/work/tg-media-probe/tg-media-probe/test/app_preferences_test.dart: unknown values fall back instead of failing the record
+00:14 +181: /Users/runner/work/tg-media-probe/tg-media-probe/test/app_preferences_test.dart: every offered speed survives the round trip
+00:14 +182: /Users/runner/work/tg-media-probe/tg-media-probe/test/app_preferences_test.dart: formatPlaybackSpeed prints a usable label
+00:14 +183: /Users/runner/work/tg-media-probe/tg-media-probe/test/app_preferences_test.dart: controller rejects an unsupported speed
+00:14 +184: /Users/runner/work/tg-media-probe/tg-media-probe/test/app_preferences_test.dart: a failed write leaves the in-memory value untouched
+00:14 +185: /Users/runner/work/tg-media-probe/tg-media-probe/test/app_preferences_test.dart: the theme preference persists through the controller
+00:14 +186: /Users/runner/work/tg-media-probe/tg-media-probe/test/app_preferences_test.dart: a corrupt stored record starts from defaults
+00:14 +187: loading /Users/runner/work/tg-media-probe/tg-media-probe/test/index_store_test.dart
+00:15 +187: /Users/runner/work/tg-media-probe/tg-media-probe/test/index_store_test.dart: upsertAll counts only new rows
+00:15 +188: /Users/runner/work/tg-media-probe/tg-media-probe/test/index_store_test.dart: recordsForChannel is oldest first, per channel
+00:15 +189: /Users/runner/work/tg-media-probe/tg-media-probe/test/index_store_test.dart: same timestamp falls back to message id order
+00:15 +190: /Users/runner/work/tg-media-probe/tg-media-probe/test/index_store_test.dart: countByChat counts videos only
+00:15 +191: /Users/runner/work/tg-media-probe/tg-media-probe/test/index_store_test.dart: captions survive a round trip through the journal
+00:15 +192: /Users/runner/work/tg-media-probe/tg-media-probe/test/index_store_test.dart: page walks newest first with an opaque cursor
+00:15 +193: /Users/runner/work/tg-media-probe/tg-media-probe/test/index_store_test.dart: watermark scan cursor only ever moves downwards
+00:15 +194: /Users/runner/work/tg-media-probe/tg-media-probe/test/index_store_test.dart: removeLocalChannel drops rows and watermark for one channel only
+00:15 +195: /Users/runner/work/tg-media-probe/tg-media-probe/test/index_store_test.dart: compaction keeps every row
+00:15 +196: /Users/runner/work/tg-media-probe/tg-media-probe/test/index_store_test.dart: a damaged journal line is skipped, not fatal
+00:15 +197: loading /Users/runner/work/tg-media-probe/tg-media-probe/test/architecture_scan_test.dart
+00:16 +197: /Users/runner/work/tg-media-probe/tg-media-probe/test/architecture_scan_test.dart: the old streaming modules are gone
+00:16 +198: /Users/runner/work/tg-media-probe/tg-media-probe/test/architecture_scan_test.dart: lib/playback contains only the local player and its controller
+00:16 +199: /Users/runner/work/tg-media-probe/tg-media-probe/test/architecture_scan_test.dart: nothing references a resource loader, proxy or growing file
+00:16 +200: /Users/runner/work/tg-media-probe/tg-media-probe/test/architecture_scan_test.dart: the iOS side has no streaming bridge left
+00:16 +201: /Users/runner/work/tg-media-probe/tg-media-probe/test/architecture_scan_test.dart: downloadFile is only issued by the download manager
+00:16 +202: /Users/runner/work/tg-media-probe/tg-media-probe/test/architecture_scan_test.dart: the player opens a file, never a network URL
+00:16 +203: /Users/runner/work/tg-media-probe/tg-media-probe/test/architecture_scan_test.dart: the shell has exactly two tabs and no 抖音
+00:16 +204: /Users/runner/work/tg-media-probe/tg-media-probe/test/architecture_scan_test.dart: no long-press handler exists on the player
+00:16 +205: /Users/runner/work/tg-media-probe/tg-media-probe/test/architecture_scan_test.dart: the badge is off unless the preference says otherwise
+00:16 +206: /Users/runner/work/tg-media-probe/tg-media-probe/test/architecture_scan_test.dart: the media cache lives outside Library/Caches
+00:16 +207: /Users/runner/work/tg-media-probe/tg-media-probe/test/architecture_scan_test.dart: the retired cache-policy layer is gone
+00:16 +208: /Users/runner/work/tg-media-probe/tg-media-probe/test/architecture_scan_test.dart: local media bytes are deleted by one module only
+00:16 +209: /Users/runner/work/tg-media-probe/tg-media-probe/test/architecture_scan_test.dart: favourites, history and duration filters left no code behind
+00:16 +210: loading /Users/runner/work/tg-media-probe/tg-media-probe/test/tdlib_storage_test.dart
+00:17 +210: /Users/runner/work/tg-media-probe/tg-media-probe/test/tdlib_storage_test.dart: TDLib paths and the storage zones the database sits in the protected auth zone
+00:17 +211: /Users/runner/work/tg-media-probe/tg-media-probe/test/tdlib_storage_test.dart: TDLib paths and the storage zones the file pool lives beside the index, outside the purgeable cache
+00:17 +212: /Users/runner/work/tg-media-probe/tg-media-probe/test/tdlib_storage_test.dart: TDLib paths and the storage zones the two directories are not inside each other
+00:17 +213: /Users/runner/work/tg-media-probe/tg-media-probe/test/tdlib_storage_test.dart: clearing local media with a real TDLib layout clearing local media never touches the TDLib database
+00:17 +214: /Users/runner/work/tg-media-probe/tg-media-probe/test/tdlib_storage_test.dart: clearing local media with a real TDLib layout the pool is the local media cache, so it is cleared
+00:17 +215: /Users/runner/work/tg-media-probe/tg-media-probe/test/tdlib_storage_test.dart: clearing local media with a real TDLib layout the file the player has open survives its own cache clear
+00:17 +216: /Users/runner/work/tg-media-probe/tg-media-probe/test/tdlib_storage_test.dart: clearing local media with a real TDLib layout clearing twice does not double-count bytes
+00:17 +217: /Users/runner/work/tg-media-probe/tg-media-probe/test/tdlib_storage_test.dart: the session survives a cache clear the binlog path is derived from the auth zone, not temp
+00:17 +218: /Users/runner/work/tg-media-probe/tg-media-probe/test/tdlib_storage_test.dart: the session survives a cache clear a traverse from temp into the database is refused
+00:17 +219: loading /Users/runner/work/tg-media-probe/tg-media-probe/test/schema_conformance_test.dart
+00:18 +219: /Users/runner/work/tg-media-probe/tg-media-probe/test/schema_conformance_test.dart: schema fixture td_api.tl is present and parsed
+00:18 +220: /Users/runner/work/tg-media-probe/tg-media-probe/test/schema_conformance_test.dart: requests conform to td_api.tl getAuthorizationState exists with the fields we send
+00:18 +221: /Users/runner/work/tg-media-probe/tg-media-probe/test/schema_conformance_test.dart: requests conform to td_api.tl setTdlibParameters exists with the fields we send
+00:18 +222: /Users/runner/work/tg-media-probe/tg-media-probe/test/schema_conformance_test.dart: requests conform to td_api.tl setAuthenticationPhoneNumber exists with the fields we send
+00:18 +223: /Users/runner/work/tg-media-probe/tg-media-probe/test/schema_conformance_test.dart: requests conform to td_api.tl checkAuthenticationCode exists with the fields we send
+00:18 +224: /Users/runner/work/tg-media-probe/tg-media-probe/test/schema_conformance_test.dart: requests conform to td_api.tl checkAuthenticationPassword exists with the fields we send
+00:18 +225: /Users/runner/work/tg-media-probe/tg-media-probe/test/schema_conformance_test.dart: requests conform to td_api.tl getChats exists with the fields we send
+00:18 +226: /Users/runner/work/tg-media-probe/tg-media-probe/test/schema_conformance_test.dart: requests conform to td_api.tl getChat exists with the fields we send
+00:18 +227: /Users/runner/work/tg-media-probe/tg-media-probe/test/schema_conformance_test.dart: requests conform to td_api.tl getChatHistory exists with the fields we send
+00:18 +228: /Users/runner/work/tg-media-probe/tg-media-probe/test/schema_conformance_test.dart: requests conform to td_api.tl getMessage exists with the fields we send
+00:18 +229: /Users/runner/work/tg-media-probe/tg-media-probe/test/schema_conformance_test.dart: requests conform to td_api.tl getOption exists with the fields we send
+00:18 +230: /Users/runner/work/tg-media-probe/tg-media-probe/test/schema_conformance_test.dart: requests conform to td_api.tl getFile exists with the fields we send
+00:18 +231: /Users/runner/work/tg-media-probe/tg-media-probe/test/schema_conformance_test.dart: requests conform to td_api.tl downloadFile exists with the fields we send
+00:18 +232: /Users/runner/work/tg-media-probe/tg-media-probe/test/schema_conformance_test.dart: requests conform to td_api.tl downloadFile exists with the fields we send
+00:18 +233: /Users/runner/work/tg-media-probe/tg-media-probe/test/schema_conformance_test.dart: requests conform to td_api.tl cancelDownloadFile exists with the fields we send
+00:18 +234: /Users/runner/work/tg-media-probe/tg-media-probe/test/schema_conformance_test.dart: requests conform to td_api.tl getFileDownloadedPrefixSize exists with the fields we send
+00:18 +235: /Users/runner/work/tg-media-probe/tg-media-probe/test/schema_conformance_test.dart: requests conform to td_api.tl readFilePart exists with the fields we send
+00:18 +236: /Users/runner/work/tg-media-probe/tg-media-probe/test/schema_conformance_test.dart: requests conform to td_api.tl deleteFile exists with the fields we send
+00:18 +237: /Users/runner/work/tg-media-probe/tg-media-probe/test/schema_conformance_test.dart: requests conform to td_api.tl logOut exists with the fields we send
+00:18 +238: /Users/runner/work/tg-media-probe/tg-media-probe/test/schema_conformance_test.dart: requests conform to td_api.tl close exists with the fields we send
+00:18 +239: /Users/runner/work/tg-media-probe/tg-media-probe/test/schema_conformance_test.dart: requests conform to td_api.tl getMe exists with the fields we send
+00:18 +240: /Users/runner/work/tg-media-probe/tg-media-probe/test/schema_conformance_test.dart: requests conform to td_api.tl chatListMain exists with the fields we send
+00:18 +241: /Users/runner/work/tg-media-probe/tg-media-probe/test/schema_conformance_test.dart: parsed constructors match the schema video exposes size/duration but no rotation field
+00:18 +242: /Users/runner/work/tg-media-probe/tg-media-probe/test/schema_conformance_test.dart: parsed constructors match the schema file/localFile carry the download state we read
+00:18 +243: /Users/runner/work/tg-media-probe/tg-media-probe/test/schema_conformance_test.dart: parsed constructors match the schema chat/chatTypeSupergroup carry channel flags we read
+00:18 +244: /Users/runner/work/tg-media-probe/tg-media-probe/test/schema_conformance_test.dart: model parsing on real schema shape VideoMeta reads the fields the chain depends on
+00:18 +245: /Users/runner/work/tg-media-probe/tg-media-probe/test/schema_conformance_test.dart: model parsing on real schema shape non-video messages yield null instead of throwing
+00:18 +246: /Users/runner/work/tg-media-probe/tg-media-probe/test/schema_conformance_test.dart: model parsing on real schema shape auth state raw type round-trips
+00:18 +247: /Users/runner/work/tg-media-probe/tg-media-probe/test/schema_conformance_test.dart: model parsing on real schema shape error responses surface code and message
+00:18 +248: loading /Users/runner/work/tg-media-probe/tg-media-probe/test/unlock_controller_test.dart
+00:19 +248: /Users/runner/work/tg-media-probe/tg-media-probe/test/unlock_controller_test.dart: first launch no lock configured means the shell opens without asking anything
+00:19 +249: /Users/runner/work/tg-media-probe/tg-media-probe/test/unlock_controller_test.dart: first launch Face ID is off by default, and nothing turns it on
+00:19 +250: /Users/runner/work/tg-media-probe/tg-media-probe/test/unlock_controller_test.dart: first launch a passcode alone locks on cold start and offers no sensor
+00:19 +251: /Users/runner/work/tg-media-probe/tg-media-probe/test/unlock_controller_test.dart: first launch passcode + usable sensor asks for the sensor first
+00:19 +252: /Users/runner/work/tg-media-probe/tg-media-probe/test/unlock_controller_test.dart: first launch a sensor that is locked out falls straight to the passcode
+00:19 +253: /Users/runner/work/tg-media-probe/tg-media-probe/test/unlock_controller_test.dart: first launch biometrics without a passcode (hand-edited store) does not lock out
+00:19 +254: /Users/runner/work/tg-media-probe/tg-media-probe/test/unlock_controller_test.dart: first launch lockOnColdStart: false skips the cold-start prompt
+00:19 +255: /Users/runner/work/tg-media-probe/tg-media-probe/test/unlock_controller_test.dart: first launch a corrupted lock record does not brick the app
+00:19 +256: /Users/runner/work/tg-media-probe/tg-media-probe/test/unlock_controller_test.dart: biometric attempts success unlocks and fires the callback once
+00:19 +257: /Users/runner/work/tg-media-probe/tg-media-probe/test/unlock_controller_test.dart: biometric attempts a lockout hides the sensor and never blames the passcode
+00:19 +258: /Users/runner/work/tg-media-probe/tg-media-probe/test/unlock_controller_test.dart: biometric attempts a removed enrolment also hides the sensor
+00:19 +259: /Users/runner/work/tg-media-probe/tg-media-probe/test/unlock_controller_test.dart: biometric attempts a cancelled scan hands over to the passcode and keeps the sensor tappable
+00:19 +260: /Users/runner/work/tg-media-probe/tg-media-probe/test/unlock_controller_test.dart: biometric attempts the system fallback button moves focus to the passcode
+00:19 +261: /Users/runner/work/tg-media-probe/tg-media-probe/test/unlock_controller_test.dart: biometric attempts prompting when no sensor is offered does nothing
+00:19 +262: /Users/runner/work/tg-media-probe/tg-media-probe/test/unlock_controller_test.dart: biometric attempts prompting twice does not open two system sheets
+00:19 +263: /Users/runner/work/tg-media-probe/tg-media-probe/test/unlock_controller_test.dart: biometric attempts a hard failure blocks retries until the settings are reloaded
+00:19 +264: /Users/runner/work/tg-media-probe/tg-media-probe/test/unlock_controller_test.dart: passcode the correct passcode unlocks
+00:19 +265: /Users/runner/work/tg-media-probe/tg-media-probe/test/unlock_controller_test.dart: passcode a wrong passcode fails and keeps the app locked
+00:19 +266: /Users/runner/work/tg-media-probe/tg-media-probe/test/unlock_controller_test.dart: passcode the hint is display-only and cannot unlock
+00:19 +267: /Users/runner/work/tg-media-probe/tg-media-probe/test/unlock_controller_test.dart: passcode only a PBKDF2 verifier is stored, never the passcode
+00:19 +268: /Users/runner/work/tg-media-probe/tg-media-probe/test/unlock_controller_test.dart: passcode a hand-written record with a bad hash never verifies
+00:19 +269: /Users/runner/work/tg-media-probe/tg-media-probe/test/unlock_controller_test.dart: passcode 5 wrong attempts are free, the 6th starts a cooldown
+00:19 +270: /Users/runner/work/tg-media-probe/tg-media-probe/test/unlock_controller_test.dart: passcode the correct passcode is refused during the cooldown
+00:19 +271: /Users/runner/work/tg-media-probe/tg-media-probe/test/unlock_controller_test.dart: passcode after the cooldown the passcode works again
+00:19 +272: /Users/runner/work/tg-media-probe/tg-media-probe/test/unlock_controller_test.dart: passcode a lock whose passcode vanished reports a failure, not a pass
+00:19 +273: /Users/runner/work/tg-media-probe/tg-media-probe/test/unlock_controller_test.dart: passcode an already unlocked app accepts any submission without verifying
+00:19 +274: /Users/runner/work/tg-media-probe/tg-media-probe/test/unlock_controller_test.dart: foreground and background a short trip to the background does not re-lock
+00:19 +275: /Users/runner/work/tg-media-probe/tg-media-probe/test/unlock_controller_test.dart: foreground and background staying away past the delay re-locks
+00:19 +276: /Users/runner/work/tg-media-probe/tg-media-probe/test/unlock_controller_test.dart: foreground and background resuming without having been backgrounded changes nothing
+00:19 +277: /Users/runner/work/tg-media-probe/tg-media-probe/test/unlock_controller_test.dart: foreground and background enrolment removed while backgrounded forces the passcode
+00:19 +278: /Users/runner/work/tg-media-probe/tg-media-probe/test/unlock_controller_test.dart: foreground and background lockNow locks immediately
+00:19 +279: /Users/runner/work/tg-media-probe/tg-media-probe/test/unlock_controller_test.dart: settings actions enabling biometrics without a passcode is refused
+00:19 +280: /Users/runner/work/tg-media-probe/tg-media-probe/test/unlock_controller_test.dart: settings actions enabling biometrics with a passcode persists
+00:19 +281: /Users/runner/work/tg-media-probe/tg-media-probe/test/unlock_controller_test.dart: settings actions turning biometrics off leaves the passcode alone
+00:19 +282: /Users/runner/work/tg-media-probe/tg-media-probe/test/unlock_controller_test.dart: settings actions reloading settings does not unlock by itself
+00:19 +283: /Users/runner/work/tg-media-probe/tg-media-probe/test/unlock_controller_test.dart: recovery beginRecovery enters the recovery phase without clearing anything
+00:19 +284: /Users/runner/work/tg-media-probe/tg-media-probe/test/unlock_controller_test.dart: recovery completeRecovery drops the lock and the passcode
+00:19 +285: /Users/runner/work/tg-media-probe/tg-media-probe/test/unlock_controller_test.dart: recovery recovery does not touch any other stored secret
+00:19 +286: /Users/runner/work/tg-media-probe/tg-media-probe/test/unlock_controller_test.dart: recovery cancelling recovery keeps the app locked
+00:19 +287: /Users/runner/work/tg-media-probe/tg-media-probe/test/unlock_controller_test.dart: the Face ID sheet and the app lifecycle a resume while the sheet is up does not undo the unlock
+00:19 +288: /Users/runner/work/tg-media-probe/tg-media-probe/test/unlock_controller_test.dart: the Face ID sheet and the app lifecycle a sheet that never answers falls back to the passcode
+00:19 +289: /Users/runner/work/tg-media-probe/tg-media-probe/test/unlock_controller_test.dart: the Face ID sheet and the app lifecycle after the watchdog the sensor can be asked again
+00:19 +290: /Users/runner/work/tg-media-probe/tg-media-probe/test/unlock_controller_test.dart: the Face ID sheet and the app lifecycle a cancelled sheet leaves the passcode usable
+00:19 +291: /Users/runner/work/tg-media-probe/tg-media-probe/test/unlock_controller_test.dart: the Face ID sheet and the app lifecycle a second prompt cannot open a second sheet
+00:19 +292: /Users/runner/work/tg-media-probe/tg-media-probe/test/unlock_controller_test.dart: the Face ID sheet and the app lifecycle backgrounding for real still re-locks
+00:19 +293: loading /Users/runner/work/tg-media-probe/tg-media-probe/test/channel_directory_test.dart
+00:20 +293: /Users/runner/work/tg-media-probe/tg-media-probe/test/channel_directory_test.dart: ChannelDirectory.load channels from Telegram land in the ready state
+00:20 +294: /Users/runner/work/tg-media-probe/tg-media-probe/test/channel_directory_test.dart: ChannelDirectory.load an account with no channels reports empty, not error
+00:20 +295: /Users/runner/work/tg-media-probe/tg-media-probe/test/channel_directory_test.dart: ChannelDirectory.load a failed load with no cache reports error
+00:20 +296: /Users/runner/work/tg-media-probe/tg-media-probe/test/channel_directory_test.dart: ChannelDirectory.load a failed load keeps the cached list on screen
+00:20 +297: /Users/runner/work/tg-media-probe/tg-media-probe/test/channel_directory_test.dart: ChannelDirectory.load a refresh keeps the video counts it already had
+00:20 +298: /Users/runner/work/tg-media-probe/tg-media-probe/test/channel_directory_test.dart: ChannelDirectory.load a channel that disappears drops its count
+00:20 +299: /Users/runner/work/tg-media-probe/tg-media-probe/test/channel_directory_test.dart: ChannelDirectory.load a non-channel chat never reaches the list
+00:20 +300: /Users/runner/work/tg-media-probe/tg-media-probe/test/channel_directory_test.dart: video counts a channel whose count is unknown renders as null, never as 0
+00:20 +301: /Users/runner/work/tg-media-probe/tg-media-probe/test/channel_directory_test.dart: video counts applyCounts fills known channels and zeroes the rest
+00:20 +302: /Users/runner/work/tg-media-probe/tg-media-probe/test/channel_directory_test.dart: video counts applyCounts on an empty list does nothing
+00:20 +303: /Users/runner/work/tg-media-probe/tg-media-probe/test/channel_directory_test.dart: search an empty query returns everything
+00:20 +304: /Users/runner/work/tg-media-probe/tg-media-probe/test/channel_directory_test.dart: search matching is case-insensitive and trimmed
+00:20 +305: /Users/runner/work/tg-media-probe/tg-media-probe/test/channel_directory_test.dart: search a username match is found even when the title does not match
+00:20 +306: /Users/runner/work/tg-media-probe/tg-media-probe/test/channel_directory_test.dart: search a query with no match returns an empty list, not an error
+00:20 +307: /Users/runner/work/tg-media-probe/tg-media-probe/test/channel_directory_test.dart: search searching never triggers a network call
+00:20 +308: /Users/runner/work/tg-media-probe/tg-media-probe/test/channel_directory_test.dart: cache the cache lives inside the index zone
+00:20 +309: /Users/runner/work/tg-media-probe/tg-media-probe/test/channel_directory_test.dart: cache a refresh writes the list and a cold start reads it back
+00:20 +310: /Users/runner/work/tg-media-probe/tg-media-probe/test/channel_directory_test.dart: cache the write is atomic and leaves no .tmp behind
+00:20 +311: /Users/runner/work/tg-media-probe/tg-media-probe/test/channel_directory_test.dart: cache a corrupt cache is ignored instead of failing the launch
+00:20 +312: /Users/runner/work/tg-media-probe/tg-media-probe/test/channel_directory_test.dart: cache a cache with no usable entries is ignored
+00:20 +313: /Users/runner/work/tg-media-probe/tg-media-probe/test/channel_directory_test.dart: cache a missing cache file is not an error
+00:20 +314: /Users/runner/work/tg-media-probe/tg-media-probe/test/channel_directory_test.dart: cache a watched flag survives the cache round trip
+00:21 +315: /Users/runner/work/tg-media-probe/tg-media-probe/test/channel_directory_test.dart: listeners a disposed directory stops notifying
+00:21 +316: /Users/runner/work/tg-media-probe/tg-media-probe/test/channel_directory_test.dart: failure classification a forbidden channel surfaces as permissionDenied, not a retryable error
+00:21 +317: /Users/runner/work/tg-media-probe/tg-media-probe/test/channel_directory_test.dart: failure classification a dead session surfaces as sessionExpired
+00:21 +318: /Users/runner/work/tg-media-probe/tg-media-probe/test/channel_directory_test.dart: failure classification a timeout from the transport is classified as offline
+00:21 +319: /Users/runner/work/tg-media-probe/tg-media-probe/test/channel_directory_test.dart: failure classification a successful refresh clears the previous failure
+00:21 +320: loading /Users/runner/work/tg-media-probe/tg-media-probe/test/tdlib_key_test.dart
+00:22 +320: /Users/runner/work/tg-media-probe/tg-media-probe/test/tdlib_key_test.dart: TdlibDatabaseKey generates 64 lowercase hex characters
+00:22 +321: /Users/runner/work/tg-media-probe/tg-media-probe/test/tdlib_key_test.dart: TdlibDatabaseKey persists the key so a restart opens the same database
+00:22 +322: /Users/runner/work/tg-media-probe/tg-media-probe/test/tdlib_key_test.dart: TdlibDatabaseKey two fresh installs get different keys
+00:22 +323: /Users/runner/work/tg-media-probe/tg-media-probe/test/tdlib_key_test.dart: TdlibDatabaseKey a malformed stored key raises instead of being overwritten
+00:22 +324: /Users/runner/work/tg-media-probe/tg-media-probe/test/tdlib_key_test.dart: TdlibDatabaseKey never hands TDLib an empty key
+00:22 +325: /Users/runner/work/tg-media-probe/tg-media-probe/test/tdlib_key_test.dart: TdlibDatabaseKey peek does not create a key
+00:22 +326: /Users/runner/work/tg-media-probe/tg-media-probe/test/tdlib_key_test.dart: TdlibDatabaseKey peek returns the key once one exists
+00:22 +327: /Users/runner/work/tg-media-probe/tg-media-probe/test/tdlib_key_test.dart: TdlibDatabaseKey generated bytes use the injected random source
+00:22 +328: /Users/runner/work/tg-media-probe/tg-media-probe/test/tdlib_key_test.dart: TdlibDatabaseKey mask keeps only the ends
+00:22 +329: /Users/runner/work/tg-media-probe/tg-media-probe/test/tdlib_key_test.dart: TdlibDatabaseKey mask hides very short values completely
+00:22 +330: /Users/runner/work/tg-media-probe/tg-media-probe/test/tdlib_key_test.dart: TdlibDatabaseKey isValid rejects uppercase, wrong length and non-hex
+00:22 +331: loading /Users/runner/work/tg-media-probe/tg-media-probe/test/sha256_test.dart
+00:22 +331: /Users/runner/work/tg-media-probe/tg-media-probe/test/sha256_test.dart: sha256 (FIPS 180-4 / RFC 6234 vectors) empty input
+00:22 +332: /Users/runner/work/tg-media-probe/tg-media-probe/test/sha256_test.dart: sha256 (FIPS 180-4 / RFC 6234 vectors) "abc"
+00:22 +333: /Users/runner/work/tg-media-probe/tg-media-probe/test/sha256_test.dart: sha256 (FIPS 180-4 / RFC 6234 vectors) 448-bit message that forces a second padding block
+00:22 +334: /Users/runner/work/tg-media-probe/tg-media-probe/test/sha256_test.dart: sha256 (FIPS 180-4 / RFC 6234 vectors) 56-byte input lands exactly on the padding boundary
+00:22 +335: /Users/runner/work/tg-media-probe/tg-media-probe/test/sha256_test.dart: sha256 (FIPS 180-4 / RFC 6234 vectors) 55-byte input stays in one block
+00:22 +336: /Users/runner/work/tg-media-probe/tg-media-probe/test/sha256_test.dart: sha256 (FIPS 180-4 / RFC 6234 vectors) million-a vector
+00:22 +337: /Users/runner/work/tg-media-probe/tg-media-probe/test/sha256_test.dart: sha256 (FIPS 180-4 / RFC 6234 vectors) binary input is hashed as bytes, not as text
+00:22 +338: /Users/runner/work/tg-media-probe/tg-media-probe/test/sha256_test.dart: hmacSha256 (RFC 4231 vectors) case 1: 20-byte key, "Hi There"
+00:22 +339: /Users/runner/work/tg-media-probe/tg-media-probe/test/sha256_test.dart: hmacSha256 (RFC 4231 vectors) case 2: short key, "what do ya want for nothing?"
+00:22 +340: /Users/runner/work/tg-media-probe/tg-media-probe/test/sha256_test.dart: hmacSha256 (RFC 4231 vectors) case 6: key longer than the block size is hashed first
+00:22 +341: /Users/runner/work/tg-media-probe/tg-media-probe/test/sha256_test.dart: pbkdf2HmacSha256 known vector: password/salt/1 iteration
+00:22 +342: /Users/runner/work/tg-media-probe/tg-media-probe/test/sha256_test.dart: pbkdf2HmacSha256 known vector: password/salt/2 iterations
+00:22 +343: /Users/runner/work/tg-media-probe/tg-media-probe/test/sha256_test.dart: pbkdf2HmacSha256 known vector: password/salt/4096 iterations
+00:22 +344: /Users/runner/work/tg-media-probe/tg-media-probe/test/sha256_test.dart: pbkdf2HmacSha256 key longer than one digest spans two blocks
+00:22 +345: /Users/runner/work/tg-media-probe/tg-media-probe/test/sha256_test.dart: pbkdf2HmacSha256 truncating the requested length does not change the prefix
+00:22 +346: /Users/runner/work/tg-media-probe/tg-media-probe/test/sha256_test.dart: pbkdf2HmacSha256 iterations below 1 is rejected, not silently clamped
+00:22 +347: /Users/runner/work/tg-media-probe/tg-media-probe/test/sha256_test.dart: constantTimeEquals equal content and equal length is true
+00:22 +348: /Users/runner/work/tg-media-probe/tg-media-probe/test/sha256_test.dart: constantTimeEquals a difference in the last byte is still false
+00:22 +349: /Users/runner/work/tg-media-probe/tg-media-probe/test/sha256_test.dart: constantTimeEquals a difference in the first byte is still false
+00:22 +350: /Users/runner/work/tg-media-probe/tg-media-probe/test/sha256_test.dart: constantTimeEquals length mismatch is false without reading past the end
+00:22 +351: /Users/runner/work/tg-media-probe/tg-media-probe/test/sha256_test.dart: constantTimeEquals two empty lists are equal
+00:22 +352: /Users/runner/work/tg-media-probe/tg-media-probe/test/sha256_test.dart: hex helpers round-trip bytesToHex/hexToBytes
+00:22 +353: /Users/runner/work/tg-media-probe/tg-media-probe/test/sha256_test.dart: hex helpers round-trip odd-length hex is rejected
+00:22 +354: loading /Users/runner/work/tg-media-probe/tg-media-probe/test/download_speed_test.dart
+00:23 +354: /Users/runner/work/tg-media-probe/tg-media-probe/test/download_speed_test.dart: one second of steady growth reads as the real rate
+00:23 +355: /Users/runner/work/tg-media-probe/tg-media-probe/test/download_speed_test.dart: a counter that moves backwards restarts instead of going negative
+00:23 +356: /Users/runner/work/tg-media-probe/tg-media-probe/test/download_speed_test.dart: a single idle sample does not zero the reading
+00:23 +357: /Users/runner/work/tg-media-probe/tg-media-probe/test/download_speed_test.dart: ticking with no progress decays to zero
+00:23 +358: /Users/runner/work/tg-media-probe/tg-media-probe/test/download_speed_test.dart: begin() clears a previous transfer rate
+00:23 +359: /Users/runner/work/tg-media-probe/tg-media-probe/test/download_speed_test.dart: reset() forgets everything
+00:23 +360: loading /Users/runner/work/tg-media-probe/tg-media-probe/test/session_state_test.dart
+00:24 +360: /Users/runner/work/tg-media-probe/tg-media-probe/test/session_state_test.dart: SessionStatus.fromJson maps every authorization state this build knows
+00:24 +361: /Users/runner/work/tg-media-probe/tg-media-probe/test/session_state_test.dart: SessionStatus.fromJson a missing @type is unknown, not ready
+00:24 +362: /Users/runner/work/tg-media-probe/tg-media-probe/test/session_state_test.dart: SessionStatus.fromJson only authorizationStateReady counts as authorized
+00:24 +363: /Users/runner/work/tg-media-probe/tg-media-probe/test/session_state_test.dart: SessionStatus.fromJson opening the database is not a logout
+00:24 +364: /Users/runner/work/tg-media-probe/tg-media-probe/test/session_state_test.dart: SessionStatus.fromJson the 2FA hint is surfaced when Telegram sends one
+00:24 +365: /Users/runner/work/tg-media-probe/tg-media-probe/test/session_state_test.dart: SessionStatus.fromJson an empty hint is treated as absent
+00:24 +366: /Users/runner/work/tg-media-probe/tg-media-probe/test/session_state_test.dart: SessionStatus.fromJson a non-boolean recovery flag does not throw
+00:24 +367: /Users/runner/work/tg-media-probe/tg-media-probe/test/session_state_test.dart: SessionStatus.fromJson the raw type is preserved for diagnostics
+00:24 +368: /Users/runner/work/tg-media-probe/tg-media-probe/test/session_state_test.dart: needsUserActionFor input-taking phases need the login screen
+00:24 +369: /Users/runner/work/tg-media-probe/tg-media-probe/test/session_state_test.dart: needsUserActionFor non-input phases do not
+00:24 +370: /Users/runner/work/tg-media-probe/tg-media-probe/test/session_state_test.dart: needsUserActionFor every phase has a label
+00:24 +371: /Users/runner/work/tg-media-probe/tg-media-probe/test/session_state_test.dart: needsUserActionFor labels do not claim success for a non-ready phase
+00:24 +372: /Users/runner/work/tg-media-probe/tg-media-probe/test/session_state_test.dart: SessionBootPlanner first launch with nothing on disk routes to login
+00:24 +373: /Users/runner/work/tg-media-probe/tg-media-probe/test/session_state_test.dart: SessionBootPlanner an authorized session resumes without asking anything
+00:24 +374: /Users/runner/work/tg-media-probe/tg-media-probe/test/session_state_test.dart: SessionBootPlanner a database that is still opening does not route to login
+00:24 +375: /Users/runner/work/tg-media-probe/tg-media-probe/test/session_state_test.dart: SessionBootPlanner an input-taking phase routes to login with the real reason
+00:24 +376: /Users/runner/work/tg-media-probe/tg-media-probe/test/session_state_test.dart: SessionBootPlanner waiting for another device explains itself
+00:24 +377: /Users/runner/work/tg-media-probe/tg-media-probe/test/session_state_test.dart: SessionBootPlanner a closed session routes to login
+00:24 +378: /Users/runner/work/tg-media-probe/tg-media-probe/test/session_state_test.dart: SessionBootPlanner a session being logged out routes to login
+00:24 +379: /Users/runner/work/tg-media-probe/tg-media-probe/test/session_state_test.dart: SessionBootPlanner an unknown phase waits instead of prompting
+00:24 +380: /Users/runner/work/tg-media-probe/tg-media-probe/test/session_state_test.dart: SessionBootPlanner a malformed key blocks and needs a decision
+00:24 +381: /Users/runner/work/tg-media-probe/tg-media-probe/test/session_state_test.dart: SessionBootPlanner a database without a key blocks instead of overwriting
+00:24 +382: /Users/runner/work/tg-media-probe/tg-media-probe/test/session_state_test.dart: SessionBootPlanner a blocked plan never silently regenerates the key
+00:24 +383: /Users/runner/work/tg-media-probe/tg-media-probe/test/session_state_test.dart: SessionBootPlanner every plan carries a reason
+00:24 +384: /Users/runner/work/tg-media-probe/tg-media-probe/test/session_state_test.dart: ReloginConsent the prompt says the cloud copy is untouched
+00:24 +385: loading /Users/runner/work/tg-media-probe/tg-media-probe/test/orientation_coordinator_test.dart
+00:25 +385: /Users/runner/work/tg-media-probe/tg-media-probe/test/orientation_coordinator_test.dart: start-up and the player the app start-up request is portrait
+00:25 +386: /Users/runner/work/tg-media-probe/tg-media-probe/test/orientation_coordinator_test.dart: start-up and the player opening the player stays portrait
+00:25 +387: /Users/runner/work/tg-media-probe/tg-media-probe/test/orientation_coordinator_test.dart: start-up and the player playback and item changes do not ask for landscape
+00:25 +388: /Users/runner/work/tg-media-probe/tg-media-probe/test/orientation_coordinator_test.dart: full screen is the only way to landscape the toggle requests landscape
+00:25 +389: /Users/runner/work/tg-media-probe/tg-media-probe/test/orientation_coordinator_test.dart: full screen is the only way to landscape leaving full screen returns to portrait
+00:25 +390: /Users/runner/work/tg-media-probe/tg-media-probe/test/orientation_coordinator_test.dart: coming back from the player closing the player restores the app portrait intent
+00:25 +391: /Users/runner/work/tg-media-probe/tg-media-probe/test/orientation_coordinator_test.dart: coming back from the player a landscape request in flight cannot outlive the player
+00:25 +392: /Users/runner/work/tg-media-probe/tg-media-probe/test/orientation_coordinator_test.dart: coming back from the player switching to the settings tab while the feed is inactive
+00:25 +393: /Users/runner/work/tg-media-probe/tg-media-probe/test/orientation_coordinator_test.dart: coming back from the player clearing an owner that was never registered does nothing
+00:25 +394: /Users/runner/work/tg-media-probe/tg-media-probe/test/orientation_coordinator_test.dart: rapid taps a slow landscape answer does not overwrite a newer portrait
+00:25 +395: /Users/runner/work/tg-media-probe/tg-media-probe/test/orientation_coordinator_test.dart: rapid taps ten toggles leave the last intent applied
+00:25 +396: /Users/runner/work/tg-media-probe/tg-media-probe/test/orientation_coordinator_test.dart: the failure is observable a platform error is reported, not swallowed
+00:25 +397: /Users/runner/work/tg-media-probe/tg-media-probe/test/orientation_coordinator_test.dart: the failure is observable a platform without the bridge reports unsupported
+00:25 +398: /Users/runner/work/tg-media-probe/tg-media-probe/test/orientation_coordinator_test.dart: the player page only rotates through the toggle _toggleLandscape never touches the feed controller
+00:25 +399: loading /Users/runner/work/tg-media-probe/tg-media-probe/test/tdjson_load_test.dart
+00:25 +399: /Users/runner/work/tg-media-probe/tg-media-probe/test/tdjson_load_test.dart: tdjson loads and creates a client id
+  Skip: TDJSON_PATH 未设置：本机无 TDLib 二进制，运行时加载未验证
+00:25 +399 ~1: loading /Users/runner/work/tg-media-probe/tg-media-probe/test/media_index_test.dart
+00:26 +399 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/media_index_test.dart: formatMediaNumber pads to three digits and never truncates
+00:26 +400 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/media_index_test.dart: parseMediaNumber accepts bare and hashed input
+00:26 +401 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/media_index_test.dart: #001 is the oldest message, not the newest
+00:26 +402 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/media_index_test.dart: a new upload appends and never renumbers the existing videos
+00:26 +403 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/media_index_test.dart: numberFor maps a message back to its number
+00:26 +404 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/media_index_test.dart: a fileId change does not move the number
+00:26 +405 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/media_index_test.dart: non-video rows and files without an id are not numbered
+00:26 +406 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/media_index_test.dart: search jumps straight to a number
+00:26 +407 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/media_index_test.dart: search matches captions and file names
+00:26 +408 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/media_index_test.dart: displayTitle never falls back to the message id
+00:26 +409 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/media_index_test.dart: empty input yields an empty index
+00:26 +410 ~1: loading /Users/runner/work/tg-media-probe/tg-media-probe/test/playback_controller_test.dart
+00:26 +410 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/playback_controller_test.dart: start opens the verified local file and plays it
+00:26 +411 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/playback_controller_test.dart: there is never more than one live player
+00:26 +412 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/playback_controller_test.dart: next stops at the last video
+00:26 +413 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/playback_controller_test.dart: a download failure is reported with its own message
+00:26 +414 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/playback_controller_test.dart: a player that cannot open is reported and released
+playback open failed: Bad state: cannot open
+00:26 +415 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/playback_controller_test.dart: a superseded load does not leave its player behind
+00:27 +416 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/playback_controller_test.dart: 100 switches leave exactly one player and no crashes
+00:27 +417 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/playback_controller_test.dart: speed changes reach the live player
+00:27 +418 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/playback_controller_test.dart: an empty channel fails honestly instead of showing a player
+00:27 +419 ~1: loading /Users/runner/work/tg-media-probe/tg-media-probe/test/failure_view_test.dart
+00:27 +419 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/failure_view_test.dart: StatusView states loading shows a spinner and the title
+00:28 +420 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/failure_view_test.dart: StatusView states empty shows the title, the hint and the action
+00:28 +421 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/failure_view_test.dart: StatusView states a generic error shows the retry button and calls back
+00:28 +422 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/failure_view_test.dart: FailureView wording per failure permission denied explains membership, no retry
+00:28 +423 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/failure_view_test.dart: FailureView wording per failure an expired session points at signing in again, no retry
+00:28 +424 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/failure_view_test.dart: FailureView wording per failure offline and rate limited keep the retry button
+00:28 +425 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/failure_view_test.dart: FailureView wording per failure the rate-limit copy warns that retrying hurts
+00:28 +426 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/failure_view_test.dart: FailureView wording per failure two failures do not render the same title
+00:28 +427 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/failure_view_test.dart: a retry callback that is null still renders a retryable failure without a callback shows no button
+00:28 +428 ~1: loading /Users/runner/work/tg-media-probe/tg-media-probe/test/cache_validator_test.dart
+00:29 +428 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/cache_validator_test.dart: complete + right size + readable is the only valid combination
+00:29 +429 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/cache_validator_test.dart: TDLib not done is incomplete even when the file exists
+00:29 +430 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/cache_validator_test.dart: missing path is reported as missing
+00:29 +431 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/cache_validator_test.dart: a short file is a size mismatch, not "almost done"
+00:29 +432 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/cache_validator_test.dart: an unreadable file is reported as unreadable
+00:29 +433 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/cache_validator_test.dart: an empty file never counts as valid
+00:29 +434 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/cache_validator_test.dart: a zero expected size skips only the size check
+00:29 +435 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/cache_validator_test.dart: shouldDelete flags exactly the worthless cases
+00:29 +436 ~1: loading /Users/runner/work/tg-media-probe/tg-media-probe/test/video_player_page_test.dart
+00:30 +436 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/video_player_page_test.dart: the bottom sheet shows the number and the caption
+00:30 +437 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/video_player_page_test.dart: the badge is absent when the setting is off
+00:31 +438 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/video_player_page_test.dart: the badge shows LOCAL_FILE and a real size when on
+00:31 +439 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/video_player_page_test.dart: a downloading badge shows the measured rate and byte counts
+00:31 +440 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/video_player_page_test.dart: starting on the second video shows #002
+00:31 +441 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/video_player_page_test.dart: a download failure shows its own message and a retry
+00:31 +442 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/video_player_page_test.dart: an out-of-space failure gets its own wording
+00:31 +443 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/video_player_page_test.dart: a player that cannot open shows the player error
+playback open failed: Bad state: cannot open
+00:31 +444 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/video_player_page_test.dart: swiping up moves to the next video and the number follows
+00:31 +445 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/video_player_page_test.dart: a single tap toggles the controls
+00:31 +446 ~1: loading /Users/runner/work/tg-media-probe/tg-media-probe/test/photo_exclusion_test.dart
+00:32 +446 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/photo_exclusion_test.dart: MediaRecord.fromMessage a photo builds no record at all
+00:32 +447 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/photo_exclusion_test.dart: MediaRecord.fromMessage a video still builds a full record
+00:32 +448 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/photo_exclusion_test.dart: a photo-heavy channel indexes only videos and counts only videos
+00:33 +449 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/photo_exclusion_test.dart: a photo-heavy channel photos never stall the pagination cursor
+00:34 +450 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/photo_exclusion_test.dart: a photo-heavy channel the video-only pager skips photo rows without losing videos
+00:34 +451 ~1: loading /Users/runner/work/tg-media-probe/tg-media-probe/test/td_error_kind_test.dart
+00:34 +451 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/td_error_kind_test.dart: classifyTdError no code and no message means no failure
+00:34 +452 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/td_error_kind_test.dart: classifyTdError 403 is permissionDenied regardless of wording
+00:34 +453 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/td_error_kind_test.dart: classifyTdError CHAT_FORBIDDEN is permissionDenied even under code 400
+00:34 +454 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/td_error_kind_test.dart: classifyTdError CHANNEL_PRIVATE is permissionDenied
+00:34 +455 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/td_error_kind_test.dart: classifyTdError 401 is sessionExpired
+00:34 +456 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/td_error_kind_test.dart: classifyTdError AUTH_KEY_UNREGISTERED is sessionExpired even under code 400
+00:34 +457 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/td_error_kind_test.dart: classifyTdError 420 with FLOOD_WAIT is rateLimited, not a generic error
+00:34 +458 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/td_error_kind_test.dart: classifyTdError 429 is rateLimited
+00:34 +459 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/td_error_kind_test.dart: classifyTdError 400 with no known fragment stays generic
+00:34 +460 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/td_error_kind_test.dart: classifyTdError a null code with a known fragment still classifies
+00:34 +461 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/td_error_kind_test.dart: classifyTdError the session check runs before the permission check
+00:34 +462 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/td_error_kind_test.dart: classifyFailure a raw TDLib response map is classified by its code
+00:34 +463 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/td_error_kind_test.dart: classifyFailure a map with a stringified code still works
+00:34 +464 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/td_error_kind_test.dart: classifyFailure a TimeoutException is offline
+00:34 +465 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/td_error_kind_test.dart: classifyFailure a SocketException is offline
+00:34 +466 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/td_error_kind_test.dart: classifyFailure an exception whose text carries a TDLib code is classified
+00:34 +467 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/td_error_kind_test.dart: classifyFailure an unknown exception falls back to generic, never to none
+00:34 +468 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/td_error_kind_test.dart: wording and retry policy every failure has a title and a hint
+00:34 +469 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/td_error_kind_test.dart: wording and retry policy permission and expired session are not retryable
+00:34 +470 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/td_error_kind_test.dart: wording and retry policy offline, rate limited and generic are retryable
+00:34 +471 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/td_error_kind_test.dart: wording and retry policy the expired-session hint tells the user to sign in again
+00:34 +472 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/td_error_kind_test.dart: wording and retry policy the rate-limit hint warns that retrying makes it worse
+00:34 +473 ~1: loading /Users/runner/work/tg-media-probe/tg-media-probe/test/passcode_test.dart
+00:35 +473 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/passcode_test.dart: PasscodeHasher.hash same passcode, same salt, same iterations is deterministic
+00:35 +474 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/passcode_test.dart: PasscodeHasher.hash a different salt changes the verifier
+00:35 +475 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/passcode_test.dart: PasscodeHasher.hash a different passcode changes the verifier
+00:35 +476 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/passcode_test.dart: PasscodeHasher.hash generated salts differ between records
+00:35 +477 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/passcode_test.dart: PasscodeHasher.hash the stored record never contains the passcode
+00:35 +478 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/passcode_test.dart: PasscodeHasher.hash iterations below 1 is rejected
+00:35 +479 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/passcode_test.dart: PasscodeHasher.verify accepts the right passcode
+00:35 +480 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/passcode_test.dart: PasscodeHasher.verify rejects a wrong passcode
+00:35 +481 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/passcode_test.dart: PasscodeHasher.verify rejects an empty passcode
+00:35 +482 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/passcode_test.dart: PasscodeHasher.verify rejects a strict prefix of the right passcode
+00:35 +483 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/passcode_test.dart: PasscodeHasher.verify a record made with a low cost still verifies after the default rises
+00:36 +484 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/passcode_test.dart: PasscodeHasher.verify one flipped hex character in the hash fails
+00:36 +485 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/passcode_test.dart: PasscodeHasher.verify a tampered salt fails instead of throwing
+00:37 +486 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/passcode_test.dart: PasscodeHasher.verify an unparsable record fails closed
+00:37 +487 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/passcode_test.dart: PasscodeHasher.verify non-ASCII passcodes round-trip
+00:37 +488 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/passcode_test.dart: PasscodeRecord encode/decode round-trips every field
+00:37 +489 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/passcode_test.dart: PasscodeRecord encode/decode the encoded form carries the algorithm and version
+00:37 +490 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/passcode_test.dart: PasscodeRecord encode/decode rejects a wrong scheme rather than guessing
+00:37 +491 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/passcode_test.dart: PasscodeRecord encode/decode rejects a hash whose length does not match the key length
+00:37 +492 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/passcode_test.dart: PasscodeRecord encode/decode rejects a zero iteration count
+00:37 +493 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/passcode_test.dart: PasscodeRecord encode/decode rejects non-hex digits
+00:37 +494 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/passcode_test.dart: PasscodeHasher.validate accepts a six-character passcode
+00:37 +495 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/passcode_test.dart: PasscodeHasher.validate rejects fewer than six characters
+00:37 +496 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/passcode_test.dart: PasscodeHasher.validate rejects more than the maximum
+00:37 +497 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/passcode_test.dart: PasscodeHasher.validate rejects whitespace-only
+00:37 +498 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/passcode_test.dart: PasscodeHasher.validate rejects embedded newlines
+00:37 +499 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/passcode_test.dart: PasscodeHasher.validate accepts an emoji passcode of sufficient length
+00:37 +500 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/passcode_test.dart: PasscodeThrottle no delay within the free attempts
+00:37 +501 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/passcode_test.dart: PasscodeThrottle grows after the free attempts
+00:37 +502 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/passcode_test.dart: PasscodeThrottle is capped
+00:37 +503 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/passcode_test.dart: PasscodeThrottle never goes negative for absurd counters
+00:37 +504 ~1: loading /Users/runner/work/tg-media-probe/tg-media-probe/test/storage_zones_test.dart
+00:37 +504 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/storage_zones_test.dart: layout four zones are physically disjoint
+00:37 +505 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/storage_zones_test.dart: layout overlapping zones are rejected at construction
+00:37 +506 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/storage_zones_test.dart: layout only tempCache is deletable by the cache cleaner
+00:37 +507 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/storage_zones_test.dart: containment accepts a real temp file
+00:37 +508 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/storage_zones_test.dart: containment rejects user downloads
+00:37 +509 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/storage_zones_test.dart: containment rejects the index database
+00:37 +510 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/storage_zones_test.dart: containment rejects account data
+00:37 +511 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/storage_zones_test.dart: containment rejects a path that escapes with ..
+00:37 +512 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/storage_zones_test.dart: containment rejects a sibling directory sharing the prefix
+00:37 +513 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/storage_zones_test.dart: containment rejects a zone root itself
+00:37 +514 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/storage_zones_test.dart: containment rejects a symlink that resolves outside the zone
+00:37 +515 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/storage_zones_test.dart: containment rejects a path outside every zone
+00:37 +516 ~1: loading /Users/runner/work/tg-media-probe/tg-media-probe/test/orientation_test.dart
+00:38 +516 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/orientation_test.dart: orientation bridge maps the three modes to their wire values
+00:38 +517 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/orientation_test.dart: orientation bridge page scope returns to portrait on dispose, exactly once
+00:38 +518 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/orientation_test.dart: orientation bridge resetToPortrait applies portrait before telling the system to reset
+00:38 +519 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/orientation_test.dart: orientation bridge the shell holds portrait while the feed borrows landscape
+00:38 +520 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/orientation_test.dart: orientation bridge a page that never entered still resets on dispose
+00:38 +521 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/orientation_test.dart: orientation bridge a platform without the bridge does not throw
+00:38 +522 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/orientation_test.dart: video rotation reads 90 degrees from the native track transform
+00:38 +523 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/orientation_test.dart: video rotation normalises -90 to 270
+00:38 +524 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/orientation_test.dart: video rotation returns null for a non-orthogonal transform instead of guessing
+00:38 +525 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/orientation_test.dart: video rotation returns null when the native side has no answer
+00:38 +526 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/orientation_test.dart: video rotation returns null when the plugin is missing
+00:38 +527 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/orientation_test.dart: video rotation returns null on a platform error
+00:38 +528 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/orientation_test.dart: video rotation an empty path is not sent to the platform
+00:38 +529 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/orientation_test.dart: video rotation normalizeDegrees accepts only the four real values
+00:38 +530 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/orientation_test.dart: video rotation quarter turns swap the display dimensions
+00:38 +531 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/orientation_test.dart: portrait is the default for every non-player screen the app root holds portrait around every route
+00:38 +532 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/orientation_test.dart: portrait is the default for every non-player screen the player enters portrait and only user action asks for landscape
+00:38 +533 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/orientation_test.dart: portrait is the default for every non-player screen switching videos never requests a rotation
+00:38 +534 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/orientation_test.dart: portrait is the default for every non-player screen the shell does not own a second orientation holder
+00:38 +535 ~1: loading /Users/runner/work/tg-media-probe/tg-media-probe/test/history_backfill_test.dart
+00:39 +535 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/history_backfill_test.dart: a kick keeps slicing until its budget, then allows another kick
+00:39 +536 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/history_backfill_test.dart: a short page ends the walk
+00:39 +537 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/history_backfill_test.dart: a slice with no progress stops instead of spinning
+00:39 +538 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/history_backfill_test.dart: an error keeps the cursor where it was and reports it
+00:39 +539 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/history_backfill_test.dart: nothing to do is idle, not an error
+00:39 +540 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/history_backfill_test.dart: two kicks cannot overlap
+00:39 +541 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/history_backfill_test.dart: the slice size is the configured one
+00:39 +542 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/history_backfill_test.dart: a long walk is bounded per kick, never one unbounded loop
+00:39 +543 ~1: loading /Users/runner/work/tg-media-probe/tg-media-probe/test/backfill_loop_test.dart
+00:39 +543 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/backfill_loop_test.dart: a cycle only ends when every channel is exhausted a drained 5-message channel does not end a 4000-message one
+00:40 +544 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/backfill_loop_test.dart: a cycle only ends when every channel is exhausted the resume cursor is the scanned id, not the oldest media id
+00:40 +545 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/backfill_loop_test.dart: a cycle only ends when every channel is exhausted a channel that errors does not stop the others
+00:40 +546 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/backfill_loop_test.dart: the scheduler keeps asking start() re-kicks after a budget stop until the work is done
+00:40 +547 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/backfill_loop_test.dart: the scheduler keeps asking a flooded slice waits the retry_after instead of retrying at once
+00:40 +548 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/backfill_loop_test.dart: the scheduler keeps asking repeated failures back off exponentially, capped
+00:40 +549 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/backfill_loop_test.dart: the scheduler keeps asking stop() ends the loop between slices
+00:40 +550 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/backfill_loop_test.dart: flood wait parsing reads the seconds out of the TDLib text
+00:40 +551 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/backfill_loop_test.dart: flood wait parsing caps an absurd wait so a bad string cannot park the app for a day
+00:40 +552 ~1: loading /Users/runner/work/tg-media-probe/tg-media-probe/test/td_requests_test.dart
+00:40 +552 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/td_requests_test.dart: TDLib request builders setTdlibParameters carries every required field
+00:40 +553 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/td_requests_test.dart: TDLib request builders setTdlibParameters refuses an empty encryption key
+00:40 +554 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/td_requests_test.dart: TDLib request builders getChats uses chatListMain and an explicit limit
+00:40 +555 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/td_requests_test.dart: TDLib request builders getChatHistory default starts from the newest message
+00:40 +556 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/td_requests_test.dart: TDLib request builders downloadFile asks for the whole file from offset 0
+00:40 +557 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/td_requests_test.dart: TDLib request builders auth builders pass the raw user input untouched
+00:40 +558 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/td_requests_test.dart: TDLib request builders no builder asks TDLib to mutate cloud data
+00:40 +559 ~1: loading /Users/runner/work/tg-media-probe/tg-media-probe/test/sync_4000_test.dart
+00:41 +559 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/sync_4000_test.dart: 4000 messages are walked in bounded batches to the end
+00:44 +560 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/sync_4000_test.dart: cycles always move deeper, never re-reading the same batch
+00:44 +561 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/sync_4000_test.dart: an interrupted walk resumes where it stopped
+00:46 +562 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/sync_4000_test.dart: a refresh from the newest message does not duplicate rows
+00:46 +563 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/sync_4000_test.dart: a rate-limited cycle reports the error and the next one recovers
+00:47 +564 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/sync_4000_test.dart: a batch with no video still advances the walk
+00:47 +565 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/sync_4000_test.dart: the end is only claimed by a short page, not by a page budget
+00:49 +566 ~1: /Users/runner/work/tg-media-probe/tg-media-probe/test/sync_4000_test.dart: the store never holds more rows than the channel has messages
+00:52 +567 ~1: All tests passed!

@@ -1,0 +1,7 @@
+==> /Users/runner/work/tg-media-probe/tg-media-probe/build/ios/ipa/TGMediaProbe-unsigned.ipa
+-rw-r--r--  1 runner  staff    19M Oct 29 03:58 /Users/runner/work/tg-media-probe/tg-media-probe/build/ios/ipa/TGMediaProbe-unsigned.ipa
+ipa_bytes: 19760919
+52372c507a8799f8d793b726014f194e84c96b084810fa1979b1d71c3037c178  /Users/runner/work/tg-media-probe/tg-media-probe/build/ios/ipa/TGMediaProbe-unsigned.ipa
+==> bundle info
+com.tgmedia.tgMediaProbe
+15.2

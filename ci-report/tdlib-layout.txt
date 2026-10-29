@@ -1,0 +1,38 @@
+--- xcframework root
+total 16
+drwxr-xr-x  12 runner  staff   384 Oct 25 00:48 .
+drwxr-xr-x   4 runner  staff   128 Oct 29 03:53 ..
+-rw-r--r--   1 runner  staff  4376 Oct 25 00:48 Info.plist
+drwxr-xr-x   3 runner  staff    96 Oct 25 00:48 ios-arm64
+drwxr-xr-x   3 runner  staff    96 Oct 25 00:48 ios-arm64_x86_64-simulator
+drwxr-xr-x   3 runner  staff    96 Oct 25 00:48 macos-arm64_x86_64
+drwxr-xr-x   3 runner  staff    96 Oct 25 00:48 tvos-arm64
+drwxr-xr-x   3 runner  staff    96 Oct 25 00:48 tvos-arm64_x86_64-simulator
+drwxr-xr-x   3 runner  staff    96 Oct 25 00:48 watchos-arm64_arm64_32_armv7k
+drwxr-xr-x   3 runner  staff    96 Oct 25 00:48 watchos-arm64_x86_64-simulator
+drwxr-xr-x   3 runner  staff    96 Oct 25 00:48 xros-arm64
+drwxr-xr-x   3 runner  staff    96 Oct 25 00:48 xros-arm64_x86_64-simulator
+--- ios-arm64 slice
+total 183160
+drwxr-xr-x  6 runner  staff       192 Oct 25 00:31 .
+drwxr-xr-x  3 runner  staff        96 Oct 25 00:48 ..
+drwxr-xr-x  6 runner  staff       192 Oct 25 00:30 Headers
+-rw-r--r--  1 runner  staff       807 Oct 25 00:30 Info.plist
+drwxr-xr-x  3 runner  staff        96 Oct 25 00:30 Modules
+-rw-r--r--  1 runner  staff  93771336 Oct 25 00:31 TDLibFramework
+--- framework Info.plist
+12.0
+--- binary kind
+!<arch>
+
+--- tdjson entry points declared in the public header
+TDJSON_EXPORT int td_create_client_id();
+TDJSON_EXPORT void td_send(int client_id, const char *request);
+TDJSON_EXPORT const char *td_receive(double timeout);
+TDJSON_EXPORT const char *td_execute(const char *request);
+TDJSON_EXPORT void td_set_log_message_callback(int max_verbosity_level, td_log_message_callback_ptr callback);
+TDJSON_EXPORT void *td_json_client_create();
+TDJSON_EXPORT void td_json_client_send(void *client, const char *request);
+TDJSON_EXPORT const char *td_json_client_receive(void *client, double timeout);
+TDJSON_EXPORT const char *td_json_client_execute(void *client, const char *request);
+TDJSON_EXPORT void td_json_client_destroy(void *client);

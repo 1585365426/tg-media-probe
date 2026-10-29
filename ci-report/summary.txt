@@ -1,0 +1,23 @@
+run_id: 40814561475
+run_attempt: 1
+sha: b2a66b0f3f9cda820246738316c9d3735baa998e
+ref: refs/heads/rebuild-step3
+date: 2026-10-29T03:58:37Z
+runner: macOS ARM64
+--- host
+ProductName:		macOS
+ProductVersion:		26.6.2
+BuildVersion:		25G83
+--- xcode
+Xcode 26.6
+Build version 17F113
+--- flutter
+Flutter 3.47.8 • channel stable • https://github.com/flutter/flutter.git
+Framework • revision 737ba8f885 (6 days ago) • 2026-10-22 21:37:31 -0700
+Engine • hash dfd2e6cb7d319db05e3bf1503f3e2ac60f6288a2 (revision cf636b1dfb) (6 days ago) • 2026-10-23 02:13:38.000Z
+Tools • Dart 3.13.7 • DevTools 2.60.0
+--- ipa artifacts
+total 38928
+-rw-r--r--  1 runner  staff   155B Oct 29 03:58 sha256.txt
+-rw-r--r--  1 runner  staff    19M Oct 29 03:58 TGMediaProbe-unsigned.ipa
+52372c507a8799f8d793b726014f194e84c96b084810fa1979b1d71c3037c178  /Users/runner/work/tg-media-probe/tg-media-probe/build/ios/ipa/TGMediaProbe-unsigned.ipa

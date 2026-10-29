@@ -1,0 +1,77 @@
+==> vendored xcframework slice
+app.swiftgram.tdlibframework.iOS
+MinimumOSVersion = 12.0
+CFBundleShortVersionString = 1.8.69
+static archive? yes (ar archive: linked in, nothing to embed)
+==> app plist minimum OS
+15.2
+com.tgmedia.tgMediaProbe
+0.1.0
+==> architecture
+/Users/runner/work/tg-media-probe/tg-media-probe/build/ios/iphoneos/Runner.app/Runner: Mach-O 64-bit executable arm64
+Non-fat file: /Users/runner/work/tg-media-probe/tg-media-probe/build/ios/iphoneos/Runner.app/Runner is architecture: arm64
+==> minimum OS recorded in the Mach-O load commands
+      cmd LC_BUILD_VERSION
+  cmdsize 32
+ platform 2
+    minos 15.2
+      sdk 26.5
+==> dynamic dependencies (no TDLib dylib expected)
+/Users/runner/work/tg-media-probe/tg-media-probe/build/ios/iphoneos/Runner.app/Runner:
+	/usr/lib/libc++.1.dylib (compatibility version 1.0.0, current version 2100.43.0)
+	/usr/lib/libz.1.dylib (compatibility version 1.0.0, current version 1.2.12)
+	/System/Library/Frameworks/AVFoundation.framework/AVFoundation (compatibility version 1.0.0, current version 2.0.0)
+	/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation (compatibility version 150.0.0, current version 5026.5.4)
+	/System/Library/Frameworks/CoreMedia.framework/CoreMedia (compatibility version 1.0.0, current version 3320.8.1)
+	/System/Library/Frameworks/Foundation.framework/Foundation (compatibility version 300.0.0, current version 5026.5.4)
+	/System/Library/Frameworks/Security.framework/Security (compatibility version 1.0.0, current version 61901.120.67)
+	/usr/lib/libobjc.A.dylib (compatibility version 1.0.0, current version 228.0.0)
+	/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1356.0.0)
+	/System/Library/Frameworks/AVFAudio.framework/AVFAudio (compatibility version 1.0.0, current version 1.0.0)
+	/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics (compatibility version 64.0.0, current version 1965.5.1)
+	/System/Library/Frameworks/CoreVideo.framework/CoreVideo (compatibility version 1.2.0, current version 734.4.0)
+	/System/Library/Frameworks/LocalAuthentication.framework/LocalAuthentication (compatibility version 1.0.0, current version 2005.120.18)
+	/System/Library/Frameworks/QuartzCore.framework/QuartzCore (compatibility version 1.2.0, current version 1195.14.4)
+	/System/Library/Frameworks/UIKit.framework/UIKit (compatibility version 1.0.0, current version 9126.5.5)
+	/usr/lib/swift/libswiftAVFoundation.dylib (compatibility version 1.0.0, current version 2420.7.1)
+	/usr/lib/swift/libswiftCore.dylib (compatibility version 0.0.0, current version 0.0.0)
+	/usr/lib/swift/libswiftCoreAudio.dylib (compatibility version 1.0.0, current version 411.255.0, weak)
+	/usr/lib/swift/libswiftCoreFoundation.dylib (compatibility version 1.0.0, current version 120.100.0)
+	/usr/lib/swift/libswiftCoreImage.dylib (compatibility version 1.0.0, current version 2.2.0, weak)
+	/usr/lib/swift/libswiftCoreMIDI.dylib (compatibility version 1.0.0, current version 6.0.0, weak)
+	/usr/lib/swift/libswiftCoreMedia.dylib (compatibility version 1.0.0, current version 3320.8.1)
+	/usr/lib/swift/libswiftDarwin.dylib (compatibility version 1.0.0, current version 377.120.8, weak)
+	/usr/lib/swift/libswiftDispatch.dylib (compatibility version 1.0.0, current version 1542.100.32)
+	/usr/lib/swift/libswiftMetal.dylib (compatibility version 1.0.0, current version 373.2.0, weak)
+	/usr/lib/swift/libswiftOSLog.dylib (compatibility version 1.0.0, current version 10.0.0, weak)
+	/usr/lib/swift/libswiftObjectiveC.dylib (compatibility version 1.0.0, current version 951.7.0)
+	/usr/lib/swift/libswiftQuartzCore.dylib (compatibility version 1.0.0, current version 5.0.0, weak)
+	/usr/lib/swift/libswiftSpatial.dylib (compatibility version 1.0.0, current version 1.0.0, weak)
+	/usr/lib/swift/libswiftUniformTypeIdentifiers.dylib (compatibility version 1.0.0, current version 879.5.1, weak)
+	/usr/lib/swift/libswiftXPC.dylib (compatibility version 1.0.0, current version 128.120.2, weak)
+	/usr/lib/swift/libswift_Concurrency.dylib (compatibility version 0.0.0, current version 0.0.0)
+	/usr/lib/swift/libswiftos.dylib (compatibility version 1.0.0, current version 1082.0.0, weak)
+	/usr/lib/swift/libswiftsimd.dylib (compatibility version 1.0.0, current version 23.0.0, weak)
+	@rpath/Flutter.framework/Flutter (compatibility version 0.0.0, current version 0.0.0)
+	/usr/lib/swift/libswiftFoundation.dylib (compatibility version 1.0.0, current version 1.0.0)
+	/usr/lib/swift/libswiftCoreGraphics.dylib (compatibility version 1.0.0, current version 120.100.0)
+	/usr/lib/swift/libswiftUIKit.dylib (compatibility version 1.0.0, current version 1.0.0)
+==> TDLib symbols
+found with: nm -gU
+00000001015324f4 T _td_create_client_id
+00000001015324f8 T _td_send
+0000000101532538 T _td_receive
+000000010153253c T _td_execute
+OK: all four tdjson entry points are present in Runner
+==> TDLib footprint in the binary
+5
+ 58M	/Users/runner/work/tg-media-probe/tg-media-probe/build/ios/iphoneos/Runner.app
+==> embedded frameworks (static TDLib means this stays empty of TDLib)
+total 0
+drwxr-xr-x   5 runner  staff  160 Oct 29 03:58 .
+drwxr-xr-x  13 runner  staff  416 Oct 29 03:58 ..
+drwxr-xr-x   6 runner  staff  192 Oct 29 03:57 App.framework
+drwx------   9 runner  staff  288 Oct 29 03:57 Flutter.framework
+drwxr-xr-x   5 runner  staff  160 Oct 29 03:57 objective_c.framework
+==> final verdict
+TDLib is statically linked into Runner and the four tdjson symbols are exported

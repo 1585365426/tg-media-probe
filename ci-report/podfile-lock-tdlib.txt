@@ -1,0 +1,23 @@
+5:  - tdlib (1.8.69)
+6-
+7-DEPENDENCIES:
+8-  - Flutter (from `Flutter`)
+9-  - flutter_secure_storage (from `.symlinks/plugins/flutter_secure_storage/ios`)
+10:  - tdlib (from `tdlib`)
+11-
+12-EXTERNAL SOURCES:
+13-  Flutter:
+14-    :path: Flutter
+15-  flutter_secure_storage:
+16-    :path: ".symlinks/plugins/flutter_secure_storage/ios"
+17:  tdlib:
+18:    :path: tdlib
+19-
+20-SPEC CHECKSUMS:
+21-  Flutter: 71a624a5bc0c04062bf19101d501e466baf2fb47
+22-  flutter_secure_storage: 1ed9476fba7e7a782b22888f956cce43e2c62f13
+23:  tdlib: cdac039c31febdd93317e346ac448e9763240ae7
+24-
+25-PODFILE CHECKSUM: 82b8deb80c9eac1fee0278a1d3435d56e21be5cb
+26-
+27-COCOAPODS: 1.17.0

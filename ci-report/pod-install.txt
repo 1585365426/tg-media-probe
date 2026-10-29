@@ -1,0 +1,12 @@
+Updating local specs repositories
+Adding spec repo `trunk` with CDN `https://cdn.cocoapods.org/`
+Analyzing dependencies
+Downloading dependencies
+Installing Flutter (1.0.0)
+Installing flutter_secure_storage (6.0.0)
+Installing tdlib (1.8.69)
+Generating Pods project
+Integrating client project
+Pod installation complete! There are 3 dependencies from the Podfile and 3 total pods installed.
+
+[!] CocoaPods did not set the base configuration of your project because your project already has a custom config set. In order for CocoaPods integration to work at all, please either set the base configurations of the target `Runner` to `Target Support Files/Pods-Runner/Pods-Runner.profile.xcconfig` or include the `Target Support Files/Pods-Runner/Pods-Runner.profile.xcconfig` in your build configuration (`Flutter/Release.xcconfig`).

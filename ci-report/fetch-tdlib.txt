@@ -1,0 +1,28 @@
+==> verifying sha256
+/Users/runner/tdlib-cache/TDLibFramework-1.8.69-025086e3.zip: OK
+==> unzipping into /Users/runner/work/tg-media-probe/tg-media-probe/ios/tdlib
+==> xcframework layout
+/Users/runner/work/tg-media-probe/tg-media-probe/ios/tdlib/TDLibFramework.xcframework
+/Users/runner/work/tg-media-probe/tg-media-probe/ios/tdlib/TDLibFramework.xcframework/tvos-arm64/TDLibFramework.framework/TDLibFramework
+/Users/runner/work/tg-media-probe/tg-media-probe/ios/tdlib/TDLibFramework.xcframework/tvos-arm64_x86_64-simulator/TDLibFramework.framework/TDLibFramework
+/Users/runner/work/tg-media-probe/tg-media-probe/ios/tdlib/TDLibFramework.xcframework/ios-arm64_x86_64-simulator/TDLibFramework.framework/TDLibFramework
+/Users/runner/work/tg-media-probe/tg-media-probe/ios/tdlib/TDLibFramework.xcframework/watchos-arm64_x86_64-simulator/TDLibFramework.framework/TDLibFramework
+/Users/runner/work/tg-media-probe/tg-media-probe/ios/tdlib/TDLibFramework.xcframework/xros-arm64/TDLibFramework.framework/TDLibFramework
+/Users/runner/work/tg-media-probe/tg-media-probe/ios/tdlib/TDLibFramework.xcframework/xros-arm64_x86_64-simulator/TDLibFramework.framework/TDLibFramework
+/Users/runner/work/tg-media-probe/tg-media-probe/ios/tdlib/TDLibFramework.xcframework/ios-arm64/TDLibFramework.framework/TDLibFramework
+/Users/runner/work/tg-media-probe/tg-media-probe/ios/tdlib/TDLibFramework.xcframework/watchos-arm64_arm64_32_armv7k/TDLibFramework.framework/TDLibFramework
+--- /Users/runner/work/tg-media-probe/tg-media-probe/ios/tdlib/TDLibFramework.xcframework/ios-arm64_x86_64-simulator/TDLibFramework.framework/TDLibFramework
+/Users/runner/work/tg-media-probe/tg-media-probe/ios/tdlib/TDLibFramework.xcframework/ios-arm64_x86_64-simulator/TDLibFramework.framework/TDLibFramework: Mach-O universal binary with 2 architectures: [x86_64:current ar archive] [arm64]
+/Users/runner/work/tg-media-probe/tg-media-probe/ios/tdlib/TDLibFramework.xcframework/ios-arm64_x86_64-simulator/TDLibFramework.framework/TDLibFramework (for architecture x86_64):	current ar archive
+/Users/runner/work/tg-media-probe/tg-media-probe/ios/tdlib/TDLibFramework.xcframework/ios-arm64_x86_64-simulator/TDLibFramework.framework/TDLibFramework (for architecture arm64):	current ar archive
+Architectures in the fat file: /Users/runner/work/tg-media-probe/tg-media-probe/ios/tdlib/TDLibFramework.xcframework/ios-arm64_x86_64-simulator/TDLibFramework.framework/TDLibFramework are: x86_64 arm64 
+Archive : /Users/runner/work/tg-media-probe/tg-media-probe/ios/tdlib/TDLibFramework.xcframework/ios-arm64_x86_64-simulator/TDLibFramework.framework/TDLibFramework (architecture x86_64)
+/Users/runner/work/tg-media-probe/tg-media-probe/ios/tdlib/TDLibFramework.xcframework/ios-arm64_x86_64-simulator/TDLibFramework.framework/TDLibFramework(TDLibFramework_vers.o) (architecture x86_64):
+Mach header
+--- /Users/runner/work/tg-media-probe/tg-media-probe/ios/tdlib/TDLibFramework.xcframework/ios-arm64/TDLibFramework.framework/TDLibFramework
+/Users/runner/work/tg-media-probe/tg-media-probe/ios/tdlib/TDLibFramework.xcframework/ios-arm64/TDLibFramework.framework/TDLibFramework: current ar archive
+Non-fat file: /Users/runner/work/tg-media-probe/tg-media-probe/ios/tdlib/TDLibFramework.xcframework/ios-arm64/TDLibFramework.framework/TDLibFramework is architecture: arm64
+Archive : /Users/runner/work/tg-media-probe/tg-media-probe/ios/tdlib/TDLibFramework.xcframework/ios-arm64/TDLibFramework.framework/TDLibFramework
+/Users/runner/work/tg-media-probe/tg-media-probe/ios/tdlib/TDLibFramework.xcframework/ios-arm64/TDLibFramework.framework/TDLibFramework(TDLibFramework_vers.o):
+Mach header
+==> TDLib ready
