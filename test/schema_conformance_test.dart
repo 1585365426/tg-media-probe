@@ -66,9 +66,14 @@ void main() {
       getChat(1),
       getChatHistory(chatId: 1),
       getMessage(chatId: 1, messageId: 2),
+      getOption('version'),
       getFile(1),
       downloadFile(fileId: 1),
+      downloadFile(fileId: 1, offset: 1024, limit: 1024, synchronous: true),
       cancelDownloadFile(fileId: 1),
+      getFileDownloadedPrefixSize(fileId: 1, offset: 0),
+      readFilePart(fileId: 1, offset: 0, count: 1024),
+      deleteFile(1),
       logOut(),
       close(),
       getMe(),
@@ -111,6 +116,11 @@ void main() {
             'is_downloading_completed',
             'downloaded_size',
             'can_be_downloaded',
+            // E1 depends on these two: `downloaded_size` alone cannot tell a
+            // contiguous prefix from bytes scattered around a hole.
+            'downloaded_prefix_size',
+            'is_downloading_active',
+            'download_offset',
           }),
           isTrue);
     });

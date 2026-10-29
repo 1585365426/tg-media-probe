@@ -28,6 +28,7 @@ import '../storage/temp_zone_report.dart';
 import '../util/byte_format.dart';
 import '../util/redact.dart';
 import 'app_theme.dart';
+import 'chunk_probe_panel.dart';
 import 'status_view.dart';
 import 'streaming_overlay.dart';
 
@@ -101,6 +102,7 @@ class _SettingsPageState extends State<SettingsPage> {
           _storageSection(),
           _appearanceSection(),
           _playbackDiagnosticsSection(),
+          _probeSection(),
           _aboutSection(),
         ],
       ),
@@ -565,6 +567,31 @@ class _SettingsPageState extends State<SettingsPage> {
   /// had bytes to fetch and the proxy really answered `206`. A full download
   /// followed by playback says so, and a run that never produced the data
   /// says 无法判定 instead of assuming.
+  // ---- E1 分块下载实验 ------------------------------------------------
+
+  /// The panel borrows `session.client`, the one TdClient this process may
+  /// have: a second instance on the same `database_directory` fails with
+  /// "Can't lock file", and the point of the probe is to measure the very
+  /// client the product uses.
+  Widget _probeSection() {
+    final session = widget.session;
+    return SettingsSection(
+      title: '下载实验（E1）',
+      footnote: '对同一个真实文件依次请求 1 MB 的连续区间，'
+          '每块用直接读文件和 readFilePart 两条路校验。'
+          '结果写到 Documents/probes/，可整段复制。',
+      children: <Widget>[
+        Padding(
+          padding: const EdgeInsets.fromLTRB(28, 0, 28, 8),
+          child: ChunkProbePanel(
+            client: session.client,
+            ready: session.status.isAuthorized,
+          ),
+        ),
+      ],
+    );
+  }
+
   Widget _playbackDiagnosticsSection() {
     return ListenableBuilder(
       listenable: widget.preferences,

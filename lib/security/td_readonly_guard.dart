@@ -159,6 +159,9 @@ class TdReadOnlyGuard {
     'loadChats',
     'searchChats',
     'searchChatMessages',
+    // byte-level reads: local file store, no cloud data is written
+    'getFileDownloadedPrefixSize',
+    'readFilePart',
   };
 
   /// True for a method that is either an allowed read or an allowed local

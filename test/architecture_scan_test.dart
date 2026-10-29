@@ -56,10 +56,15 @@ void main() {
       // The request builder, the transport that sends it, and the message
       // probe (which resolves a file id, not a play). Anything else is a new
       // door into the download API.
+      //
+      // `chunk_probe.dart` is the fourth and it is not part of playback: it is
+      // the E1 measurement harness, reachable only from the probe page. The
+      // test below keeps it from becoming a second data source.
       const allowed = <String>{
         'lib/td/td_requests.dart',
         'lib/playback/video_source.dart',
         'lib/td/media_probe.dart',
+        'lib/td/chunk_probe.dart',
       };
       final offenders = <String>[];
       for (final file in _sources(root)) {
@@ -78,8 +83,27 @@ void main() {
               'FileTransferApi 请求整文件：$offenders');
     });
 
-    test('the Downloader itself never sends a ranged window', () {
-      final code = _code(
+    test('the chunk probe is never on a playback path', () {
+      // E1 has to ask TDLib for offset/limit windows, which the old playback
+      // stack is forbidden from doing. Keeping the probe out of `lib/playback`
+      // is what makes that exception safe: the player cannot import it, and the
+      // only caller is the probe page.
+      for (final file in _sources(root)) {
+        final normalised = file.path.replaceAll('\\', '/');
+        if (!normalised.contains('/lib/playback/')) continue;
+        final code = _code(file.readAsStringSync());
+        expect(code.contains('chunk_probe'), isFalse,
+            reason: '${file.path} 引用了 chunk_probe：实验代码不能进入播放链路');
+      }
+      // Mounted in Settings because that page borrows `AppSession.client` —
+      // the only TdClient a process may hold. `ProbePage` opens its own, which
+      // TDLib rejects with "Can't lock file" while the session is live.
+      final page = File('$root/lib/ui/settings_page.dart').readAsStringSync();
+      expect(page.contains('ChunkProbePanel'), isTrue,
+          reason: '设置页必须挂上 E1 面板，否则真机上没有任何入口');
+    });
+
+    test('the Downloader itself never sends a ranged window', () {      final code = _code(
         File('$root/lib/playback/downloader.dart').readAsStringSync(),
       );
       expect(code.contains('startRange('), isFalse,

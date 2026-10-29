@@ -114,6 +114,14 @@ Map<String, Object?> getMessage({required int chatId, required int messageId}) =
       'message_id': messageId,
     };
 
+/// Reads a TDLib option. `getOption('version')` is the only trustworthy way to
+/// report which library actually ran: the app pins a build, but a probe that
+/// prints the pinned number instead of the measured one can be wrong forever.
+Map<String, Object?> getOption(String name) => <String, Object?>{
+      '@type': 'getOption',
+      'name': name,
+    };
+
 Map<String, Object?> getFile(int fileId) => <String, Object?>{
       '@type': 'getFile',
       'file_id': fileId,
@@ -146,6 +154,45 @@ Map<String, Object?> cancelDownloadFile({
       '@type': 'cancelDownloadFile',
       'file_id': fileId,
       'only_if_pending': onlyIfPending,
+    };
+
+/// How many bytes are available **contiguously starting at [offset]**.
+///
+/// This is the only TDLib call that answers a coverage question at an arbitrary
+/// position. `local.downloaded_prefix_size` only answers it for the beginning
+/// of the file, which is useless once a download started at 500 MB.
+Map<String, Object?> getFileDownloadedPrefixSize({
+  required int fileId,
+  required int offset,
+}) =>
+    <String, Object?>{
+      '@type': 'getFileDownloadedPrefixSize',
+      'file_id': fileId,
+      'offset': offset,
+    };
+
+/// Reads bytes out of TDLib's own file cache. Returns `Data` (base64 on the
+/// JSON bus), and fails when the requested range is not fully local.
+///
+/// Kept because E4 has to compare it against a direct POSIX read of
+/// `local.path`: the answer decides whether the player touches the file itself.
+Map<String, Object?> readFilePart({
+  required int fileId,
+  required int offset,
+  required int count,
+}) =>
+    <String, Object?>{
+      '@type': 'readFilePart',
+      'file_id': fileId,
+      'offset': offset,
+      'count': count,
+    };
+
+/// Drops the cached bytes of one file. Local only: nothing on Telegram's side
+/// is touched, and the file is downloaded again on the next request.
+Map<String, Object?> deleteFile(int fileId) => <String, Object?>{
+      '@type': 'deleteFile',
+      'file_id': fileId,
     };
 
 Map<String, Object?> logOut() => <String, Object?>{'@type': 'logOut'};

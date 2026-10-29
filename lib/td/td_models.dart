@@ -205,6 +205,9 @@ class FileState {
     required this.path,
     required this.canBeDownloaded,
     this.downloadOffset = 0,
+    this.downloadedPrefixSize = 0,
+    this.isDownloadingActive = false,
+    this.canBeDeleted = false,
   });
 
   final int id;
@@ -221,6 +224,21 @@ class FileState {
   /// (offset/limit) download replaces the sequential one.
   final int downloadOffset;
 
+  /// Bytes available from the **beginning of the file**, contiguous.
+  ///
+  /// This is the field a chunk store has to trust, not [downloadedSize]: a
+  /// download of `[500 MB, 501 MB)` leaves `downloadedSize` non-zero while the
+  /// file still has a hole behind it. E1 measures whether this is really a
+  /// contiguous prefix or a count of bytes anywhere in the file.
+  final int downloadedPrefixSize;
+
+  /// True while a transfer for this file is running. TDLib has no "the
+  /// transfer died" event, so a false value here is the only in-band signal
+  /// that the download stopped.
+  final bool isDownloadingActive;
+
+  final bool canBeDeleted;
+
   static FileState fromJson(Map<String, Object?> json) {
     final local = _asMap(json['local']);
     return FileState(
@@ -232,8 +250,17 @@ class FileState {
       path: _asString(local['path']) ?? '',
       canBeDownloaded: _asBool(local['can_be_downloaded']),
       downloadOffset: _asInt(local['download_offset']) ?? 0,
+      downloadedPrefixSize: _asInt(local['downloaded_prefix_size']) ?? 0,
+      isDownloadingActive: _asBool(local['is_downloading_active']),
+      canBeDeleted: _asBool(local['can_be_deleted']),
     );
   }
+
+  /// The subset that changes while a transfer runs, for one-line logging.
+  String get transferLine => 'downloaded=$downloadedSize '
+      'prefix=$downloadedPrefixSize offset=$downloadOffset '
+      'active=${isDownloadingActive ? 1 : 0} '
+      'completed=${isCompleted ? 1 : 0}';
 }
 
 /// Extracts a [FileState] from a `getFile` response.
